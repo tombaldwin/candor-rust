@@ -94,8 +94,12 @@ pub(crate) fn cmd_unverified(args: &[String]) -> i32 {
     };
     let prefix = &prefix;
     let want_json = g.want_json;
+    // ⟨0.42⟩ SPEC §3.4 (c): refuse over a report a switched run produced, `--strict` or not (SOUNDNESS R1634).
+    if let Some(code) = crate::gate::refuse_advisory_under_switches("unverified", prefix, want_json) {
+        return code;
+    }
     let strict = g.strict;
-    let policy_path = g.policy.clone().or_else(|| std::env::var("CANDOR_POLICY").ok());
+    let policy_path = g.policy.clone().or_else(|| candor_report::env::operator("CANDOR_POLICY").ok());
     let Some(pp) = policy_path else {
         eprintln!("candor unverified: a policy is required (the check is relative to your pure/deny layers).");
         return 2;

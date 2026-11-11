@@ -267,8 +267,12 @@ pub(crate) fn cmd_whatif(args: &[String]) -> i32 {
     };
     let prefix = &prefix;
     let want_json = g.want_json;
+    // ⟨0.42⟩ SPEC §3.4 (c): refuse over a report a switched run produced (SOUNDNESS R1634).
+    if let Some(code) = crate::gate::refuse_advisory_under_switches("whatif", prefix, want_json) {
+        return code;
+    }
     // Policy: --policy / deprecated positional (both via `g`), else CANDOR_POLICY.
-    let policy_path: Option<String> = g.policy.clone().or_else(|| std::env::var("CANDOR_POLICY").ok());
+    let policy_path: Option<String> = g.policy.clone().or_else(|| candor_report::env::operator("CANDOR_POLICY").ok());
 
     let cg = load_callgraph(prefix);
     if cg.is_empty() {
@@ -668,6 +672,32 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
         eprintln!("usage: candor-query gate-verdict <parts-file> <out-file|-> [--report <locator>] [--policy <file>]");
         return 2;
     };
+    // ⟨0.42⟩ SPEC §3.4 (c) (SOUNDNESS R1634): when the verdict is assembled over a NAMED report, a report that carries `switches` makes it
+    // unanswerable — the §3.1 refusal document at `out`, exit 2. Only a named `--report` can be judged here: the lint route's wrapper
+    // does not pass one today (see the CHANGELOG residual), and this verb reads no report otherwise.
+    if let Some(loc) = report_loc.as_deref() {
+        let names = candor_report::union_switches(&candor_report::env::consulted_switches(), &crate::gate::switches_at(loc));
+        if !names.is_empty() {
+            let why = candor_report::env::switch_refusal_reason(&names);
+            eprintln!("candor-query gate-verdict: {why}");
+            return match candor_report::gate_switch_refusal_json(&why, &names) {
+                Ok(json) if out == "-" => {
+                    println!("{json}");
+                    2
+                }
+                Ok(json) => {
+                    if let Err(e) = candor_report::write_atomic(std::path::Path::new(out), format!("{json}\n").as_bytes()) {
+                        eprintln!("candor-query gate-verdict: could not write the refusal document to {out} ({e})");
+                    }
+                    2
+                }
+                Err(e) => {
+                    eprintln!("candor-query gate-verdict: could not serialize the refusal document ({e})");
+                    2
+                }
+            };
+        }
+    }
     let mut violations: Vec<candor_report::GateViolation> = Vec::new();
     match std::fs::read_to_string(parts) {
         Ok(text) => {

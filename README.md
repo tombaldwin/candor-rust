@@ -420,6 +420,11 @@ CANDOR_RULES=candor.rules  cargo dylint --lib-path "$LINT"   # extra classifier 
 CANDOR_PARANOID=1          cargo dylint --lib-path "$LINT"   # treat generic trait dispatch as Unknown
 ```
 
+`CANDOR_PARANOID` changes what the lint reports, so it is a *result-moving switch* (SPEC §3.4): the report names it in
+`switches`, and `candor-query gate --report` (and `unverified`, `fix-gate`, `whatif`) refuse over a report that carries
+that key (exit 2). Read the PARANOID report with `candor-query` verbs that answer no `ok` (`where`, `show`, `fix`), or
+re-run without the variable to gate.
+
 Or register it in a project's `Cargo.toml` so plain `cargo dylint` finds it — by local path,
 or **straight from git with no clone** (dylint fetches and builds it against candor's pinned
 toolchain). This is dylint's equivalent of a dependency; dylint loads libraries only from `git` or

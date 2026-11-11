@@ -266,7 +266,7 @@ fn print_refused(refused: &BTreeMap<&'static str, BTreeSet<String>>) {
 /// Does `accepts` have a report to read with no `--report`? `CANDOR_REPORT` counts as named (the operator chose it; the gate's
 /// own wording stays for a locator that matches nothing). Otherwise the discovered prefix must match at least one report file.
 fn report_discoverable() -> bool {
-    if std::env::var("CANDOR_REPORT").is_ok_and(|v| !v.is_empty()) {
+    if candor_report::env::operator("CANDOR_REPORT").is_ok_and(|v| !v.is_empty()) {
         return true;
     }
     discover_report_prefix().is_some_and(|p| !glob_reports(&p).is_empty())
@@ -278,7 +278,7 @@ fn report_discoverable() -> bool {
 /// gate, which judges the CURRENT scan, would then contradict. The policy is discovered as the gate discovers it, so it is
 /// not the missing piece.
 fn no_report_message(policy_flag: Option<&str>) -> String {
-    let base = std::env::var("CANDOR_BASELINE").ok().filter(|s| !s.is_empty()).or_else(|| {
+    let base = candor_report::env::operator("CANDOR_BASELINE").ok().filter(|s| !s.is_empty()).or_else(|| {
         candor_classify::policy::discover_config_text(Path::new(".")).and_then(|t| config_value(&t, "baseline"))
     });
     let cur = ".candor/report";

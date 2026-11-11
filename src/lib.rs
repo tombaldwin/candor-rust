@@ -350,7 +350,7 @@ impl Candor {
         // (Renamed from CANDOR_CONFIG — no fallback: that name now means the spec-§3.4
         // `.candor/config` override path family-wide, and one variable meaning two
         // incompatible things is worse than a clean break.)
-        let extra = match std::env::var("CANDOR_RULES") {
+        let extra = match candor_report::env::operator("CANDOR_RULES") {
             Ok(p) => match std::fs::read_to_string(&p) {
                 Ok(s) => parse_rules(&s),
                 Err(e) => {
@@ -360,13 +360,13 @@ impl Candor {
             },
             Err(_) => Vec::new(),
         };
-        let paranoid = std::env::var("CANDOR_PARANOID").is_ok();
-        let explain = std::env::var("CANDOR_EXPLAIN").ok().filter(|s| !s.is_empty());
+        let paranoid = candor_report::env::switch("CANDOR_PARANOID");
+        let explain = candor_report::env::operator("CANDOR_EXPLAIN").ok().filter(|s| !s.is_empty());
         // A set-but-unreadable CANDOR_POLICY FAILS the run (spec §6.2 MUST): proceeding gateless on
         // a typo'd path is a gate that silently passes everything. Exiting the compiler process is
         // blunt, but it is the only path here that makes `cargo dylint` exit nonzero — a stderr
         // line alone left CI green (the java engine shipped exactly that bug).
-        let parsed_policy = match std::env::var("CANDOR_POLICY") {
+        let parsed_policy = match candor_report::env::operator("CANDOR_POLICY") {
             Ok(p) => match std::fs::read_to_string(&p) {
                 Ok(s) => parse_policy(&s),
                 Err(e) => {
@@ -462,13 +462,13 @@ impl Candor {
             cross_callees: HashMap::new(),
             cross_layer_reach: HashMap::new(),
             reports_prefix: None,
-            taint: std::env::var("CANDOR_TAINT").is_ok(),
+            taint: candor_report::env::operator("CANDOR_TAINT").is_ok(),
             tainted: HashMap::new(),
             unknown_why: HashMap::new(),
             // The wrapper sets this to a fresh sentinel path before an enforcing run; absent/empty
             // means "no machine signal requested" (audit, JSON, or a direct `cargo dylint` invocation).
-            violations_sink: std::env::var("CANDOR_VIOLATIONS").ok().filter(|s| !s.is_empty()),
-            gate_sink: std::env::var("CANDOR_GATE_JSON").ok().filter(|s| !s.is_empty()),
+            violations_sink: candor_report::env::operator("CANDOR_VIOLATIONS").ok().filter(|s| !s.is_empty()),
+            gate_sink: candor_report::env::operator("CANDOR_GATE_JSON").ok().filter(|s| !s.is_empty()),
         }
     }
 
@@ -739,7 +739,7 @@ fn layer_reach_path(prefix: &str, krate: &str, kinds: &str) -> String {
 /// never contains `.`, so the key stays one dot-segment). If the package cannot be read the plain name
 /// is kept, which is the old behaviour rather than a guess.
 fn unit_file_key(crate_name: &str) -> String {
-    unit_file_key_from(crate_name, std::env::var("CARGO_PKG_NAME").ok().as_deref())
+    unit_file_key_from(crate_name, candor_report::env::operator("CARGO_PKG_NAME").ok().as_deref())
 }
 
 fn unit_file_key_from(crate_name: &str, pkg: Option<&str>) -> String {
@@ -4195,11 +4195,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // which write no report of their own: snapshot every workspace crate once, then enforce with the
         // siblings loaded, so a policy boundary (e.g. a host allowlist) sees effects/hosts that physically
         // live in another crate. Live trust applies, exactly like CANDOR_JSON.
-        let (prefix, trust_siblings) = match std::env::var("CANDOR_JSON") {
+        let (prefix, trust_siblings) = match candor_report::env::operator("CANDOR_JSON") {
             Ok(p) => (Some(p), false),
-            Err(_) => match std::env::var("CANDOR_BASELINE") {
+            Err(_) => match candor_report::env::operator("CANDOR_BASELINE") {
                 Ok(p) => (Some(p), true),
-                Err(_) => (std::env::var("CANDOR_REPORTS").ok(), false),
+                Err(_) => (candor_report::env::operator("CANDOR_REPORTS").ok(), false),
             },
         };
         if let Some(prefix) = prefix {
@@ -4543,7 +4543,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
         // Bet 4 spike (CANDOR_MIR=1): run the experimental MIR-based extractor INSTEAD of the HIR
         // analysis and return. Non-production — it exists to gather evidence for a possible core rewrite.
-        if std::env::var("CANDOR_MIR").is_ok() {
+        if candor_report::env::switch("CANDOR_MIR") {
             mir_spike::run(cx.tcx);
             return;
         }
@@ -4654,12 +4654,12 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
             .collect::<Vec<_>>()
             .join("-");
 
-        let strict_var = std::env::var("CANDOR_STRICT").ok();
-        let no_ambient_var = std::env::var("CANDOR_NO_AMBIENT").ok();
-        let json_path = std::env::var("CANDOR_JSON").ok();
+        let strict_var = candor_report::env::operator("CANDOR_STRICT").ok();
+        let no_ambient_var = candor_report::env::operator("CANDOR_NO_AMBIENT").ok();
+        let json_path = candor_report::env::operator("CANDOR_JSON").ok();
         // A set-but-unloadable CANDOR_BASELINE is the dangerous case: the guard would
         // silently pass (no AS-EFF-005 ever fires). Make that loud.
-        let baseline = match std::env::var("CANDOR_BASELINE") {
+        let baseline = match candor_report::env::operator("CANDOR_BASELINE") {
             Ok(prefix) => {
                 let file = format!("{prefix}.{krate}.{kinds}.json");
                 let loaded = load_baseline(&file);
@@ -4682,7 +4682,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // ⟨0.40⟩ (SOUNDNESS R932/R811) — the baseline's callgraph sidecar, read ONLY to label an
         // AS-EFF-005 row's `origin` (⟨0.12⟩): `Some(nodes)` when present and parseable, `None` when absent.
         // A PRESENT-but-corrupt sidecar fails closed exactly like an unloadable baseline.
-        let baseline_nodes: Option<BTreeSet<String>> = match (&baseline, std::env::var("CANDOR_BASELINE")) {
+        let baseline_nodes: Option<BTreeSet<String>> = match (&baseline, candor_report::env::operator("CANDOR_BASELINE")) {
             (Some(_), Ok(prefix)) => {
                 let cg = format!("{prefix}.{krate}.{kinds}.callgraph.json");
                 if std::path::Path::new(&cg).is_file() {
@@ -5022,7 +5022,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                                 Some(_) => "new",
                                 None => "unknown",
                             };
-                            let prefix = std::env::var("CANDOR_BASELINE").unwrap_or_default();
+                            let prefix = candor_report::env::operator("CANDOR_BASELINE").unwrap_or_default();
                             let detail = format!(
                                 "`{name}` is ABSENT FROM THE BASELINE and performs {{ {} }} — compared against \
                                  nothing (⟨0.40⟩: no function is exempt). New code, or a function whose key \
@@ -5205,7 +5205,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         }
 
         // ── the §3.3 gate verdict (CANDOR_GATE_JSON) — see write_gate_verdict ─────────────────
-        let guard_unavailable = baseline.is_none() && std::env::var("CANDOR_BASELINE").is_ok();
+        let guard_unavailable = baseline.is_none() && candor_report::env::operator("CANDOR_BASELINE").is_ok();
         self.write_gate_verdict(guard_unavailable);
 
         // LAST, on the normal path only: this unit's report, violations and gate parts are on disk. A
@@ -5226,7 +5226,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
 /// fail-closed direction. A no-op when the variable is unset or empty.
 fn record_unit_completed(cx: &LateContext<'_>) {
     use std::io::Write;
-    let Some(path) = std::env::var("CANDOR_COMPLETED").ok().filter(|s| !s.is_empty()) else { return };
+    let Some(path) = candor_report::env::operator("CANDOR_COMPLETED").ok().filter(|s| !s.is_empty()) else { return };
     let krate = unit_file_key(cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str());
     let kinds: String = cx.tcx.crate_types().iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join("-");
     let root = cx

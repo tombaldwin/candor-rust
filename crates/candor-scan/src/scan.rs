@@ -238,7 +238,7 @@ fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> 
     }
     for (var, label) in [("CANDOR_POLICY", "CANDOR_POLICY"), ("CANDOR_BASELINE", "CANDOR_BASELINE"),
                          ("CANDOR_CONFIG", "CANDOR_CONFIG")] {
-        if let Ok(v) = std::env::var(var) {
+        if let Ok(v) = candor_report::env::operator(var) {
             if !v.is_empty() {
                 // A BASELINE VALUE IS A NAME FOR A SET OF FILES, and only the raw string was registered.
                 // `check_baseline` resolves a non-file value to `<value>.<crate>.scan.json` and reads
@@ -256,7 +256,7 @@ fn run_inputs(target: &str, policy_flag: Option<&str>) -> Vec<(String, String)> 
             }
         }
     }
-    if let Ok(d) = std::env::var("CANDOR_DEPS") {
+    if let Ok(d) = candor_report::env::operator("CANDOR_DEPS") {
         // THE SAME SET THE LOADER USES — `crate::deps::DEP_SEPARATORS`. This comment claimed that
         // while spelling a DIFFERENT set: it omitted `\n` and `\r`, so a newline-separated
         // `CANDOR_DEPS` was ONE unresolvable token here and two real paths in the loader. A
@@ -461,6 +461,22 @@ fn refuse_gate_json_at_config(gate: &str) {
     eprintln!("        armed before the config is read, so this would destroy the config that configures");
     eprintln!("        this run. Nothing was written; give the verdict its own path.");
     std::process::exit(2);
+}
+
+/// SOUNDNESS R1634 — THE FAULT-INJECTION HOOK IS COMPILED OUT OF THE RELEASED BINARY. `CANDOR_PANIC_ON_FILE=<rel>` made the walk of that file
+/// panic so the containment above has a deterministic test; it is a result-moving variable by SPEC §3.4's definition (the file becomes
+/// `unanalyzed` and the gate exits 2), and only the in-process unit tests ever set it. SPEC §3.4 lets an engine that "compiles its switches out of
+/// the released artifact" conform trivially, so the hook exists in the test build only and the released scanner has no such switch to name.
+/// It deliberately does NOT go through `candor_report::env`: its only caller is a unit test that sets it process-wide, and a registry
+/// entry there would mark every later report in that process as switched (and stop the incremental cache storing). The source gate
+/// (`tests/env_lint.rs`) skips `#[cfg(test)]` items, which is what makes this read legal and the release read impossible.
+#[cfg(test)]
+fn injected_fault_for(rel: &str) -> bool {
+    std::env::var("CANDOR_PANIC_ON_FILE").is_ok_and(|v| v == rel)
+}
+#[cfg(not(test))]
+fn injected_fault_for(_rel: &str) -> bool {
+    false
 }
 
 pub(crate) fn scan_main() {
@@ -928,7 +944,7 @@ pub(crate) fn scan_main() {
     // The policy source is resolved HERE, once (flag wins, CANDOR_POLICY env next, the config file as the
     // floor) — never inside scan_one, so --deps dependency scans can't inherit the root gate via the env.
     let policy = policy_path
-        .or_else(|| std::env::var("CANDOR_POLICY").ok())
+        .or_else(|| candor_report::env::operator("CANDOR_POLICY").ok())
         .or_else(|| cfg.get("policy").cloned());
     // The AS-EFF-005 baseline (spec §7 item 5), resolved once like the policy: CANDOR_BASELINE env
     // over the config `baseline` key (already home-anchored by load_candor_config). Dependency scans
@@ -938,8 +954,8 @@ pub(crate) fn scan_main() {
     // ratchet is not adopted yet"; a checked-in `baseline` line DECLARES this repo has one, so an absent
     // path there was deleted or never committed — and passing green over it is a gate that stopped
     // gating in silence.
-    let _ = crate::gate::BASELINE_FROM_CONFIG.set(std::env::var("CANDOR_BASELINE").is_err() && cfg.contains_key("baseline"));
-    let baseline = std::env::var("CANDOR_BASELINE").ok().or_else(|| cfg.get("baseline").cloned());
+    let _ = crate::gate::BASELINE_FROM_CONFIG.set(candor_report::env::operator("CANDOR_BASELINE").is_err() && cfg.contains_key("baseline"));
+    let baseline = candor_report::env::operator("CANDOR_BASELINE").ok().or_else(|| cfg.get("baseline").cloned());
     // ⟨unknown-ratchet⟩ OPT-IN on the AS-EFF-005 guard (config `unknown-ratchet` / CANDOR_UNKNOWN_RATCHET,
     // default OFF): when ON, a NEWLY-introduced Unknown vs the baseline FAILS instead of staying advisory —
     // making `deny Unknown` adoptable on legacy code. Resolved once here (env presence wins, else the config
@@ -954,10 +970,14 @@ pub(crate) fn scan_main() {
     // the machine channel from the release's flagship guard. Anything that can exit must come after the
     // verdict is armed fail-closed.
     enforce_engine_pin(&dir);
+    // ⟨0.42⟩ does this run HAVE a gate? A policy or a baseline asks a question; a bare scan asks none (SPEC §3.4 (c)).
+    let gating = policy.is_some() || baseline.is_some();
     if deps_mode {
         let code = run_with_deps(&dir, prefix, want_json, include_tests, policy, baseline, &run_tok);
         // ⟨0.41⟩ settle the whole run's `accept` entries (a no-op without any).
         let code = crate::gate::finalize_accept(code, want_json, &run_tok);
+        // ⟨0.42⟩ SPEC §3.3 cause (e): a gate under a set result-moving switch is unanswerable.
+        let code = crate::gate::refuse_under_switches(code, gating);
         // ⟨0.28⟩ the run finished writing: hand back any armed report it turned out not to own.
         crate::gate::disarm_unwritten_out_reports();
         write_gate_json(code);
@@ -972,7 +992,7 @@ pub(crate) fn scan_main() {
     // list of files and/or directories of *.json); an unclassified qualified call into a crate one
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
-    let deps_spec = std::env::var("CANDOR_DEPS").ok().or_else(|| cfg.get("deps").cloned());
+    let deps_spec = candor_report::env::operator("CANDOR_DEPS").ok().or_else(|| cfg.get("deps").cloned());
     let deps_idx = load_dep_reports(deps_spec.as_deref());
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
@@ -980,6 +1000,8 @@ pub(crate) fn scan_main() {
     // ⟨0.41⟩ SPEC §6.2 `accept`: the AUTHORITATIVE settlement, over every member's rows at once (a no-op without
     // an entry). Stale entries and cross-member twins can only be seen here, and only ever make the run redder.
     let code = crate::gate::finalize_accept(code, want_json, &run_tok);
+    // ⟨0.42⟩ SPEC §3.3 cause (e): a gate under a set result-moving switch is unanswerable.
+    let code = crate::gate::refuse_under_switches(code, gating);
     // ⟨0.28⟩ the run finished writing: hand back any armed report it turned out not to own.
     crate::gate::disarm_unwritten_out_reports();
     write_gate_json(code);
@@ -1062,7 +1084,7 @@ fn r1578_type(
     let leaf = ty.rsplit("::").next().unwrap_or(&ty);
     let twin = returns.contains_key(&crate::model::nominal_key(leaf));
     let path = format!("{cr}::{ty}::{method}");
-    if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+    if candor_report::env::trace("CANDOR_R1578_INSTR") {
         eprintln!("R1578TYPED\t{}\t{path}\ttwin={twin}\t{}", c.path, c.prov.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
     }
     Some((Call { path, leaf: method, typed: true, method: true, dot: true, ..c.clone() }, twin))
@@ -1083,7 +1105,7 @@ fn r1605_chain_type(
     dir: &str,
     sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
 ) -> Option<(Call, bool)> {
-    if std::env::var_os("CANDOR_R1605_OFF").is_some() {
+    if candor_report::env::switch("CANDOR_R1605_OFF") {
         return None;
     }
     let (cr, rest) = c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::"))?;
@@ -1115,7 +1137,7 @@ fn r1605_chain_type(
     let base = cur.as_str();
     sigs_b.note_typed(cr);
     let path = format!("{cr}::{base}::{method}");
-    if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+    if candor_report::env::trace("CANDOR_R1605_INSTR") {
         eprintln!("R1605STEP\t{}\t{path}", c.path); // §E1 REACH COUNTER
     }
     Some((Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() }, false))
@@ -1136,7 +1158,7 @@ fn r1617_chain_type(
     dir: &str,
     sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
 ) -> Option<(Call, bool)> {
-    if std::env::var_os("CANDOR_R1617H_OFF").is_some() {
+    if candor_report::env::switch("CANDOR_R1617H_OFF") {
         return None;
     }
     c.prov.as_ref()?;
@@ -1146,7 +1168,7 @@ fn r1617_chain_type(
     sigs.borrow_mut().note_typed(&cr);
     let ty = r1619_public(&cr, renames, dir, sigs, ty, &method);
     let path = format!("{cr}::{ty}::{method}");
-    if std::env::var_os("CANDOR_R1617_INSTR").is_some() {
+    if candor_report::env::trace("CANDOR_R1617_INSTR") {
         eprintln!("R1617CHAIN\t{}\t{path}\t{}", c.path, c.prov.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
     }
     Some((Call { path, leaf: method, typed: true, method: true, dot: true, prov: None, ..c.clone() }, false))
@@ -1167,7 +1189,7 @@ fn r1619_public(
     ty: String,
     method: &str,
 ) -> String {
-    if std::env::var_os("CANDOR_R1619_OFF").is_some() {
+    if candor_report::env::switch("CANDOR_R1619_OFF") {
         return ty;
     }
     let cr_real: &str = renames.get(cr).map(String::as_str).unwrap_or(cr);
@@ -1176,7 +1198,7 @@ fn r1619_public(
     }
     let Some(p) = sigs.borrow_mut().public_qual(dir, cr, cr_real, &ty) else { return ty };
     if candor_classify::classify(cr_real, &format!("{cr_real}::{p}::{method}")).is_some() {
-        if std::env::var_os("CANDOR_R1619_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1619_INSTR") {
             eprintln!("R1619PUB\t{cr}::{ty}::{method}\t{cr}::{p}::{method}"); // §E1 REACH COUNTER
         }
         return p;
@@ -1203,7 +1225,7 @@ pub(crate) fn r1578_resolve(
     sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
 ) -> Option<R1578> {
     use crate::depsig::RetTy;
-    if std::env::var_os("CANDOR_R1578_OFF").is_some() {
+    if candor_report::env::switch("CANDOR_R1578_OFF") {
         return None;
     }
     let (cr, rest) = c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::"))?;
@@ -1236,7 +1258,7 @@ pub(crate) fn r1578_resolve(
             }
             // SOUNDNESS R1619 — `Result::ok` (std's inherent `fn ok(self) -> Option<T>`, the first probe step on an owned
             // `Result`): the value is unchanged, its wrapper becomes `Option` (`cfg.create_pool(..).ok()?`)
-            "m:ok" if !is_async && wraps.first() == Some(&'R') && std::env::var_os("CANDOR_R1619_OFF").is_none() => {
+            "m:ok" if !is_async && wraps.first() == Some(&'R') && !candor_report::env::switch("CANDOR_R1619_OFF") => {
                 wraps[0] = 'O';
             }
             m if m.starts_with("m:") && !is_async && wraps.is_empty() => {
@@ -1309,7 +1331,7 @@ fn build_type_surface(
         if !nonpure.contains(tp.as_str()) {
             if nonpure.iter().any(|q| q.rsplit("::").next() == tp.rsplit("::").next()) {
                 near_misses += 1; // same type LEAF, different module — the case that MUST not resolve
-                if std::env::var_os("CANDOR_TYPESURFACE_DEBUG").is_some() { eprintln!("TSNEAR\t{}\t{tp}", f.qual); }
+                if candor_report::env::trace("CANDOR_TYPESURFACE_DEBUG") { eprintln!("TSNEAR\t{}\t{tp}", f.qual); }
             }
             continue;
         }
@@ -1333,7 +1355,7 @@ fn build_type_surface(
     }
     // The COUNTS are the diagnostic, not the output — a bound that admits nothing on a real modular
     // crate is a keying bug, and it is invisible in a diff (standing bar item 8).
-    if std::env::var("CANDOR_TYPESURFACE_DEBUG").is_ok() {
+    if candor_report::env::trace("CANDOR_TYPESURFACE_DEBUG") {
         let bound: usize = fns.iter().filter(|f| f.ret_bound_type.is_some()).count();
         eprintln!(
             "TYPESURFACE {crate_name}: fns={} bound_returns={bound} nonpure_type_quals={} \
@@ -1490,7 +1512,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // substring mark that matches both reports the whole walk as the change's reach (measured
             // on R460, where `R460MASK` swallowed `R460MASKNAMING` and read 409 for 217).
             if verdict.is_some_and(|v| v != stem_says_test)
-                && std::env::var("CANDOR_TESTMOD_DEBUG").is_ok()
+                && candor_report::env::trace("CANDOR_TESTMOD_DEBUG")
             {
                 eprintln!("R459MOVE {} {}",
                           if verdict == Some(true) { "now-excluded" } else { "now-scanned" },
@@ -1766,10 +1788,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     }
     // SOUNDNESS R1483 — an alias CHAIN (`type A1 = A0; type A0 = R;`) recorded one hop per entry, so `A1` expanded
     // to `A0` and named nothing. Chased to its end here, once the map is crate-wide; see `chase_alias_chains`.
-    let r1483 = std::env::var_os("CANDOR_R1483_OFF").is_none();
+    let r1483 = !candor_report::env::switch("CANDOR_R1483_OFF");
     // SOUNDNESS R1489 — the crate's nominal type quals, for a MIXED `#[cfg]` twin (an alias in one arm, a struct in the
     // other). See `add_nominal_twin_arms`. Empty under the kill switch, which reproduces the pre-R1489 map exactly.
-    let nominal_quals: HashSet<String> = if std::env::var_os("CANDOR_R1489_OFF").is_none() {
+    let nominal_quals: HashSet<String> = if !candor_report::env::switch("CANDOR_R1489_OFF") {
         decls_per_file
             .iter()
             .flat_map(|(_, _, fd)| fd.ts.types.iter())
@@ -1867,12 +1889,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // file's own facts (before the expansion) and re-filed as the written `Box<dyn Tw>` files them: the field into
         // `trait_fields` / `dyn_trait_fields` (out of `fields`), the return as the `<dyn>` sentinel. A key the merge
         // withdrew (`None`) stays withdrawn.
-        if std::env::var_os("CANDOR_R1495_OFF").is_none() {
+        if !candor_report::env::switch("CANDOR_R1495_OFF") {
             for (_, _, fd) in &decls_per_file {
                 for (st, fm) in &fd.fields {
                     for (f, t) in fm {
                         let Some(l) = crate::lang::dyn_alias_leaves_str(t) else { continue };
-                        if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1495_INSTR").is_some() {
+                        if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1495_INSTR") {
                             eprintln!("R1495FIELD\t{st}.{f}\t{t}"); // §E1 REACH COUNTER
                         }
                         if let Some(m) = merged.fields.get_mut(st) {
@@ -1889,7 +1911,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if !matches!(merged.rets.get(k), Some(Some(_))) {
                         continue;
                     }
-                    if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1495_INSTR").is_some() {
+                    if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1495_INSTR") {
                         eprintln!("R1495RET\t{k}\t{}", v.as_deref().unwrap_or("")); // §E1 REACH COUNTER
                     }
                     if k.starts_with('<') {
@@ -1925,7 +1947,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
         for (k, m, e) in joined {
-            if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R529_INSTR") {
                 eprintln!("R529CJOIN\t{k}"); // §E1 REACH PROBE
             }
             merged.fields.insert(k.clone(), m);
@@ -2037,7 +2059,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         adds.dedup();
         for (k, v) in adds {
             if let std::collections::hash_map::Entry::Vacant(slot) = returns.entry(k) {
-                if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_R186_DEBUG") {
                     eprintln!("R1025ALIASFACT {}", slot.key()); // §E1 REACH COUNTER
                 }
                 slot.insert(v);
@@ -2062,7 +2084,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let (Some(tr), Some(ty), Some(p)) = (it.next(), it.next(), it.next()) else { continue };
             let Some(path) = p.strip_prefix('!') else { continue };
             let Some((root, _)) = path.split_once("::") else { continue };
-            if std::env::var_os("CANDOR_R1605_OFF").is_none()
+            if !candor_report::env::switch("CANDOR_R1605_OFF")
                 && manifest_deps.contains(root)
                 && R1605_TRAITS.iter().any(|(c, t)| *c == root && *t == tr)
             {
@@ -2093,7 +2115,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             for (tr, alias) in trs {
                 let real = renames.get(alias).cloned().unwrap_or_else(|| alias.clone());
                 let Some((_, rets)) = r1578_sigs.borrow_mut().trait_assoc_rets(dir, alias, &real, tr) else {
-                    if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1605_INSTR") {
                         eprintln!("R1605NOSRC\t{ty}\t{alias}::{tr}"); // §E1 — no lock-pinned source: the marker discloses
                     }
                     continue;
@@ -2112,7 +2134,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     {
                         continue;
                     }
-                    if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1605_INSTR") {
                         eprintln!("R1605SEED\t{ty}::{m}\t{alias}::{q}"); // §E1 REACH COUNTER
                     }
                     r1578_sigs.borrow_mut().note_typed(alias);
@@ -2125,7 +2147,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // by a local trait whose supertraits reach it (`trait Auditable: EntityTrait`), keyed by the bound's leaf. Filed
         // whenever the crate declares the dependency; the members' returns only where the lock-pinned source was read. A
         // crate that declares a trait of the same leaf itself is left alone (its bound names that one).
-        if std::env::var_os("CANDOR_R1605_OFF").is_none() {
+        if !candor_report::env::switch("CANDOR_R1605_OFF") {
             for (cr, tl) in R1605_TRAITS {
                 if !manifest_deps.contains(*cr) || merged.trait_decls.contains_key(*tl) {
                     continue;
@@ -2156,7 +2178,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if r.is_async || !r.wraps.is_empty() || merged.trait_decls.get(l).is_some_and(|t| t.assoc.contains(m) || t.methods.contains(m)) {
                             continue;
                         }
-                        if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1605_INSTR") {
                             eprintln!("R1605SEED\t<{l}>::{m}\t{cr}::{q}"); // §E1 REACH COUNTER
                         }
                         returns.insert(crate::model::r1605_trait_ret_key(l, m), format!("{cr}::{q}"));
@@ -2184,7 +2206,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let real = renames.get(&cr).cloned().unwrap_or_else(|| cr.clone());
                 let steps = r1578_sigs.borrow_mut().step_map(dir, &cr, &real, &leaf);
                 let enc: Vec<String> = steps.iter().map(|(m, t)| format!("{m}={cr}::{t}")).collect();
-                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1605_INSTR") {
                     eprintln!("R1606STEPS\t{cr}::{q}\t{}", enc.len()); // §E1
                 }
                 for (_, t) in &steps {
@@ -2210,7 +2232,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if returns.contains_key(&k) || returns.contains_key(&crate::model::impl_self_ret_key(&r.alias, m)) {
                     continue;
                 }
-                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1605_INSTR") {
                     eprintln!("R1605SEED\t{}::{m}\t{v}\talias-of={ty}", r.alias); // §E1 REACH COUNTER
                 }
                 returns.insert(k, v.clone());
@@ -2308,7 +2330,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // WITHDRAWS a candidate that `drop_types` would have accepted, which is precisely the charge
         // this row removes. An unchanged corpus row is not evidence the code ran.
         let withdrew = |t: &str, field: &str, ty: &str| {
-            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG")
                 && merged.drop_types.contains(ty.rsplit("::").next().unwrap_or(ty))
             {
                 eprintln!("R718BORROW {t}.{field} {ty}");
@@ -2681,7 +2703,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // crate's parse state and does not reduce to a fixture, and a containment nobody can fire is a
             // containment nobody has checked — the same reason the syscall oracle is calibrated with a
             // seeded violation rather than trusted because it reported none.
-            if std::env::var("CANDOR_PANIC_ON_FILE").is_ok_and(|v| v == *rel) {
+            if injected_fault_for(rel) {
                 panic!("CANDOR_PANIC_ON_FILE: injected fault while walking {rel}");
             }
             let mut out: Vec<FnInfo> = Vec::new();
@@ -2727,7 +2749,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // The write is SKIPPED entirely when nothing changed — every file's decls came from cache AND already
     // recorded this decl_index_hash AND no file was added/removed — so a no-edit re-scan does zero writes.
     // Best-effort: a cache write failure never affects the report (it only costs a re-derivation later).
-    if incremental {
+    //
+    // ⟨0.42⟩ SOUNDNESS R1634 — **A RUN THAT CONSULTED A RESULT-MOVING SWITCH STORES NOTHING.** The entries below are the Pass A decls and
+    // Pass B FnInfos this run derived, and a switch selects which logic derived them: written, they would be REPLAYED by the next
+    // `--incremental` run with the variable unset, whose report would then carry the switched rows and name no switch — the
+    // cache-replay hole candor-java closed for `CANDOR_REFRESH`. Every read that could have shaped an entry has already executed
+    // (the derivation above is finished and what follows is the uncached classify stage), so the set is complete for this purpose.
+    // READING the cache under a switch is unaffected: a replayed entry is the unswitched answer, which a switched run is allowed to
+    // be (the read never executed, so nothing was consulted).
+    if incremental && candor_report::env::consulted_switches().is_empty() {
         let unchanged = fresh_fninfos.is_empty()
             && prior.is_empty() // every prior entry was consumed by a current file → none deleted
             && decls_per_file.iter().all(|(rel, _, _)| disk_decl_hash.get(rel) == Some(&decl_index_hash));
@@ -2775,7 +2805,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // ⟨0.40⟩ the per-file `use` paths (the in-scope-trait question) and the reach probe.
     let file_uses: HashMap<&str, &[String]> =
         decls_per_file.iter().map(|(rel, _, fd)| (rel.as_str(), fd.ts.uses.as_slice())).collect();
-    let r843_probe = std::env::var_os("CANDOR_R843_PROBE").is_some();
+    let r843_probe = candor_report::env::trace("CANDOR_R843_PROBE");
     // ⟨0.40⟩ this crate's own trait declarations, by module-qualified path — row 1 must not read an import of
     // one of them as a chained trait in scope (see `typesurf::in_scope_publishes`).
     let local_trait_quals: Vec<&str> = merged.trait_quals.values().flatten().map(String::as_str).collect();
@@ -2784,14 +2814,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         .iter()
         .map(|(rel, _, fd)| (rel.as_str(), fd.trait_quals.keys().map(String::as_str).collect()))
         .collect();
-    let r1202_off = std::env::var_os("CANDOR_R1202_OFF").is_some();
+    let r1202_off = candor_report::env::switch("CANDOR_R1202_OFF");
     // SOUNDNESS R1202 — each unit's receiver rank (`FnInfo::recv_rank`), for the local-trait-vs-local-inherent contest.
     let r1202_rank: HashMap<String, u8> = fns.iter().filter(|f| f.recv_rank > 0).map(|f| (f.qual.clone(), f.recv_rank)).collect();
-    let r1202_probe = std::env::var_os("CANDOR_R1202_PROBE").is_some();
+    let r1202_probe = candor_report::env::trace("CANDOR_R1202_PROBE");
     // SOUNDNESS R1207 / R1208 / R1209 — falsification switches for the three halves below, and R1207's measurement
     // switch (`CANDOR_R1207_NOFORM`: hedge without the receiver-form exemption, to price it).
-    let r1207_off = std::env::var_os("CANDOR_R1207_OFF").is_some();
-    let r1207_noform = std::env::var_os("CANDOR_R1207_NOFORM").is_some();
+    let r1207_off = candor_report::env::switch("CANDOR_R1207_OFF");
+    let r1207_noform = candor_report::env::switch("CANDOR_R1207_NOFORM");
     // SOUNDNESS R1207 — the POSTURE. A scan that chains reports has declared its dependency universe, and a package it
     // imports and could not read is a hole in it: `Unknown`, as R1202 already answers a dependency receiver (whose rule
     // can only fire in a chained scan). A STANDALONE scan (nothing chained) adds NOTHING, as 0.40.12 did. Priced
@@ -2806,9 +2836,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // "a mechanism that makes reports better must not make silence cheaper" (R764's shape), so the standalone ledger
     // is OFF; the standalone half of R1207 is the stated residual. `CANDOR_R1207_HEDGE=1` forces `Unknown` (and its ledger
     // entry) in a standalone scan too, to price it.
-    let r1207_hedge = !deps_idx.crates.is_empty() || std::env::var_os("CANDOR_R1207_HEDGE").is_some();
-    let r1208_off = std::env::var_os("CANDOR_R1208_OFF").is_some();
-    let r1209_off = std::env::var_os("CANDOR_R1209_OFF").is_some();
+    let r1207_hedge = !deps_idx.crates.is_empty() || candor_report::env::switch("CANDOR_R1207_HEDGE");
+    let r1208_off = candor_report::env::switch("CANDOR_R1208_OFF");
+    let r1209_off = candor_report::env::switch("CANDOR_R1209_OFF");
     // ⟨0.40⟩ SOUNDNESS R888 — this crate's own `Deref` impls whose target is a DEPENDENCY's type.
     let foreign_derefs = {
         let files: Vec<&crate::typesurf::FileSurface> = decls_per_file.iter().map(|(_, _, fd)| &fd.ts).collect();
@@ -3055,7 +3085,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if free.is_empty() || free.len() == v.len() {
                     (leaf.clone(), v.clone())
                 } else {
-                    if std::env::var_os("CANDOR_R1265_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1265_INSTR") {
                         eprintln!("R1265LEAF\t{leaf}\t{}\t{}", v.len(), free.len()); // §E1 REACH COUNTER
                     }
                     (leaf.clone(), free)
@@ -3126,7 +3156,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         for (k, v) in adds {
             if let std::collections::hash_map::Entry::Vacant(slot) = by_tail2.entry(k) {
-                if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_R186_DEBUG") {
                     eprintln!("VEINAALIASIMPL {} -> {}", slot.key(), v.join(",")); // §E1 REACH COUNTER
                 }
                 slot.insert(v);
@@ -3148,7 +3178,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1649 — t2 -> (unit qual, trait leaf) of an `impl Tr for &T` / `&mut T` (module-keyed, R1034) whose tail
     // `T::m` is ALREADY claimed by another impl, so the fallback below does not file it. Read at the typed call site.
     let mut r1649_ref: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let r1649_off = std::env::var_os("CANDOR_R1649_OFF").is_some();
+    let r1649_off = candor_report::env::switch("CANDOR_R1649_OFF");
     {
         let have: HashSet<&str> = fns.iter().filter(|f| !f.extern_decl && !f.reexport_alias).map(|f| f.qual.as_str()).collect();
         let mut adds: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -3181,7 +3211,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
         for (t2, v) in adds {
-            if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1034_INSTR") {
                 eprintln!("R1034RECV\t{t2}\t{}", v.join(",")); // §E1 REACH PROBE
             }
             nonpath_tails.insert(t2.clone());
@@ -3219,7 +3249,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // tail is exactly `{glob root}#{Trait}::{member}`, so it joins here and nowhere on the wire (see
         // `lang::collect_glob_foreign_impls`). Only for a real manifest dependency, and never for a leaf this crate
         // declares a trait of (a local glob's trait is local). `CANDOR_R1345_OFF=1` disables it.
-        if std::env::var_os("CANDOR_R1345_OFF").is_none() {
+        if !candor_report::env::switch("CANDOR_R1345_OFF") {
             for g in &merged.glob_impl_foreign {
                 let Some((k, q)) = g.split_once('\u{1f}') else { continue };
                 let Some((owner, member)) = k.split_once('#') else { continue };
@@ -3301,7 +3331,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1607 — VEIN C's map for an UNCHAINED dependency too: a local type's impls of any declared dependency's trait.
     let r1607_dep_traits_by_ty: HashMap<String, Vec<(String, String)>> = {
         let mut m: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        if std::env::var_os("CANDOR_R1607_OFF").is_none() {
+        if !candor_report::env::switch("CANDOR_R1607_OFF") {
             for k in &merged.impl_members {
                 let mut it = k.splitn(3, '\u{1f}');
                 let (Some(tr), Some(ty), Some(p)) = (it.next(), it.next(), it.next()) else { continue };
@@ -3524,7 +3554,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             u.untyped_methods = Vec::new();
             u.has_self = false;
             u.reexport_alias = true;
-            if std::env::var_os("CANDOR_R959_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R959_INSTR") {
                 eprintln!("R959ALIAS\t{}\t{}", u.qual, first.qual);
             }
             add.push(u);
@@ -3549,7 +3579,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // Never published: the report spells the edge as the default it instantiates. `CANDOR_CT3A_OFF=1` disables it.
     // SOUNDNESS R1420(a) — §E1 CENSUS: every unit qual two or more Pass-B bodies share (a merged unit), with each body's
     // location, so the identity merge's reach is MEASURED (R1420 (b)(c), R1342, the `Box<dyn X>` face) rather than guessed.
-    if std::env::var_os("CANDOR_CT3_CENSUS").is_some() {
+    if candor_report::env::trace("CANDOR_CT3_CENSUS") {
         let mut by_q: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for f in fns.iter().filter(|f| !f.extern_decl && !f.reexport_alias && !f.derive_synth && !f.mbe_prim_op) {
             by_q.entry(f.qual.as_str()).or_default().push(f.loc.as_str());
@@ -3559,7 +3589,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
     }
     let mut default_inst: HashMap<(String, String), String> = HashMap::new();
-    if std::env::var_os("CANDOR_CT3A_OFF").is_none() {
+    if !candor_report::env::switch("CANDOR_CT3A_OFF") {
         let mut qcount: HashMap<&str, usize> = HashMap::new();
         for f in &fns {
             *qcount.entry(f.qual.as_str()).or_default() += 1;
@@ -3721,7 +3751,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             candor_classify::calibration_exceeded(real, v)
                 || candor_classify::calibration_exceeded(cr.as_str(), v)
         });
-        if beyond_review && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+        if beyond_review && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
             // INSTRUMENTED: an unchanged corpus row is not evidence the branch ran.
             eprintln!(
                 "R311CEILING {} resolved {} exceeds its reviewed ceiling",
@@ -3845,7 +3875,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // that runs. A receiver an `R1605_TRAITS` implementor's member produced is a dependency's value, so the caller
             // discloses `Unknown` with the untyped-receiver reason the chained arm uses. Never a charge.
             if c.path.starts_with(&format!("{}::", crate::model::R1605_UNTYPED)) {
-                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1605_INSTR") {
                     eprintln!("R1605FLOOR\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER (generic bound)
                 }
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -3863,7 +3893,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if let [.., ty, _m] = segs.as_slice() {
                             let real = r1605_aliases.get(*ty).map(String::as_str).unwrap_or(ty);
                             if r1605_ty_traits.contains_key(real) {
-                                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R1605_INSTR") {
                                     eprintln!("R1605FLOOR\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
                                 }
                                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -3909,7 +3939,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // whose self-edge is then dropped and whose `resolved_local` suppresses every disclosure.
             // Same answer the item-level `extern` block has always produced: `Unknown`, `native:extern fn`.
             if !c.is_macro && c.path.starts_with(crate::decls::EXTERN_SENTINEL) {
-                if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_VEINE_INSTR") {
                     eprintln!("VEINE_EXTERNCALL\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
                 }
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -3923,7 +3953,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if let Some((wcr, rest)) = c.path.split_once(&format!("::{WITNESS_MARKER}::")) {
                 let wcr_real: &str = dep_renames.get(wcr).map(String::as_str).unwrap_or(wcr);
                 // `CANDOR_R1165_OFF` is the falsification switch (the fixtures' 0.40.9 behaviour), never a user setting.
-                if deps_idx.crates.contains(wcr_real) && std::env::var_os("CANDOR_R1165_OFF").is_none() {
+                if deps_idx.crates.contains(wcr_real) && !candor_report::env::switch("CANDOR_R1165_OFF") {
                     let mut it = rest.splitn(3, "::");
                     // SOUNDNESS R1200 — a position written `<n>m` is a METHOD-CALL site; `depsig` is told so by a `.` before the
                     // callee (`.Foo::m`), since method resolution may run a trait method out of the dependency's sight there.
@@ -3934,7 +3964,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if let (Some(l), Some(pos), Some(callee)) = (l, pos, callee) {
                         // SOUNDNESS R1186 — a local conversion taking the argument is judged on its own list.
                         if let Some(src) = l.strip_prefix(crate::model::FROM_WITNESS_PREFIX) {
-                            if std::env::var_os("CANDOR_R1186_OFF").is_none() {
+                            if !candor_report::env::switch("CANDOR_R1186_OFF") {
                                 from_sites.push((f.qual.clone(), wcr.to_string(), wcr_real.to_string(), src.to_string(), pos, callee));
                             }
                         } else {
@@ -3986,7 +4016,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // `CANDOR_TYPESURFACE_DEBUG` above): a report diff cannot show that this branch never
                 // fired, and a byte-identical A/B over a corpus that never reaches it is the most
                 // flattering number available.
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!(
                         "ALIASCOLLIDE {} :: {} -> {}",
                         f.qual,
@@ -4143,7 +4173,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             rows = crate::typesurf::join_through(deps_idx, &start, member, false).0;
                         }
                     }
-                    if !rows.is_empty() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                    if !rows.is_empty() && candor_report::env::trace("CANDOR_V053_INSTR") {
                         eprintln!("R1153ARMJOIN\t{}\t{alt}", f.qual); // §E1 REACH COUNTER
                     }
                     for de in rows {
@@ -4193,7 +4223,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             .or_else(|| {
                                 let t = crate::collector::arm_exact_target(alt, &by_tail2)?;
                                 // §E1 REACH COUNTER, on the CHANGED branch.
-                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                     eprintln!("R440ARM");
                                 }
                                 Some(vec![t.clone()])
@@ -4205,7 +4235,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 // the arm set and actually gaining an edge from it are two facts, and a
                                 // fix that reaches everything and gains nothing is inert in the way that
                                 // looks like success.
-                                if std::env::var("CANDOR_R438_PROBE").is_ok() {
+                                if candor_report::env::trace("CANDOR_R438_PROBE") {
                                     eprintln!("R438 EDGE {} -> {t}", f.qual);
                                 }
                                 r438_gained_edge = true;
@@ -4239,7 +4269,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // definition arm was one — and not a hedge laid over the top.
                 if !r438_gained_edge
                     && arms().flatten().next().is_none()
-                    && std::env::var("CANDOR_R438_SILENT").is_ok()
+                    && candor_report::env::trace("CANDOR_R438_SILENT")
                 {
                     {
                         // Silence and UNDISCLOSED silence are two different numbers, and only the
@@ -4292,7 +4322,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // macro text writes `fn <method>`: R452 (b)'s disclosure, for a receiver that arm cannot see.
             if let Some(t2) = c.path.strip_prefix(&format!("{STD_RECV_MACRO_MARKER}::")) {
                 if !by_tail2.contains_key(t2) && merged.macro_hidden_fns.contains(&c.leaf) {
-                    if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1540_INSTR") {
                         eprintln!("R1540MACRO\t{}\t{t2}", f.qual); // §E1 REACH COUNTER
                     }
                     direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -4325,7 +4355,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if deps_idx.crates.contains(cr_real) {
                     let key = tail2(rest).map(|t2| format!("{cr_real}#{t2}"));
                     if let Some(de) = key.as_ref().and_then(|k| deps_idx.by_key.get(k)) {
-                        if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_V053_INSTR") {
                             eprintln!("R1153JOIN\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
                         }
                         apply_dep_fn(de, &f.qual, DepSink {
@@ -4357,7 +4387,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 if deps_idx.crates.contains(cr_real) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{rest}")) {
-                        if std::env::var_os("CANDOR_V055_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_V055_INSTR") {
                             eprintln!("R1164JOIN\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
                         }
                         apply_dep_fn(de, &f.qual, DepSink {
@@ -4381,7 +4411,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{STD_RECV_JOIN_MARKER}::")) {
                 if deps_idx.crates.contains(cr_real) {
                     if let Some(de) = deps_idx.by_key.get(&format!("{cr_real}#{rest}")) {
-                        if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1540_INSTR") {
                             eprintln!("R1540JOIN\t{}\t{cr_real}#{rest}", f.qual); // §E1 REACH COUNTER
                         }
                         apply_dep_fn(de, &f.qual, DepSink {
@@ -4399,7 +4429,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             .filter(|tr| !pure_union(tr))
                         {
                             let tleaf = tr.split_once('#').map_or(tr.as_str(), |(_, q)| q).rsplit("::").next().unwrap_or("").to_string();
-                            if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                            if candor_report::env::trace("CANDOR_R1540_INSTR") {
                                 eprintln!("R1540SCOPE\t{}\t{cr_real}#{rest}\t{tr}", f.qual); // §E1 REACH COUNTER
                             }
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -4536,7 +4566,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 .insert("dispatch:untyped cross-package receiver".to_string());
                         }
                     }
-                } else if !deps_idx.crates.contains(cr_real) && deps.contains(cr) && std::env::var_os("CANDOR_R1617H_OFF").is_none() {
+                } else if !deps_idx.crates.contains(cr_real) && deps.contains(cr) && !candor_report::env::switch("CANDOR_R1617H_OFF") {
                     // SOUNDNESS R1617(4) — an UNCHAINED dependency's chain `r1617_chain_type` could not re-type (its source
                     // refuses — reqwest's `pin_project!` makes the whole crate unreadable — or a step it cannot place). The
                     // guessed call beside this marker is charged by a rule keyed on the step's LEAF (`reqwest::*::send`), but
@@ -4562,7 +4592,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 if e2 == "Fs" {
                                     fskinds.entry(f.qual.clone()).or_default().insert("?".to_string());
                                 }
-                                if std::env::var_os("CANDOR_R1617_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R1617_INSTR") {
                                     eprintln!("R1617UNION\t{}\t{e2}\t{tp}\t{steps}", f.qual); // §E1 REACH COUNTER
                                 }
                             }
@@ -4585,7 +4615,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
                 // SOUNDNESS R1578 §E1 CENSUS — every untyped-receiver marker that reaches here (an R1578-typed one never
                 // does), with whether its crate is chained and declared: the population the unchained floor would price.
-                if std::env::var_os("CANDOR_R1578_CENSUS").is_some() {
+                if candor_report::env::trace("CANDOR_R1578_CENSUS") {
                     eprintln!("R1578MARK\t{}\t{}\tchained={}\tdeclared={}", f.qual, c.path, deps_idx.crates.contains(cr_real), deps.contains(cr));
                 }
                 // SOUNDNESS R807 — THE PROBE THAT CAN SEE AN UNTYPED HANDLE. Diagnostic only; no
@@ -4602,7 +4632,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // verb for that effect (`masks_locator`), i.e. a runtime destination a benign sibling
                 // literal could certify. Placed BEFORE the chained-dep conjunct below on purpose: a
                 // `std` factory is never a declared dependency, so that branch is where it went silent.
-                if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_MASK_DEBUG") {
                     if let Some((callee, method)) = rest.rsplit_once("::") {
                         let factory = format!("{cr_real}::{callee}");
                         if let Some(eff) = candor_classify::classify(cr_real, &factory) {
@@ -4650,14 +4680,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // adapter on the value): the floor names only a method std does NOT have, i.e. a dependency's.
                 let std_call = !new_prov && deps.contains(cr) && !deps_idx.crates.contains(cr_real)
                     && crate::std_methods::is_std_method_name(&c.leaf);
-                if std_call && std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+                if std_call && candor_report::env::trace("CANDOR_R1578_INSTR") {
                     eprintln!("R1580STD\t{}\t{}", f.qual, c.path); // §E1 — a floor SUPPRESSED as std's own call
                 }
                 // OPT-IN (round 6): on the 1,510-crate corpus a 40-site sample of this floor read S 0 / R 4 / F 36 — its
                 // reach there is almost all false uncertainty — so it runs only under `CANDOR_R1580=1`. SOUNDNESS R1580
                 // stays OPEN; the default behaviour is the pre-floor one.
                 if !new_prov && !std_call && deps.contains(cr) && !deps_idx.crates.contains(cr_real)
-                    && std::env::var_os("CANDOR_R1580").is_some_and(|v| v == "1")
+                    && candor_report::env::switch_value("CANDOR_R1580", candor_report::env::Selects::AnyOf(&["1"]))
                 {
                     *dep_seen.entry(cr.to_string()).or_insert(0) += 1;
                     blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
@@ -4668,21 +4698,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // method), or a source this reading cannot see whole, keeps the floor.
                     let classifier_pure = || -> bool {
                         let owners = r1578_sigs.borrow_mut().method_owners(dir, cr, cr_real, &c.leaf);
-                        if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1578_INSTR") {
                             eprintln!("R1580OWNERS\t{}\t{}\t{:?}", f.qual, c.path, owners.as_ref().map(|o| o.len())); // §E1
                         }
                         owners.is_some_and(|o| !o.is_empty()
                             && o.iter().all(|q| candor_classify::classify(cr_real, &format!("{cr_real}::{q}::{}", c.leaf)).is_none()))
                     };
-                    let cut = std::env::var_os("CANDOR_R1580_CUT_OFF").is_none() && classifier_pure();
-                    if cut && std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+                    let cut = !candor_report::env::switch("CANDOR_R1580_CUT_OFF") && classifier_pure();
+                    if cut && candor_report::env::trace("CANDOR_R1578_INSTR") {
                         eprintln!("R1580CUT\t{}\t{}", f.qual, c.path); // §E1 — the floor withheld: every owner classifies pure
                     }
                     if !kappa_blind(&cr.to_string()) && !cut {
                         let fresh = direct.entry(f.qual.clone()).or_default().insert("Unknown");
                         unknown_why.entry(f.qual.clone()).or_default()
                             .insert("dispatch:untyped cross-package receiver".to_string());
-                        if std::env::var_os("CANDOR_R1578_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1578_INSTR") {
                             eprintln!("R1580FLOOR\t{}\t{}\tfresh={fresh}\t{}", f.qual, c.path, c.prov.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
                         }
                     }
@@ -4693,7 +4723,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // callees carry an angle-bracket segment, so the `returns` lookup below misses by
                     // construction and they always reach the disclosure — the counter is what lets an
                     // A/B tell "never fired" from "fired and changed nothing".
-                    if new_prov && std::env::var_os("CANDOR_R856_INSTR").is_some() {
+                    if new_prov && candor_report::env::trace("CANDOR_R856_INSTR") {
                         eprintln!("R856HIT\t{}\t{cr_real}::{rest}", f.qual);
                     }
                     // ⟨0.40⟩ THE DECLARED TYPE (SPEC §2 ⟨0.40⟩; SOUNDNESS R843). A chained `holds` (a
@@ -4756,7 +4786,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 let t2 = format!("{cr_real}#{leaf_ty}::{method}");
                                 let typed_hit =
                                     deps_idx.by_key.get(&full).or_else(|| deps_idx.by_key.get(&t2));
-                                if std::env::var_os("CANDOR_R856_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R856_INSTR") {
                                     eprintln!("R856TYPED-{}\t{}\t{full}",
                                         if typed_hit.is_some() { "HIT" } else { "MISS" }, f.qual);
                                 }
@@ -4803,7 +4833,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     });
                     // Instrument the PRECONDITION, not just the output: a diff cannot show that a
                     // mechanism never fired or fired on the wrong thing (standing bar item 8).
-                    if std::env::var("CANDOR_TYPESURFACE_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_TYPESURFACE_DEBUG") {
                         let (callee, method) = split.unwrap_or((rest, ""));
                         let ty = deps_idx.returns.get(&format!("{cr_real}#{callee}"));
                         eprintln!(
@@ -5149,7 +5179,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                         if let Some([t]) = by_tail2.get(&format!("{tr}::{m}")).map(Vec::as_slice) {
                             if t != &f.qual {
-                                if std::env::var_os("CANDOR_R1171_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R1171_INSTR") {
                                     eprintln!("R1171TWINDFLT\t{}\t{}\t{t}", f.qual, c.path); // §E1 REACH COUNTER, ADDED branch only
                                 }
                                 calls.entry(f.qual.clone()).or_default().insert(t.clone());
@@ -5178,7 +5208,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             return None;
                         }
                         let hit = by_root.get(r);
-                        if hit.is_some() && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
+                        if hit.is_some() && candor_report::env::trace("CANDOR_R1154_INSTR") {
                             eprintln!("R1154ROOT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
                         }
                         hit
@@ -5197,7 +5227,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         } else {
                             None
                         };
-                        if hit.is_some() && std::env::var_os("CANDOR_R1154_INSTR").is_some() {
+                        if hit.is_some() && candor_report::env::trace("CANDOR_R1154_INSTR") {
                             eprintln!("R1154SELFLIB\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
                         }
                         hit
@@ -5261,12 +5291,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                             .map(|(q, _)| q)
                                             .collect();
                                         if !winners.is_empty() && !maybe(t) && one_unit {
-                                            if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                                            if candor_report::env::trace("CANDOR_R1649_INSTR") {
                                                 eprintln!("R1649WITHDRAW\t{}\t{}\t{claim}", f.qual, c.path); // §E1 REACH COUNTER
                                             }
                                             withdrawn = Some(claim.clone());
                                             for q in winners {
-                                                if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                                                if candor_report::env::trace("CANDOR_R1649_INSTR") {
                                                     eprintln!("R1649EDGE\t{}\t{}\t{q}", f.qual, c.path); // §E1 REACH COUNTER
                                                 }
                                                 calls.entry(f.qual.clone()).or_default().insert(q.clone());
@@ -5298,7 +5328,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             .then_some(t)
                     })
                 {
-                    if std::env::var_os("CANDOR_EXACTTY_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_EXACTTY_INSTR") {
                         eprintln!("EXACTTY\tPICK\t{}\t{}\t{t}", f.qual, c.path); // §E1 REACH COUNTER, the ADDED branch only
                     }
                     resolved_local = true;
@@ -5327,7 +5357,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if t != &f.qual {
                         calls.entry(f.qual.clone()).or_default().insert(t.clone());
                     }
-                    if std::env::var_os("CANDOR_R452_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R452_INSTR") {
                         eprintln!("R452HIT\tARM\t{}\t{}", f.qual, c.path);
                     }
                 } else if c.method && c.typed {
@@ -5357,7 +5387,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // certification is withheld, so the call is disclosed as the refusal it is.
                             // `CANDOR_R1246_OFF=1` restores the certification.
                             let refused_tail = tail2(&c.path).and_then(|t2| by_tail2.get(&t2)).is_some_and(|v| v.len() >= 2)
-                                && std::env::var_os("CANDOR_R1246_OFF").is_none();
+                                && !candor_report::env::switch("CANDOR_R1246_OFF");
                             if hits.len() == 1 && hits[0] != &f.qual {
                                 if refused_tail {
                                     if crate::lang::reach_debug() {
@@ -5395,7 +5425,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     && trait_decls.get(*tr_leaf).is_some_and(|lt| lt.methods.contains(&c.leaf))
                             });
                             if let Some(tr_leaf) = opaque_tr {
-                                if std::env::var_os("CANDOR_R1245_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R1245_INSTR") {
                                     eprintln!("R1245OPAQUE\t{}\t{}\t{tr_leaf}", f.qual, c.path); // §E1 REACH COUNTER
                                 }
                                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -5471,7 +5501,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     // point an impl set with no matching method in `by_tail2` is not a shape
                                     // real code produces. So widening here would buy nothing; the probe stays
                                     // so the next person re-measures instead of re-arguing.
-                                    if std::env::var_os("CANDOR_R576_INSTR").is_some() {
+                                    if candor_report::env::trace("CANDOR_R576_INSTR") {
                                         eprintln!("R576WIDE");
                                     }
                                     direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -5480,7 +5510,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                         .or_default()
                                         .insert(format!("dispatch:{t_type}.{}", c.leaf));
                                 } else if hits.is_empty()
-                                    && std::env::var_os("CANDOR_R576_INSTR").is_some()
+                                    && candor_report::env::trace("CANDOR_R576_INSTR")
                                 {
                                     // MEASUREMENT ONLY — this arm changes no report. It counts the other
                                     // half of Pass A's `_` arm ("no impl visible") so the decision to
@@ -5513,7 +5543,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     let hit = deps_idx.by_key.get(&full)
                                         .or_else(|| t2.as_ref().and_then(|k| deps_idx.by_key.get(k)));
                                     if hit.is_some() && dep_default_path.is_none() {
-                                        if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                                        if candor_report::env::trace("CANDOR_VEINC_INSTR") {
                                             eprintln!("VEINC_DEPDEFAULT\t{}\t{full}", f.qual);
                                         }
                                         // Joined below by the SAME chained join the UFCS spelling
@@ -5546,7 +5576,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                         let tp = format!("{dreal}::{}", tpath.split_once("::").map(|x| x.1).unwrap_or(""));
                                         let Some(eff) = candor_classify::classify(dreal, &format!("{tp}::{}", c.leaf)) else { continue };
                                         let declares = r1578_sigs.borrow_mut().trait_declares_locked(dir, dcr, dreal, tr_leaf, &c.leaf);
-                                        if std::env::var_os("CANDOR_R1607_INSTR").is_some() {
+                                        if candor_report::env::trace("CANDOR_R1607_INSTR") {
                                             eprintln!("R1607\t{}\t{}\t{tp}::{}\t{eff}\tdeclares={declares:?}", f.qual, c.path, c.leaf); // §E1
                                         }
                                         match declares {
@@ -5585,7 +5615,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // `LockGuard::shutdown` and read PURE over the I/O driver's shutdown. The chase below can only
                         // follow a CONCRETE target, so this is the generic-payload disclosure, at the site that lost it.
                         if !resolved_local
-                            && std::env::var_os("CANDOR_R1630_OFF").is_none()
+                            && !candor_report::env::switch("CANDOR_R1630_OFF")
                             && matches!(merged.rets.get(&crate::model::deref_param_key(&t_type)), Some(Some(p)) if p.parse::<usize>().is_ok())
                             // …and some crate impl declares a member of that name, so the instantiation CAN be a local type
                             // whose member runs (tokio's `Driver::shutdown`). A name no crate impl declares is a std or
@@ -5596,7 +5626,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 | "ne" | "cmp" | "partial_cmp" | "lt" | "le" | "gt" | "ge" | "max" | "min" | "clamp" | "hash" | "default"
                                 | "into" | "try_into" | "from" | "try_from" | "borrow" | "borrow_mut" | "to_owned" | "to_string" | "type_id")
                         {
-                            if std::env::var_os("CANDOR_R1630_INSTR").is_some() {
+                            if candor_report::env::trace("CANDOR_R1630_INSTR") {
                                 eprintln!("R1630HEDGE\t{}\t{t_type}.{}", f.qual, c.leaf); // §E1 REACH COUNTER
                             }
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -5727,7 +5757,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // only ADDS the dependency's answer beside it (a union, the R223 direction), so a call whose
             // head merely looks like a dependency costs at most an over-report, never a silence.
             let r1152_union = resolved_local && extern_dep_qualified && dep_default_path.is_none();
-            if r1152_union && std::env::var_os("CANDOR_R1152_INSTR").is_some() && deps_idx.crates.contains(cr_real) {
+            if r1152_union && candor_report::env::trace("CANDOR_R1152_INSTR") && deps_idx.crates.contains(cr_real) {
                 eprintln!("R1152UNION\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
             }
             // SOUNDNESS R1349 — A KEY ANOTHER CHAINED PACKAGE ANSWERS, WHEN ITS OWNER IS NOT CHAINED. Obligation 2 puts a
@@ -5744,7 +5774,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // ledger line, R452/R128) still fires, and nothing the call had is withdrawn. `CANDOR_R1349_OFF=1`.
             let covered_owner = deps_idx.crates.contains(cr_real);
             let r1349_union_only = !covered_owner
-                && std::env::var_os("CANDOR_R1349_OFF").is_none()
+                && !candor_report::env::switch("CANDOR_R1349_OFF")
                 && deps.contains(cr_real)
                 && jpath.contains("::")
                 && {
@@ -5779,7 +5809,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // naming rule), never a type — `Pz::eq`, `Dp::bitor_assign` are an operator's or an associated fn's path, whose
                 // pure unit is simply absent from `functions[]` (executed controls `z_pz`, `cc_deppure`).
                 let through_module = rel.rsplit("::").nth(1).and_then(|m| m.chars().next()).is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_');
-                if hit.is_none() && !c.method && !c.is_macro && through_module && covered_owner && std::env::var_os("CANDOR_R1637_OFF").is_none() {
+                if hit.is_none() && !c.method && !c.is_macro && through_module && covered_owner && !candor_report::env::switch("CANDOR_R1637_OFF") {
                     // Only MODULE owners (every segment lower-case): a `pub use` re-exports a free fn, never an inherent
                     // method, so a type's same-leaf method (`cargo::Builder::build` beside dylint_internal's pure free fn
                     // `cargo::build`) is neither a join target nor a reason to disclose — the first cut joined it (a
@@ -5799,7 +5829,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     let module = rel.rsplit_once("::").map_or("", |x| x.0);
                     let under: Vec<&String> = all.iter().copied()
                         .filter(|o| o.as_str() == module || o.starts_with(&format!("{module}::"))).collect();
-                    if std::env::var_os("CANDOR_R1637_INSTR").is_some() && !all.is_empty() {
+                    if candor_report::env::trace("CANDOR_R1637_INSTR") && !all.is_empty() {
                         eprintln!("R1637REEXP\t{}\t{jpath}\t{}\t{}", f.qual, under.len(), all.len()); // §E1 REACH COUNTER
                     }
                     match (under.as_slice(), all.is_empty()) {
@@ -5931,7 +5961,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(&ukey));
                             answered = true;
-                            if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                            if candor_report::env::trace("CANDOR_R529_INSTR") {
                                 eprintln!("R529HIT\tCHAIN\t{}\t{ukey}", f.qual); // §E1 REACH PROBE
                             }
                         }
@@ -5958,7 +5988,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // `*_none` arms. A member an answering entry carries (owner chained, its union pure) is
                         // ⟨0.39⟩'s model working and stays pure. A ROW's miss is untouched (PART 92 `c3_pure_only`).
                         if !answered && from_union.contains(&member) && ukey_owner != crate_name
-                            && std::env::var_os("CANDOR_R1324_NOMISS").is_none()
+                            && !candor_report::env::switch("CANDOR_R1324_NOMISS")
                         {
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(&ukey));
@@ -6410,7 +6440,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             if kinds.is_empty() { e.insert("?".to_string()); }
                             else { for k in kinds { e.insert(k.to_string()); } }
                         }
-                        if std::env::var_os("CANDOR_ALSO_DEBUG").is_some() {
+                        if candor_report::env::trace("CANDOR_ALSO_DEBUG") {
                             eprintln!("R1612ALSO {e2} {} :: {path_real}", f.qual);
                         }
                     }
@@ -6451,7 +6481,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // R806 REACH PROBE — the table-derived arms only, asked of the SAME function the guard
                     // asks, so the A/B's reach counts exactly the calls this row's fix newly masks.
                     if masks
-                        && std::env::var("CANDOR_MASK_DEBUG").is_ok()
+                        && candor_report::env::trace("CANDOR_MASK_DEBUG")
                         && (candor_classify::masks_locator_by_table(eff, cr_real, &c.path, &c.leaf)
                             || (eff == "Db"
                                 && !candor_classify::is_db_query_arg(&c.leaf)
@@ -6463,7 +6493,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if eff == "Net" && masks {
                         // R379 — instrument the TRIGGER, not the outcome. Which verb marked this
                         // surface incomplete is the whole question when pricing the denylist.
-                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                        if candor_report::env::trace("CANDOR_MASK_DEBUG") {
                             eprintln!("R379MASK {} :: {}", f.qual, c.leaf);
                         }
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
@@ -6489,7 +6519,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // and fires on every crate that builds a command at all, so one shared marker
                         // would report its traffic as this fix's REACH. Measured: 402 mask lines over the
                         // registry, of which only the `R460MASK` half is new.
-                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                        if candor_report::env::trace("CANDOR_MASK_DEBUG") {
                             // The two tags share NO PREFIX, and that is deliberate: `corpus-ab.py`
                             // counts a mark by substring, so `R460MASK` / `R460MASKNAMING` reported the
                             // old arm's traffic as this fix's REACH — 409 instead of 217, measured,
@@ -6525,7 +6555,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // a directory-capability receiver, and "how often does that fire, and on what"
                         // is the question that prices the decision. Without it an A/B showing no change
                         // cannot distinguish a safely-narrow rule from a corpus that never reached it.
-                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                        if candor_report::env::trace("CANDOR_MASK_DEBUG") {
                             eprintln!("R417MASK {} :: {} (method={})", f.qual, c.path, c.method);
                         }
                         // A path-NAMING Fs call (`fs::write(p,…)`/`File::open(p)` — a free fn / constructor,
@@ -6542,7 +6572,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // excludes build-then-execute terminals (`fetch_all`/`load`/`all`) and lifecycle ops
                         // (`connect`/`open`/`begin`) whose query is built structurally (no maskable string).
                         incomplete.entry(f.qual.clone()).or_default().insert("Db");
-                    } else if std::env::var("CANDOR_MASK_DEBUG").is_ok()
+                    } else if candor_report::env::trace("CANDOR_MASK_DEBUG")
                         // R817 — an accept is marked just below, outside this arm; not "let through".
                         && !(eff == "Net" && candor_classify::is_net_accepting(&path_real, &c.leaf))
                     {
@@ -6585,7 +6615,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // bootstrap's literal is its LISTEN address, withheld like a bind's). The shared predicate
                 // is asked by the deep engine too (src/lib.rs).
                 if eff == "Net" && candor_classify::is_net_accepting(&path_real, &c.leaf) {
-                    if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_MASK_DEBUG") {
                         eprintln!("R817ACCEPT {} :: {}", f.qual, path_real);
                     }
                     incomplete.entry(f.qual.clone()).or_default().insert("Net");
@@ -6598,7 +6628,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // (getaddrinfo), a Net reach whose locator nobody can see, so a benign sibling literal
                     // must not certify it. A `SocketAddr` or untyped argument marks nothing.
                     if c.path_lits_partial {
-                        if std::env::var("CANDOR_MASK_DEBUG").is_ok() {
+                        if candor_report::env::trace("CANDOR_MASK_DEBUG") {
                             eprintln!("R949NAME {} :: {}", f.qual, path_real);
                         }
                         incomplete.entry(f.qual.clone()).or_default().insert("Net");
@@ -6726,7 +6756,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if !already_handled && !c.is_macro && c.method && c.typed {
                 if let Some(units) = tail2(&c.path).and_then(|t2| nonpath_shared.get(&t2)) {
                     nonpath_contested.push((f.qual.clone(), units.clone()));
-                    if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1034_INSTR") {
                         eprintln!("R1034SHARED\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
                     }
                 }
@@ -6761,7 +6791,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // name: it names the arm it sits in. Not rewritten, not hedged here (measured on the first corpus
                     // A/B: core_detect, every call inside its redirected `os` file read `ambiguous:` beside its own edge).
                     let in_arm = arms.iter().any(|a| a != m && body.strip_prefix(a.as_str()).is_some_and(|r| r.starts_with("::")));
-                    let r1475 = std::env::var_os("CANDOR_R1475_OFF").is_none() && !in_arm;
+                    let r1475 = !candor_report::env::switch("CANDOR_R1475_OFF") && !in_arm;
                     // ── SOUNDNESS R1484 — A CALLER INSIDE ONE ARM NAMES ITS OWN ARM ─────────────────────────────────
                     // `crate::backend::conv::ret_c_int` written in rustix's `backend/libc/process/syscalls.rs` was edged
                     // to the libc AND the linux_raw `conv` — but the caller compiles only where `mod backend` was loaded
@@ -6775,7 +6805,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // the whole crate when a macro may place a module unseen. The sibling arms are dropped only when the
                     // own arm holds the item EXACTLY; a miss (a re-export of the other arm's file, `k_reexport_other`)
                     // keeps the union. The disclosure below is untouched. `CANDOR_R1484_OFF=1` restores R1475.
-                    let own_arm = if r1475 && std::env::var_os("CANDOR_R1484_OFF").is_none() {
+                    let own_arm = if r1475 && !candor_report::env::switch("CANDOR_R1484_OFF") {
                         r1484_own_arm(&f.qual, &f.loc, m, arms, &merged.mod_places).filter(|a| {
                             let q = format!("{a}::{rest}");
                             tail2(&q).and_then(|t2| by_tail2.get(&t2)).is_some_and(|v| v.contains(&q))
@@ -6783,7 +6813,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     } else {
                         None
                     };
-                    if std::env::var_os("CANDOR_R1484_INSTR").is_some() && r1475 {
+                    if candor_report::env::trace("CANDOR_R1484_INSTR") && r1475 {
                         let cross: Vec<&String> = arms.iter().filter(|a| *a != m && Some(*a) != own_arm.as_ref()).collect();
                         eprintln!("R1484ARM\t{}\t{}\t{}\t{}", f.qual, c.path, own_arm.as_deref().unwrap_or("-"),
                             cross.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(",")); // §E1
@@ -6801,7 +6831,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 calls.entry(f.qual.clone()).or_default().insert(q.clone());
                             }
                         }
-                        if std::env::var_os("CANDOR_R1475_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1475_INSTR") {
                             eprintln!("R1475ARM\t{}\t{}\t{q}\t{}", f.qual, c.path, if hit { "edge" } else { "unread" }); // §E1
                         }
                     }
@@ -6824,8 +6854,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // only charge). `CANDOR_R1500_OFF=1` restores R1475's hedge here.
                     let own_twin = twin_only
                         && own_arm.as_deref() == Some(m.as_str())
-                        && std::env::var_os("CANDOR_R1500_OFF").is_none();
-                    if twin_only && std::env::var_os("CANDOR_R1500_INSTR").is_some() {
+                        && !candor_report::env::switch("CANDOR_R1500_OFF");
+                    if twin_only && candor_report::env::trace("CANDOR_R1500_INSTR") {
                         eprintln!("R1500TWIN\t{}\t{}\t{}", f.qual, c.path, if own_twin { "drop" } else { "keep" }); // §E1
                     }
                     if !already_handled || (twin_only && !own_twin) {
@@ -6889,12 +6919,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             .entry(f.qual.clone())
                             .or_default()
                             .insert("ambiguous:same-name local methods".to_string());
-                        if std::env::var_os("CANDOR_R452_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R452_INSTR") {
                             eprintln!("R452HIT\tAMBIG\t{}\t{}", f.qual, c.path);
                         }
                         // SOUNDNESS R501 reach marker — fires only on the population the R501
                         // qualification newly ADMITS (a dep join whose own answer was `Unknown`).
-                        if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
+                        if dep_join_hit && candor_report::env::trace("CANDOR_R501_INSTR") {
                             eprintln!("R501MARK\tAMBIG\t{}\t{}", f.qual, c.path);
                         }
                     } else if claimants == 0
@@ -6903,7 +6933,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // target's (tokio 1.18's `cfg_time! { type TimeDriver = Either<..> }`, `self.inner.park()`).
                             || (merged.macro_hidden_types.contains(&format!("{}{ty}", crate::lang::MACRO_DECL_ALIAS))
                                 && !merged.fields.contains_key(&ty)
-                                && std::env::var_os("CANDOR_R1636_OFF").is_none()))
+                                && !candor_report::env::switch("CANDOR_R1636_OFF")))
                         && (merged.macro_hidden_types.contains(&ty)
                             // SOUNDNESS R1636 — …or the receiver's TYPE is declared only inside unexpanded macro text (tokio
                             // 1.45's `cfg_io_driver! { enum IoStack { .. } }`, 1.18's `cfg_time! { type TimeDriver = .. }`): no
@@ -6913,7 +6943,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // a readable trait impl's. Not a struct candor read (`fields` holds every one it saw).
                             || (merged.macro_hidden_types.contains(&format!("{}{ty}", crate::lang::MACRO_DECL_TYPE))
                                 && !merged.fields.contains_key(&ty)
-                                && std::env::var_os("CANDOR_R1636_OFF").is_none()))
+                                && !candor_report::env::switch("CANDOR_R1636_OFF")))
                     {
                         // (b) THE RECEIVER'S TYPE IS ONE THIS CRATE DECLARES INSIDE A MACRO-HIDDEN
                         // MODULE, and no `Type::method` unit exists. `collect_decls` skips an
@@ -6941,10 +6971,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             .entry(f.qual.clone())
                             .or_default()
                             .insert("macro:module items hidden by an unexpanded macro".to_string());
-                        if std::env::var_os("CANDOR_R452_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R452_INSTR") {
                             eprintln!("R452HIT\tMACRO\t{}\t{}", f.qual, c.path);
                         }
-                        if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
+                        if dep_join_hit && candor_report::env::trace("CANDOR_R501_INSTR") {
                             eprintln!("R501MARK\tMACRO\t{}\t{}", f.qual, c.path);
                         }
                     }
@@ -6967,7 +6997,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             .entry(f.qual.clone())
                             .or_default()
                             .insert("macro:module items hidden by an unexpanded macro".to_string());
-                        if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1004_INSTR") {
                             eprintln!("R1004PATH\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
                         }
                     }
@@ -6976,7 +7006,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if !c.is_macro && !already_handled && merged.extern_fns.contains(&c.leaf) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("native:extern fn".to_string()); // FFI is a native boundary — canonical `native:` (SPEC §4 ⟨0.7⟩)
-                if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
+                if dep_join_hit && candor_report::env::trace("CANDOR_R501_INSTR") {
                     eprintln!("R501MARK\tNATIVE\t{}\t{}", f.qual, c.path);
                 }
             }
@@ -7091,13 +7121,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // could not settle even with the written path anchored to its module. Recorded
                             // for the post-fixpoint judgement below rather than hedged here; see there.
                             let cl: Vec<String> = distinct.iter().map(|s| s.to_string()).collect();
-                            if std::env::var_os("CANDOR_VEINA_RESIDUE").is_some() {
+                            if candor_report::env::trace("CANDOR_VEINA_RESIDUE") {
                                 eprintln!("VEINARESIDUE\t{}\t{}\t{}", f.qual, c.path, cl.join(","));
                             }
                             veina_contested.push((f.qual.clone(), cl));
                         }
                         if distinct.len() >= 2 && distinct.contains(&f.qual) {
-                            if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                            if candor_report::env::trace("CANDOR_R186_DEBUG") {
                                 eprintln!("R750HEDGE\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
                             }
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -7158,7 +7188,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if !c.is_macro && classified.is_none() && !resolved_local && aliased && resolvable
                 && tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
             {
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("R184DISCLOSE {}", c.path); // §E1 HIT COUNTER
                 }
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -7180,7 +7210,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
             {
                 if let Some(why) = tail2(&c.path).and_then(|t2| by_reexport_refused.get(&t2)) {
-                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R190EDISCLOSE {} {}", c.path, why); // §E1 HIT COUNTER
                     }
                     direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -7295,10 +7325,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // windows-core, lapin and more.
                 unknown_why.entry(f.qual.clone()).or_default()
                     .insert("macro:module items hidden by an unexpanded macro".to_string());
-                if dep_join_hit && std::env::var_os("CANDOR_R501_INSTR").is_some() {
+                if dep_join_hit && candor_report::env::trace("CANDOR_R501_INSTR") {
                     eprintln!("R501MARK\tR128\t{}\t{}", f.qual, c.path);
                 }
-                if std::env::var_os("CANDOR_R128_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R128_INSTR") {
                     eprintln!("R128HIT\t{}\t{}\tt2present={}\tleafty={}\tleaffn={}", f.qual, c.path,
                         tail2(&c.path).is_some_and(|t| by_tail2.contains_key(&t)),
                         local_types.contains(&c.leaf),
@@ -7339,7 +7369,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !matches!(c.leaf.as_str(), "Some" | "Ok" | "Err" | "drop" | "size_of" | "size_of_val" | "align_of" | "align_of_val")
                 && opaque_scope_names(&f.qual, &c.path, &local_types, trait_decls, &opaque_scope)
             {
-                if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_VEINE_INSTR") {
                     eprintln!("VEINE_OPAQUECALL\t{}\t{}", f.qual, c.path); // §E1 REACH PROBE
                 }
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
@@ -7356,7 +7386,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if let Some(targets) = by_tail2.get(&format!("{ty}::drop")) {
                 if targets.len() == 1 && targets[0] != f.qual {
                     calls.entry(f.qual.clone()).or_default().insert(targets[0].clone());
-                } else if targets.len() >= 2 && std::env::var_os("CANDOR_R1253_OFF").is_none() {
+                } else if targets.len() >= 2 && !candor_report::env::switch("CANDOR_R1253_OFF") {
                     // RESOLVED where every construction of the leaf in this body spelled its type and that type is the
                     // written self type of an `impl Drop` block whose unit is a claimant (`model::ImplOwner::written`):
                     // the destructor that runs is that block's, and only that. Anything less — one construction this
@@ -7447,7 +7477,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // §4's normative `dispatch:<owner>.<member>` — the owner type IS resolvable (it is the
                 // trait), only the concrete body is not, which is verbatim the state this kind names.
                 unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr}.{meth}"));
-                if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R529_INSTR") {
                     eprintln!("R529HIT\tLOCAL\t{}\t{tr}::{meth}", f.qual); // §E1 REACH PROBE
                 }
             }
@@ -7497,7 +7527,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if merged.nested_impl_foreign.contains(member) {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(member));
-                if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R529_INSTR") {
                     eprintln!("R529HIT\tFOREIGN\t{}\t{member}", f.qual); // §E1 REACH PROBE
                 }
             }
@@ -7562,7 +7592,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 || r533_trait_prefix(&t2).is_some_and(|p| r533_fi_prefix_t2.contains(&p)) { continue }
             direct.entry(f.qual.clone()).or_default().insert("Unknown");
             unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(member));
-            if std::env::var_os("CANDOR_R533_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R533_INSTR") {
                 eprintln!("R533HIT\t{}\t{member}", f.qual); // §E1 REACH PROBE
             }
         }
@@ -7643,7 +7673,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // ONE SPELLING of §4's normative dotted detail — `r529_reason`, the same function the
             // sibling rule and the R529 hedges call. A second `format!` here is the ⟨0.34⟩ drift.
             unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(member));
-            if std::env::var_os("CANDOR_R693_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R693_INSTR") {
                 eprintln!("R693HIT\t{}\t{member}", f.qual); // §E1 REACH PROBE
             }
         }
@@ -7660,7 +7690,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // included, whose self-edge is never formed), and every edge any route formed to a unit under it (a trait-dispatch or
     // alias route spells the call differently). Judged with VEIN A's rule after the fixpoint.
     if !mbe_side.is_empty() {
-        let instr = std::env::var_os("CANDOR_R1180_INSTR").is_some();
+        let instr = candor_report::env::trace("CANDOR_R1180_INSTR");
         let mut seen: HashSet<(String, String)> = HashSet::new();
         let mut push = |caller: &str, t2: &str, why: &str, out: &mut Vec<(String, Vec<String>)>| {
             if let Some(side) = mbe_side.get(t2) {
@@ -7719,13 +7749,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1165 — what each witness site's callee can run, from the dependency's source signature (`None` = any).
     let witness_allowed: Vec<Option<BTreeSet<String>>> = {
         let mut sigs = crate::depsig::DepSigs::default();
-        let off = std::env::var_os("CANDOR_R1165_NO_NARROW").is_some();
+        let off = candor_report::env::switch("CANDOR_R1165_NO_NARROW");
         witness_sites
             .iter()
             .map(|(_, alias, real, _, pos, callee)| if off { None } else { sigs.allowed(dir, alias, real, callee, *pos) })
             .collect()
     };
-    if std::env::var_os("CANDOR_R1165_INSTR").is_some() {
+    if candor_report::env::trace("CANDOR_R1165_INSTR") {
         for ((caller, alias, _, l, pos, callee), a) in witness_sites.iter().zip(&witness_allowed) {
             eprintln!("R1165SITE\t{caller}\t{alias}::{callee}\t{pos}\t{l}\t{a:?}"); // §E1 REACH COUNTER
         }
@@ -7753,13 +7783,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     };
     let from_targets: Vec<crate::depsig::ConvTargets> = {
         let mut sigs = crate::depsig::DepSigs::default();
-        let off = std::env::var_os("CANDOR_R1186_NO_NARROW").is_some();
+        let off = candor_report::env::switch("CANDOR_R1186_NO_NARROW");
         from_sites
             .iter()
             .map(|(_, alias, real, _, pos, callee)| if off { None } else { sigs.conversion_targets(dir, alias, real, callee, *pos) })
             .collect()
     };
-    if std::env::var_os("CANDOR_R1186_INSTR").is_some() {
+    if candor_report::env::trace("CANDOR_R1186_INSTR") {
         for ((caller, alias, _, l, pos, callee), a) in from_sites.iter().zip(&from_targets) {
             eprintln!("R1186SITE\t{caller}\t{alias}::{callee}\t{pos}\t{l}\t{:?}\t{a:?}", from_impls.get(l)); // §E1 REACH COUNTER
         }
@@ -7793,7 +7823,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     || !inferred.contains_key(u) && direct.get(u).is_some_and(|d| !d.is_empty())
             });
             if !impure {
-                if _round == 0 && std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+                if _round == 0 && candor_report::env::trace("CANDOR_R1034_INSTR") {
                     eprintln!("R1034MERGEPURE\t{caller}\t{}", units.join(",")); // §E1 — the hedge WITHDRAWN
                 }
                 continue;
@@ -7805,7 +7835,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 .insert("ambiguous:same-name local methods".to_string());
             if fresh || fresh_why {
                 hedged = true;
-                if std::env::var_os("CANDOR_R1034_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1034_INSTR") {
                     eprintln!("R1034MERGEHEDGE\t{caller}"); // §E1 REACH PROBE — the hedge KEPT
                 }
             }
@@ -7838,7 +7868,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // `Unknown`-only, and the caller read ABSENT; `T::lookup_type` above it lost its only cover when R1265
             // removed a false `ambiguous:` hedge. `CANDOR_R1095B_OFF=1` restores the concrete-only floor.
             let blanket_unknown = |u: &String| {
-                std::env::var_os("CANDOR_R1095B_OFF").is_none()
+                !candor_report::env::switch("CANDOR_R1095B_OFF")
                     && inferred.get(u).is_some_and(|e| e.contains("Unknown"))
                     && u.rsplit("::").nth(1).is_some_and(|tr| merged.blanket_methods.contains_key(&crate::model::blanket_trait_key(tr)))
             };
@@ -7861,7 +7891,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let fresh_why = unknown_why.entry(caller.clone()).or_default().insert(why);
             if fresh || fresh_why {
                 hedged = true;
-                if std::env::var_os("CANDOR_R1095_INSTR").is_some() && fresh {
+                if candor_report::env::trace("CANDOR_R1095_INSTR") && fresh {
                     eprintln!("R1095HEDGE\t{caller}\t{leaf}"); // §E1 REACH PROBE — a caller newly Unknown
                 }
             }
@@ -7911,7 +7941,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     let fresh_why = unknown_why.entry(caller.clone()).or_default().insert(format!("dispatch:{tr}.{m}"));
                     if fresh || fresh_why {
                         hedged = true;
-                        if std::env::var_os("CANDOR_R1165_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1165_INSTR") {
                             eprintln!("R1165HEDGE\t{caller}\t{tr}.{m}\t{l}"); // §E1 REACH COUNTER
                         }
                     }
@@ -7945,7 +7975,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let untyped = src == crate::model::FROM_UNTYPED_SRC;
             if untyped
                 && (targets.as_ref().is_some_and(|t| t.is_empty())
-                    || targets.is_none() && std::env::var_os("CANDOR_R1197A_OFF").is_some())
+                    || targets.is_none() && candor_report::env::switch("CANDOR_R1197A_OFF"))
             {
                 continue;
             }
@@ -7988,7 +8018,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let fresh_why = unknown_why.entry(caller.clone()).or_default().insert(format!("dispatch:{tr}.{m}"));
                 if fresh || fresh_why {
                     hedged = true;
-                    if std::env::var_os("CANDOR_R1186_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1186_INSTR") {
                         eprintln!("R1186HEDGE\t{caller}\t{tr}.{m}\t{src}\t{tgt}\t{fresh}"); // §E1 REACH COUNTER
                     }
                 }
@@ -8015,7 +8045,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 .insert(format!("ambiguous:std method or crate impl on a std receiver ({})", label.replace('.', "_")));
             if fresh || fresh_why {
                 hedged = true;
-                if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1540_INSTR") {
                     eprintln!("R1540HEDGE\t{caller}\t{label}"); // §E1 REACH COUNTER
                 }
             }
@@ -8036,7 +8066,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 .insert(format!("ambiguous:operator on a primitive with a macro-made impl ({})", label.replace('.', "_")));
             if fresh || fresh_why {
                 hedged = true;
-                if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_V053_INSTR") {
                     eprintln!("R1157HEDGE\t{caller}\t{label}"); // §E1 REACH COUNTER
                 }
             }
@@ -8067,7 +8097,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     .insert("ambiguous:same-name local defs".to_string());
                 if fresh || fresh_why {
                     hedged = true;
-                    if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_R186_DEBUG") {
                         eprintln!("VEINAHEDGE\t{caller}"); // §E1 REACH COUNTER
                     }
                 }
@@ -8210,7 +8240,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let one = union_trait_qual(trait_quals, trait_leaf)?;
         // REACH PROBE — same channel and same reason as `R504HIT`. This one fires wherever the wire
         // spelling is DECIDED, which is the branch R503 changed.
-        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
             eprintln!("R503HIT {one}");
         }
         Some(format!("{crate_name}#{one}::{method}"))
@@ -8720,16 +8750,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             fd_site_keys.entry((f.qual.clone(), d.to_string())).or_default().push(k.to_string());
         }
     }
-    let r1351_off = std::env::var_os("CANDOR_R1351_OFF").is_some();
+    let r1351_off = candor_report::env::switch("CANDOR_R1351_OFF");
     // ⟨0.40⟩ SPEC §4 UNION CLAUSE (R1324 RESOLVED) — the members are CARRIED, not hedged. Rule 1 makes a narrow union
     // entry carry, in `dispatchesOn`, every member its contributors dispatch on transitively (spelling (a), which this
     // engine's rows already use: `dispatch_acc` is the transitive set); rule 3 makes the hedge below a disclosure for a
     // member the producer CANNOT name, which here is none — so the hedge survives only behind `CANDOR_R1324_HEDGE=1`
     // (the 0.40.15 behaviour, for the A/B's attribution). The R1351/R1353 filter above applies to the carried keys too:
     // a key whose trait provably does not declare the member is not made valid by appearing on a union (rule 1).
-    let r1324_hedge = std::env::var_os("CANDOR_R1324_HEDGE").is_some();
+    let r1324_hedge = candor_report::env::switch("CANDOR_R1324_HEDGE");
     let union_dispatch_hedge = |cand: &str, own_tail: &str, inf: &mut std::collections::BTreeSet<&'static str>, out: &mut BTreeSet<String>, don: &mut BTreeSet<String>| {
-        if std::env::var_os("CANDOR_R1324_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1324_OFF") {
             return;
         }
         for k in dispatch_acc.get(cand).into_iter().flatten() {
@@ -8753,7 +8783,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // (`map_err`, `unwrap_or`, `into_iter` — R549 chain/spread drift), or one a local trait declares, with no
                     // associated-type bound declaring it is dropped. Everything else is a member set this producer could not complete: the union keeps the
                     // hedge (SPEC §4 ⟨0.40⟩ union clause rule 3), naming the trait that declares it where the source shows one.
-                    let f1_off = std::env::var_os("CANDOR_F1_OFF").is_some();
+                    let f1_off = candor_report::env::switch("CANDOR_F1_OFF");
                     let assoc = if f1_off { None } else { r1351_sigs.borrow_mut().assoc_member_trait(dir, owner, real, tr, m) };
                     // SOUNDNESS F3 (Fable REVIEW2 rust0416) — DRIFT IS PROVED ABOUT THE RECEIVER, NEVER ABOUT THE NAME. 729e181
                     // dropped a proven-absent key when its member was spelled like a std method or like any local trait's
@@ -8819,7 +8849,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // union also keeps `Unknown` with the true reason, beside the key (which still joins: a resolution survives).
                 // A closed return (`bool`, `Option<u32>`, `()`) carries nothing the consumer supplied, so it never hedges.
                 // A key of THIS crate is not read by depsig and is treated as open. `CANDOR_R1324_ESCAPE_OFF=1` disables it.
-                if fd_escaped.contains(k.as_str()) && std::env::var_os("CANDOR_R1324_ESCAPE_OFF").is_none() {
+                if fd_escaped.contains(k.as_str()) && !candor_report::env::switch("CANDOR_R1324_ESCAPE_OFF") {
                     let closed = owner != crate_name && {
                         let real = dep_renames.get(owner).map(String::as_str).unwrap_or(owner);
                         r1351_sigs.borrow_mut().returns_std(dir, owner, real, tr, m) == Some(true)
@@ -8932,7 +8962,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 impls.iter().any(|ty| {
                     crate::model::impl_confirms_local_trait(&merged.impl_members, trait_leaf, ty, q)
                 })
-            }) || std::env::var_os("CANDOR_R652_PRE").is_some();
+            }) || candor_report::env::switch("CANDOR_R652_PRE");
             for method in &lt.methods {
                 let mut inf_u: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
                 let mut blind_u: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -8998,7 +9028,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     let narrowed =
                         crate::model::impl_does_not_declare(&merged.impl_members, trait_leaf, ty, method)
                             && !delegating_members.contains(&format!("{trait_leaf}::{method}"))
-                            && std::env::var_os("CANDOR_R598_PRE").is_none();
+                            && !candor_report::env::switch("CANDOR_R598_PRE");
                     // A CONCRETE effect of a narrowed candidate is withheld; `Unknown` rides through.
                     let admit = |e: &str| !narrowed || e == "Unknown";
                     // SOUNDNESS R1245 (the REFUSED half, union leg) — this implementor's block holds a macro item `mbe`
@@ -9011,7 +9041,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if merged.impl_members.contains(&crate::model::impl_opaque_key(trait_leaf, ty))
                         && !merged.impl_members.contains(&crate::model::impl_member_key(trait_leaf, ty, method))
                     {
-                        if std::env::var_os("CANDOR_R1245_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1245_INSTR") {
                             eprintln!("R1245UNION\t{trait_leaf}::{method}\t{ty}"); // §E1 REACH COUNTER
                         }
                         inf_u.insert("Unknown");
@@ -9020,7 +9050,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if narrowed {
                         // §E1 REACH PROBE — fires only where this narrowing actually withholds
                         // something, so `CHANGED 0` and "the branch never ran" stay distinguishable.
-                        if std::env::var_os("CANDOR_R598_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R598_INSTR") {
                             let had: Vec<&&str> = inferred.get(&format!("{ty}::{method}"))
                                 .map(|s| s.iter().collect()).unwrap_or_default();
                             let tail: Vec<&&str> = by_tail2.get(&format!("{ty}::{method}"))
@@ -9066,7 +9096,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 // REACH PROBE — same channel and reason as `R503HIT`: fires only where
                                 // this fallback resolves an implementor the exact-key lookups could not,
                                 // so `CHANGED 0` and "the branch never ran" stay distinguishable.
-                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                     eprintln!("R513HIT {}", ts[0]);
                                 }
                                 // SOUNDNESS R1352 — the R1324 hedge asks the SAME resolved unit the effects come
@@ -9076,7 +9106,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 // nothing and only this fallback reaches the unit. The foreign leg below already
                                 // hedges both `cand` and `ts[0]`; the asymmetry was the bug (R513's own words).
                                 // EXECUTED fx3/fx6 (one variable: the `mod`). `CANDOR_R1352_OFF=1` disables it.
-                                if std::env::var_os("CANDOR_R1352_OFF").is_none() {
+                                if !candor_report::env::switch("CANDOR_R1352_OFF") {
                                     let w0 = why_u.len() + don_u.len();
                                     union_dispatch_hedge(&ts[0], &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u, &mut don_u);
                                     if why_u.len() + don_u.len() != w0 && crate::lang::reach_debug() {
@@ -9105,7 +9135,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // and only a block that DECLARES `method` contributes — an inheriting block runs the trait's default,
                     // which has its own row at this key (R597). Same contributions as an exact candidate.
                     // `CANDOR_R1246_OFF=1` disables it.
-                    if std::env::var_os("CANDOR_R1246_OFF").is_none() {
+                    if !candor_report::env::switch("CANDOR_R1246_OFF") {
                         for o in impl_owners.get(trait_leaf).into_iter().flatten().filter(|o| &o.ty == ty && o.declares(method)) {
                             let q = format!("{}::{method}", o.owner);
                             if !unit_quals.contains(&q) || !r1246_seen.insert(q.clone()) {
@@ -9131,7 +9161,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // narrow — pure when every implementor is — hands a chained consumer a purity claim this scan does not
                 // make (PART 103 `c_13`: 13 pure implementors, chained `deny Unknown` 0 while one tree reads 1). The
                 // bounded-CHA hedge on its own key, exactly the in-scan reason. `CANDOR_R1367_OFF=1` disables it.
-                if impls.len() > 12 && std::env::var_os("CANDOR_R1367_OFF").is_none() {
+                if impls.len() > 12 && !candor_report::env::switch("CANDOR_R1367_OFF") {
                     if crate::lang::reach_debug() {
                         eprintln!("R1367BROAD\tLOCAL\t{trait_leaf}::{method}\t{}", impls.len()); // §E1 REACH COUNTER
                     }
@@ -9155,7 +9185,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             union_why(q, &mut why_u); // R1268
                         }
                         // R1352 — the third contributor route of this union, hedged like the other two (§A.2).
-                        if std::env::var_os("CANDOR_R1352_OFF").is_none() {
+                        if !candor_report::env::switch("CANDOR_R1352_OFF") {
                             let w0 = why_u.len() + don_u.len();
                             union_dispatch_hedge(q, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u, &mut don_u);
                             if why_u.len() + don_u.len() != w0 && crate::lang::reach_debug() {
@@ -9172,7 +9202,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 {
                     inf_u.insert("Unknown");
                     why_u.insert(own_hedge.clone()); // R1268
-                    if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R529_INSTR") {
                         eprintln!("R529HIT\tUNION-LOCAL\t{trait_leaf}::{method}"); // §E1 REACH PROBE
                     }
                 }
@@ -9226,7 +9256,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // qual the comparison used, and every trait path this crate wrote for each named
                     // implementor), because a withheld row that turns out to have a real implementor
                     // has to be diagnosable from the probe line alone.
-                    if std::env::var_os("CANDOR_R652_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R652_INSTR") {
                         let ev: Vec<String> = impls.iter().map(|ty| {
                             let pre = format!("{trait_leaf}\u{1f}{ty}\u{1f}!");
                             let paths: Vec<&str> = merged.impl_members.iter()
@@ -9305,7 +9335,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     let (eff_adds, blind_adds) = union_adds_over_row(&entries, &hash, &inf_u, &blind_u);
                     // §E1 REACH PROBE, and the population counter the pre-fix measurement was taken
                     // with — same line shapes, so 244/233/11 stays re-countable rather than re-argued.
-                    if std::env::var_os("CANDOR_R590_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R590_INSTR") {
                         if let Some(real) = entries.iter().find(|e| e.hash == hash) {
                             if !inf_u.is_empty() {
                                 if eff_adds {
@@ -9335,7 +9365,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // effect and no uncovered package), so `CHANGED 0` and "the branch never ran" stay
                 // distinguishable and this half's reach is never borrowed from the local leg's.
                 if inf_u.is_empty() && blind_u.is_empty()
-                    && std::env::var_os("CANDOR_R609_INSTR").is_some()
+                    && candor_report::env::trace("CANDOR_R609_INSTR")
                 {
                     eprintln!("R609HIT\tLOCAL\t{hash}");
                 }
@@ -9396,14 +9426,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if merged.nested_impl_foreign.contains(key) {
                 inf_u.insert("Unknown");
                 why_u.insert(r529_reason(key)); // R1268 — this union's own hedge
-                if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R529_INSTR") {
                     eprintln!("R529HIT\tUNION-FOREIGN\t{key}"); // §E1 REACH PROBE
                 }
             }
             let own_tail = crate::lang::tail2(key.split_once('#').map(|(_, p)| p).unwrap_or(key)).unwrap_or_default();
             // SOUNDNESS R1367, the FOREIGN leg — the same bound over this crate's implementors of THAT trait (every
             // `foreign_impls` key under the same `{owner}#{trait qual}::` prefix, counted by implementing type).
-            if std::env::var_os("CANDOR_R1367_OFF").is_none() {
+            if !candor_report::env::switch("CANDOR_R1367_OFF") {
                 if let Some(pfx) = r533_trait_prefix(key) {
                     let tys: HashSet<&str> = merged.foreign_impls.iter()
                         .filter(|(k, _)| k.starts_with(pfx.as_str()) && !k[pfx.len()..].contains("::"))
@@ -9479,7 +9509,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // halves of this rung WAS R598, in the same shape as R513.
             if existing.contains(key) {
                 let (eff_adds, blind_adds) = union_adds_over_row(&entries, key, &inf_u, &blind_u);
-                if std::env::var_os("CANDOR_R590_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R590_INSTR") {
                     eprintln!("R590FOREIGN {key} adds_eff={eff_adds} adds_blind={blind_adds}");
                 }
                 let don_adds = entries.iter().find(|e| e.hash == *key)
@@ -9489,7 +9519,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
             if inf_u.is_empty() && blind_u.is_empty()
-                && std::env::var_os("CANDOR_R609_INSTR").is_some()
+                && candor_report::env::trace("CANDOR_R609_INSTR")
             {
                 eprintln!("R609HIT\tFOREIGN\t{key}"); // §E1 REACH PROBE — see the local leg's note
             }
@@ -11162,7 +11192,7 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
     );
     // Chain the fresh dep reports (plus anything CANDOR_DEPS already names) under the root scan.
     // load_dep_reports dedups canonical paths, so deps_dir appearing in CANDOR_DEPS too is safe.
-    let spec = match std::env::var("CANDOR_DEPS") {
+    let spec = match candor_report::env::operator("CANDOR_DEPS") {
         Ok(extra) if !extra.is_empty() => format!("{deps_dir}:{extra}"),
         _ => deps_dir.clone(),
     };
@@ -11248,7 +11278,7 @@ pub(crate) fn exact_ty_module_settled(target: &str, writer: &str, g: &ExactGuard
         None
     };
     if let Some(why) = why {
-        if std::env::var_os("CANDOR_EXACTTY_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_EXACTTY_INSTR") {
             eprintln!("EXACTTY\tREFUSE\t{caller}\t{path}\t{target}\t{why}"); // §E1 — the guard's own reach
         }
         return false;

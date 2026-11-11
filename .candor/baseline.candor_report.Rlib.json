@@ -7,6 +7,86 @@
   "package": "candor_report",
   "functions": [
     {
+      "fn": "env::operator",
+      "loc": "crates/candor-report/src/env.rs:114:1: 114:66",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "25efce0400f22724942c9f5de2673630"
+    },
+    {
+      "fn": "env::operator_os",
+      "loc": "crates/candor-report/src/env.rs:119:1: 119:51",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "25efce0400f22724aa8f8c0c23d5c15e"
+    },
+    {
+      "fn": "env::switch",
+      "loc": "crates/candor-report/src/env.rs:66:1: 66:34",
+      "inferred": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "25efce0400f22724b5fad3dfafbb2e49",
+      "calls": [
+        "env::switch_value"
+      ]
+    },
+    {
+      "fn": "env::switch_value",
+      "loc": "crates/candor-report/src/env.rs:88:1: 88:58",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "25efce0400f22724f89a5b5883987703"
+    },
+    {
+      "fn": "env::trace",
+      "loc": "crates/candor-report/src/env.rs:109:1: 109:33",
+      "inferred": [
+        "Env"
+      ],
+      "direct": [
+        "Env"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "hash": "25efce0400f22724bd375505b2266d74"
+    },
+    {
       "fn": "report_files",
       "loc": "crates/candor-report/src/lib.rs:31:1: 31:53",
       "inferred": [

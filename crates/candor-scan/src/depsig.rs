@@ -634,7 +634,7 @@ impl SrcIndex {
                         let bound = generic_params(&[&t.generics, &f.sig.generics]);
                         let std_name = |n: &str| {
                             let g = bound.contains(n);
-                            if g && std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() {
+                            if g && candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
                                 eprintln!("STDNAME\t{n}\tgeneric=true"); // §E1 REACH COUNTER
                             }
                             !g && self.std_name_provable(n)
@@ -664,7 +664,7 @@ impl SrcIndex {
     ///   a file `syn` cannot parse → `has_unseen_items`.
     fn std_name_provable(&self, n: &str) -> bool {
         let r = (self.local_names.contains(n), self.types.contains(n), self.macro_binds(n), self.has_unseen_items());
-        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() && (r.0 || r.1 || r.2 || r.3) {
+        if candor_report::env::trace("CANDOR_DEPSIG_INSTR") && (r.0 || r.1 || r.2 || r.3) {
             eprintln!("STDNAME\t{n}\tlocal={} type={} macro={} unseen={}", r.0, r.1, r.2, r.3); // §E1 REACH COUNTER
         }
         !(r.0 || r.1 || r.2 || r.3)
@@ -730,7 +730,7 @@ impl SrcIndex {
                 let segs: Vec<String> = a.path().segments.iter().map(|s| s.ident.to_string()).collect();
                 let head = segs.first().cloned().unwrap_or_default();
                 if segs.len() > 1 && !matches!(head.as_str(), "rustfmt" | "clippy" | "diagnostic") || !INERT.contains(&head.as_str()) {
-                    if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() { eprintln!("UNSEEN\tattr\t{}", segs.join("::")); }
+                    if candor_report::env::trace("CANDOR_DEPSIG_INSTR") { eprintln!("UNSEEN\tattr\t{}", segs.join("::")); }
                     self.0 = true; // an attribute proc macro, or one this list does not know
                 } else if head == "derive" {
                     let toks = a.meta.require_list().map(|l| l.tokens.to_string()).unwrap_or_default();
@@ -765,7 +765,7 @@ impl SrcIndex {
                     }
                     if !cur.is_empty() { words.insert(cur); }
                     if words.iter().any(|w| w == "path" || w == "derive" || !(INERT.contains(&w.as_str()) || PRED.contains(&w.as_str()))) {
-                        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() { eprintln!("UNSEEN\tcfg_attr\t{toks}"); }
+                        if candor_report::env::trace("CANDOR_DEPSIG_INSTR") { eprintln!("UNSEEN\tcfg_attr\t{toks}"); }
                         self.0 = true;
                     }
                 }
@@ -777,7 +777,7 @@ impl SrcIndex {
                     let segs: Vec<String> = m.mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
                     let local = segs.len() == 1 && self.1.macros.contains_key(&segs[0]) && !self.1.tainted.contains(&segs[0]);
                     if !local {
-                        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() { eprintln!("UNSEEN\tmacro\t{}", segs.join("::")); }
+                        if candor_report::env::trace("CANDOR_DEPSIG_INSTR") { eprintln!("UNSEEN\tmacro\t{}", segs.join("::")); }
                         self.0 = true;
                     }
                 }
@@ -1506,7 +1506,7 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
             // crate-wide reading, for falsification only).
             let list: &[syn::Item] = self.lists.last().copied().unwrap_or(&[]);
             let declared = self.want.tys.iter().any(|t| idx.types.contains(t));
-            let globs = if std::env::var_os("CANDOR_R1200_GLOB_OFF").is_some() {
+            let globs = if candor_report::env::switch("CANDOR_R1200_GLOB_OFF") {
                 !declared
             } else {
                 !(declared && list_binds(list, &self.want.tys, true))
@@ -1515,7 +1515,7 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
                 self.dark(|| "use:leaf".to_string());
             } else if self.want.tys.iter().any(|t| use_may_import(&u.tree, t, None, &ext, globs)) {
                 self.dark(|| "use:type".to_string());
-            } else if std::env::var_os("CANDOR_R1200_MOD_OFF").is_none()
+            } else if !candor_report::env::switch("CANDOR_R1200_MOD_OFF")
                 && self.want.mods.iter().any(|m| {
                     let one: HashSet<String> = std::iter::once(m.clone()).collect();
                     use_may_import(&u.tree, m, None, &ext, !list_binds(list, &one, true))
@@ -1529,7 +1529,7 @@ impl<'a> Visit<'a> for Collect<'a, '_> {
     }
     fn visit_item_extern_crate(&mut self, e: &'a syn::ItemExternCrate) {
         // SOUNDNESS R1200 — `pub extern crate other as name;` makes `name::..` the other crate's
-        if !matches!(e.vis, syn::Visibility::Inherited) && std::env::var_os("CANDOR_R1200_MOD_OFF").is_none() {
+        if !matches!(e.vis, syn::Visibility::Inherited) && !candor_report::env::switch("CANDOR_R1200_MOD_OFF") {
             let n = e.rename.as_ref().map(|r| r.1.to_string()).unwrap_or_else(|| e.ident.to_string());
             if n == self.want.leaf || self.want.tys.contains(&n) || self.want.mods.contains(&n) {
                 self.dark(|| "extern:crate".to_string());
@@ -2001,7 +2001,7 @@ impl DepSigs {
             // beside a visible `impl Foo<A> { fn m }` (distinct instantiations are not duplicates). Measured: applying it to
             // methods as well costs 1 more newly-`Unknown` row over the chained corpus, so the duplicate-definition argument
             // is not leaned on.
-            if std::env::var_os("CANDOR_R1200_FMAC_OFF").is_none() {
+            if !candor_report::env::switch("CANDOR_R1200_FMAC_OFF") {
                 if let Some(m) = &c.foreign {
                     return (None, format!("fmac:{m}"));
                 }
@@ -2045,7 +2045,7 @@ impl DepSigs {
             // (a blanket `impl<T> Ext for T` in a third crate, never in this source) beats an inherent `fn m(&self, ..)` on a
             // value receiver — and which step the inherent sits at depends on the receiver's reference-ness, which the site does
             // not carry. A path call (`Type::m(..)`) has no such probe: the inherent is the callee.
-            if method_site && std::env::var_os("CANDOR_R1200_METH_OFF").is_none() {
+            if method_site && !candor_report::env::switch("CANDOR_R1200_METH_OFF") {
                 return (None, "meth:probe".into());
             }
             let mut fitted = 0usize;
@@ -2067,7 +2067,7 @@ impl DepSigs {
     }
 
     fn say(&self, what: &str, alias: &str, callee: &str, pos: usize, why: &str) {
-        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
             eprintln!("DSWHY\t{what}\t{alias}\t{callee}\t{pos}\t{why}"); // §E1 REACH COUNTER
         }
     }
@@ -2131,7 +2131,7 @@ impl DepSigs {
                 break;
             }
         }
-        if std::env::var_os("CANDOR_DEPSIG_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
             eprintln!("DSTRAIT\t{alias}\t{leaf}\t{member}\t{answer:?}"); // §E1 REACH COUNTER
         }
         self.tdecl.insert(key, answer);
@@ -2401,10 +2401,10 @@ impl DepSigs {
             // SOUNDNESS R1619 — `judged` refused for a reason about definitions OUT OF SIGHT somewhere in the crate (a foreign
             // item macro, a macro naming the item, an external glob): the per-item proof (`strict`) can still type it.
             let hidden = ["fmac:", "mac:", "macdef:", "use:leaf", "use:type"].iter().any(|p| why.starts_with(p));
-            if hidden && std::env::var_os("CANDOR_R1619_OFF").is_none() {
+            if hidden && !candor_report::env::switch("CANDOR_R1619_OFF") {
                 match self.strict_ret(&src.dir, &path, need) {
                     Ok(r) => {
-                        if std::env::var_os("CANDOR_R1619_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1619_INSTR") {
                             eprintln!("R1619STRICT\t{alias}\t{path}\t{why}\t{r:?}"); // §E1 REACH COUNTER
                         }
                         self.say("ret", alias, &path, 0, &format!("{why}|strict:read:{r:?}"));
@@ -3239,9 +3239,9 @@ type LockEntry = (String, String, Option<String>, Option<String>);
 /// wherever a mirror put them. A checkout edited after extraction is not detected (cargo records nothing to compare it to).
 fn registry_checkout(name: &str, version: &str, checksum: Option<&str>) -> Option<std::path::PathBuf> {
     let want = checksum.filter(|c| c.len() == 64 && c.bytes().all(|b| b.is_ascii_hexdigit()))?.to_ascii_lowercase();
-    let home = std::env::var("CARGO_HOME")
+    let home = candor_report::env::operator("CARGO_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".cargo"));
+        .unwrap_or_else(|_| Path::new(&candor_report::env::operator("HOME").unwrap_or_default()).join(".cargo"));
     let mut idxs: Vec<std::path::PathBuf> = std::fs::read_dir(home.join("registry").join("cache")).ok()?.flatten().map(|e| e.path()).collect();
     idxs.sort();
     for idx in idxs {

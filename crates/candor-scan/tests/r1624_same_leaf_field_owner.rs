@@ -47,7 +47,10 @@ fn scan(dir: &Path, policy: Option<&str>, off: bool) -> (i32, serde_json::Value)
     }
     let out = cmd.output().expect("run candor-scan");
     let code = out.status.code().unwrap_or(-1);
-    assert!(code == 0 || code == 1, "scan failed ({code}): {}", String::from_utf8_lossy(&out.stderr));
+    // SPEC ⟨0.42⟩ §3.3 (e): a POLICY run under a set result-moving switch REFUSES (exit 2) after writing its report, so the
+    // switched arm of a gate is the one place exit 2 is the answer. A scan with no policy asks nothing and is not refused.
+    let refused_by_switch = off && policy.is_some() && code == 2;
+    assert!(code == 0 || code == 1 || refused_by_switch, "scan failed ({code}): {}", String::from_utf8_lossy(&out.stderr));
     (code, serde_json::from_slice(&out.stdout).expect("report json"))
 }
 
@@ -207,15 +210,30 @@ fn r1624_each_twin_reads_its_own_field_type() {
 #[test]
 fn r1624_gate_flips_on_the_executed_write_and_the_kill_switch_restores_the_silence() {
     let d = local("gate");
+    // SOUNDNESS R1634 — the kill switch can no longer be measured by GATING under it: a gate under a set result-moving switch is
+    // unanswerable (exit 2, SPEC ⟨0.42⟩ §3.3 (e)). So each arm is measured where the attribution belongs, on the REPORT route
+    // (`--json`, no policy: disclosure, nothing refuses): the gate flips exactly when the unit's row gains/loses the effect the
+    // rule denies, and the policy run under the switch is asserted to REFUSE, naming it.
     for f in ["a::H::a_self_zq", "a::H::a_bind_zq", "c::S::c_self_zq", "ext::g::V::g_loop_zq", "ext::g::V::g_idx_zq", "ext::t1::Tt::t1_self_zq", "ext::w::Fe::w_flush_zq"] {
-        let (on, _) = scan(&d, Some(&format!("deny Fs {f}\n")), false);
-        let (off, _) = scan(&d, Some(&format!("deny Fs {f}\n")), true);
-        assert_eq!((on, off), (1, 0), "{f}: deny Fs with the fix / under CANDOR_R1624_OFF");
+        let policy = format!("deny Fs {f}\n");
+        let (on, _) = scan(&d, Some(&policy), false);
+        assert_eq!(on, 1, "{f}: deny Fs with the fix");
+        let (_, rep_on) = scan(&d, None, false);
+        let (_, rep_off) = scan(&d, None, true);
+        assert!(inferred(&rep_on, f).contains(&"Fs".to_string()), "{f}: the fix charges Fs {:?}", inferred(&rep_on, f));
+        assert!(!inferred(&rep_off, f).contains(&"Fs".to_string()), "{f}: CANDOR_R1624_OFF restores the silence {:?}", inferred(&rep_off, f));
+        assert_eq!(rep_off["switches"], serde_json::json!(["CANDOR_R1624_OFF"]), "{f}: the switched report names the switch");
+        assert!(rep_on.get("switches").is_none(), "{f}: the unswitched report names none");
+        let (refused, _) = scan(&d, Some(&policy), true);
+        assert_eq!(refused, 2, "{f}: a gate under CANDOR_R1624_OFF is unanswerable, not green");
     }
     // …and the fabrication: the pure twin was charged its sibling's Env.
     let (on, _) = scan(&d, Some("deny Env e::K::e_self_zq\n"), false);
-    let (off, _) = scan(&d, Some("deny Env e::K::e_self_zq\n"), true);
-    assert_eq!((on, off), (0, 1), "e_self: deny Env with the fix / under CANDOR_R1624_OFF");
+    assert_eq!(on, 0, "e_self: deny Env with the fix");
+    let (_, rep_off) = scan(&d, None, true);
+    assert!(inferred(&rep_off, "e::K::e_self_zq").contains(&"Env".to_string()), "e_self: CANDOR_R1624_OFF restores the sibling's Env");
+    let (refused, _) = scan(&d, Some("deny Env e::K::e_self_zq\n"), true);
+    assert_eq!(refused, 2, "e_self: the switched gate refuses");
     let _ = std::fs::remove_dir_all(&d);
 }
 

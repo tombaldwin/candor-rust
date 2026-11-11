@@ -27,7 +27,7 @@ pub(crate) const CONFIG_KEYS_IMPLEMENTED: [&str; 5] = ["policy", "baseline", "de
 /// level too high whenever `CANDOR_CONFIG` pointed outside a `.candor/` directory, so it protected a
 /// path the run never reads while the real policy went unguarded and was destroyed at exit 0.
 pub(crate) fn discover_config_file(dir: &str) -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("CANDOR_CONFIG") {
+    if let Ok(p) = candor_report::env::operator("CANDOR_CONFIG") {
         let pb = std::path::PathBuf::from(&p);
         return if pb.is_file() { Some(pb) } else { None };
     }
@@ -80,7 +80,7 @@ pub(crate) fn config_inputs(dir: &str) -> Vec<(String, String)> {
 }
 
 pub(crate) fn load_candor_config(dir: &str) -> std::collections::HashMap<String, String> {
-    let file: Option<std::path::PathBuf> = match std::env::var("CANDOR_CONFIG") {
+    let file: Option<std::path::PathBuf> = match candor_report::env::operator("CANDOR_CONFIG") {
         Ok(p) => {
             let pb = std::path::PathBuf::from(&p);
             if !pb.is_file() {
@@ -203,7 +203,7 @@ pub(crate) fn parse_config_text(
 /// bare key with no value). Default OFF when neither is set. Used for `unknown-ratchet` /
 /// `CANDOR_UNKNOWN_RATCHET` — the AS-EFF-005 baseline-guard knob.
 pub(crate) fn flag(cfg: &std::collections::HashMap<String, String>, key: &str, env_var: &str) -> bool {
-    if std::env::var_os(env_var).is_some() {
+    if candor_report::env::operator_os(env_var).is_some() {
         return true;
     }
     match cfg.get(key) {

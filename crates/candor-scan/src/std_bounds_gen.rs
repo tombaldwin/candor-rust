@@ -1143,7 +1143,7 @@ pub(crate) fn generate(lib: &Path, rustc: &str) -> String {
         o.push_str(&format!("# unexpanded\t{u}\n"));
     }
     eprintln!("traits {} impls {} fns {} lines {} unparsed {} unresolved-bounds {}", tmerged.len(), out.impls.len(), out.fns.len(), lines.len(), out.unparsed.len(), unresolved.len());
-    if std::env::var_os("GEN_STD_BOUNDS_VERBOSE").is_some() {
+    if candor_report::env::trace("GEN_STD_BOUNDS_VERBOSE") {
         for u in &unresolved {
             eprintln!("unresolved\t{u}");
         }
@@ -1193,11 +1193,11 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 #[test]
 #[ignore]
 fn regenerate() {
-    let lib = std::env::var("STD_BOUNDS_SRC").expect("STD_BOUNDS_SRC");
-    let rustc = std::env::var("STD_BOUNDS_RUSTC").expect("STD_BOUNDS_RUSTC");
-    let out = std::env::var("STD_BOUNDS_OUT").expect("STD_BOUNDS_OUT");
+    let lib = candor_report::env::operator("STD_BOUNDS_SRC").expect("STD_BOUNDS_SRC");
+    let rustc = candor_report::env::operator("STD_BOUNDS_RUSTC").expect("STD_BOUNDS_RUSTC");
+    let out = candor_report::env::operator("STD_BOUNDS_OUT").expect("STD_BOUNDS_OUT");
     let text = generate(Path::new(&lib), &rustc);
-    if std::env::var_os("STD_BOUNDS_CHECK").is_some() {
+    if candor_report::env::operator_os("STD_BOUNDS_CHECK").is_some() {
         let have = std::fs::read_to_string(&out).unwrap_or_default();
         assert!(have == text, "{out} does not reproduce from {lib} ({rustc}); regenerate with gen/std_bounds.sh");
     } else {

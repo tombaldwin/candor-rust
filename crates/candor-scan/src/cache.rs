@@ -936,7 +936,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         if !locals.is_empty() {
             (block_fields, block_field_elem) =
                 crate::decls::block_local_field_index(&locals, include_tests, &uses, &callable_aliases);
-            if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R529_INSTR") {
                 for k in block_fields.keys() {
                     eprintln!("R529CFIELDS\t{modpath}\t{k}"); // §E1 REACH PROBE
                 }
@@ -1265,7 +1265,7 @@ pub(crate) fn add_nominal_twin_arms(aliases: &mut HashMap<String, String>, nomin
     let mut hits: Vec<String> = aliases.keys().filter(|k| nominal.contains(*k)).cloned().collect();
     hits.sort();
     for k in &hits {
-        if std::env::var_os("CANDOR_R1489_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1489_INSTR") {
             eprintln!("R1489TWIN\t{k}\t{}", aliases.get(k).map_or("-", |s| s.as_str()).replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
         }
         crate::decls::record_alias(aliases, k.clone(), format!("crate::{k}"));
@@ -1488,7 +1488,7 @@ pub(crate) fn chase_alias_chains_n(aliases: &mut HashMap<String, String>, nomina
         }
     }
     for (k, v) in new_vals.into_iter().chain(inherit).chain(inherit_ref) {
-        if std::env::var_os("CANDOR_R1483_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1483_INSTR") {
             eprintln!("R1483CHASE\t{}\t{}\t{}", k.replace(DEREF_ALIAS_SUF, "~deref"), aliases.get(&k).map_or("-", |s| s.as_str()).replace(ALIAS_ALT_SEP, "|"), v.replace(ALIAS_ALT_SEP, "|")); // §E1 REACH
         }
         aliases.insert(k, v);
@@ -1582,7 +1582,7 @@ pub(crate) fn alias_expand_decls(
     // in the same cells). Two routes answering one question differently is the defect the family closes by unifying (R347).
     // A LAYERED entry (`Vec<A1>`) keeps the refusal: `rewrap` puts the layer codes after the WHOLE string, which is not a
     // shape any element consumer splits. Kill switch `CANDOR_R1488_OFF` (attribution).
-    let r1488 = std::env::var_os("CANDOR_R1488_OFF").is_none();
+    let r1488 = !candor_report::env::switch("CANDOR_R1488_OFF");
     // SOUNDNESS R1487 — a field/return typed through a `type A = &'a T;` alias: the POINTEE (arms joined) and whether
     // `.clone()` on it is peeled. Asked BEFORE the path entry, which for a chain names only the next alias.
     // (arms joined, every arm a reference, clone-peeled); a mixed reference/nominal `#[cfg]` twin is the union of both
@@ -1623,7 +1623,7 @@ pub(crate) fn alias_expand_decls(
             return re_plain(crate::lang::strip_wrapped(p), false).map(|e| crate::lang::rewrap(p, &e));
         }
         let e = re_plain(p, r1488);
-        if r1488 && std::env::var_os("CANDOR_R1488_INSTR").is_some() {
+        if r1488 && candor_report::env::trace("CANDOR_R1488_INSTR") {
             if let Some(e) = e.as_deref().filter(|e| e.contains(crate::decls::ALIAS_ALT_SEP)) {
                 eprintln!("R1488DECL\t{p}\t{}", e.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
             }

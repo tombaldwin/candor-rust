@@ -71,7 +71,7 @@ use crate::*;
 pub(crate) fn charge_at_construction() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        let on = std::env::var("CANDOR_CHARGE_AT_CTOR").is_ok_and(|v| v != "0");
+        let on = candor_report::env::switch_value("CANDOR_CHARGE_AT_CTOR", candor_report::env::Selects::NotEqual("0"));
         if on {
             // LOUD, ONCE. A flag that silently turns 551 measured fabrications on in a CI job is a
             // footgun; one that says what it is on stderr is an experiment. The numbers are this
@@ -925,7 +925,7 @@ impl<'a> CallCollector<'a> {
                 .as_deref()
                 .and_then(crate::lang::local_type_leaf);
             if withdrawn.is_some_and(|l| would_charge(self, &l)) {
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("R196DISCLOSE {path}"); // §E1 HIT COUNTER
                 }
                 self.refusals.insert("ambiguous:unit-returning twin of a constructing fn".to_string());
@@ -934,7 +934,7 @@ impl<'a> CallCollector<'a> {
         }
         if self.ambiguous_return_leaves.get(last).is_some_and(|c| c.iter().any(|l| would_charge(self, l)))
         {
-            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("R182DISCLOSE {path}"); // §E1 HIT COUNTER
             }
             self.refusals.insert("ambiguous:same-name fns with different return types".to_string());
@@ -988,7 +988,7 @@ impl<'a> CallCollector<'a> {
     /// leaf-keyed fact names the method that runs. `None` everywhere else: the published reading.
     fn r1609_method_turbofish(&self, m: &syn::ExprMethodCall) -> Option<String> {
         let tf = m.turbofish.as_ref()?;
-        if std::env::var_os("CANDOR_R1609_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1609_OFF") {
             return None;
         }
         let name = m.method.to_string();
@@ -1006,7 +1006,7 @@ impl<'a> CallCollector<'a> {
         if !self.r1609_local_recv(m) {
             return None;
         }
-        if std::env::var_os("CANDOR_R1609_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1609_INSTR") {
             eprintln!("R1609TYPED\t{name}\t{ty}"); // §E1 REACH COUNTER
         }
         Some(ty)
@@ -1031,7 +1031,7 @@ impl<'a> CallCollector<'a> {
     /// the method (EXECUTED `rustagent-recv/fx/t9` `t_caller_generic`: `b.bits()` over `B: Flags` writes; ABSENT). Empty
     /// for any other turbofish.
     fn r1609_caller_generic_bounds(&self, args: &syn::AngleBracketedGenericArguments, leaf: &str) -> Vec<String> {
-        if std::env::var_os("CANDOR_R1609_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1609_OFF") {
             return Vec::new();
         }
         let Some(pos) = self.returns.get(&crate::model::ret_generic_key(leaf)).and_then(|p| p.parse::<usize>().ok()) else {
@@ -1170,7 +1170,7 @@ impl<'a> CallCollector<'a> {
     /// is its `Output` (R1168). Local means crate-anchored (`crate::..`) or a bare name; another crate's path (a bin's
     /// `clap::Command` inside the clap package) keeps the root reading. `CANDOR_R1608_OFF=1` restores the root reading.
     fn r1608_chain_type(&self, expr: &syn::Expr) -> Option<Option<String>> {
-        if std::env::var_os("CANDOR_R1608_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1608_OFF") {
             return None;
         }
         // (step, awaited after it) — outermost first; `awaited` on the root is kept separately.
@@ -1202,7 +1202,7 @@ impl<'a> CallCollector<'a> {
         if root == "Self" || !self.r1608_local(&root) {
             return None;
         }
-        let instr = std::env::var_os("CANDOR_R1608_INSTR").is_some();
+        let instr = candor_report::env::trace("CANDOR_R1608_INSTR");
         let mut cur = root.clone();
         if awaited {
             match self.r1608_await(&cur) {
@@ -1398,14 +1398,14 @@ impl<'a> CallCollector<'a> {
                         match next {
                             Some(n) => cur = n,
                             None => {
-                                if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R1605_INSTR") {
                                     eprintln!("R1606STOP\t{cur}\t.{st}"); // §E1 — a step not read: left untyped
                                 }
                                 return None;
                             }
                         }
                     }
-                    if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1605_INSTR") {
                         eprintln!("R1606ROOT\t{rt}\t{cur}"); // §E1 REACH COUNTER
                     }
                     return Some(cur);
@@ -1434,7 +1434,7 @@ impl<'a> CallCollector<'a> {
         }
         let leaf = ty.rsplit("::").next().unwrap_or(&ty);
         if crate::lang::caps_leaf_shadowed_by_const(leaf, self.static_types) {
-            if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("R722CONST {leaf}");
             }
             return None;
@@ -1516,7 +1516,7 @@ impl<'a> CallCollector<'a> {
         // SOUNDNESS R1494 — a re-slice of a byte-string / string LITERAL (`b"x"[..].ser(w)`, `"x"[1..].ser(w)`): `[u8]` /
         // `str`, whatever the literal's length.
         let lit_slice: Option<&'static str> = match peel_recv(&node.receiver) {
-            syn::Expr::Index(ix) if is_range_index(ix) && std::env::var_os("CANDOR_R1494_OFF").is_none() => match peel_recv(&ix.expr) {
+            syn::Expr::Index(ix) if is_range_index(ix) && !candor_report::env::switch("CANDOR_R1494_OFF") => match peel_recv(&ix.expr) {
                 syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::ByteStr(_), .. }) => Some("[u8]"),
                 syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(_), .. }) => Some("str"),
                 _ => None,
@@ -1555,7 +1555,7 @@ impl<'a> CallCollector<'a> {
         // value typed std's `String`/`str` (or a string literal), and `as_str`/`as_mut_str` on std's `String`: those are
         // std's inherent members and their result type is fixed. The key is then asked exactly as a typed slice/str
         // receiver's is (the inherent-surface denylists and `NONPATH_RECV_TAILS` below). `CANDOR_R1494_OFF=1`.
-        let r1494 = std::env::var_os("CANDOR_R1494_OFF").is_none();
+        let r1494 = !candor_report::env::switch("CANDOR_R1494_OFF");
         let view: Vec<&'static str> = if let Some(k) = lit_slice {
             vec![k]
         } else if !r1494 || sliced.is_some() {
@@ -1611,7 +1611,7 @@ impl<'a> CallCollector<'a> {
             if view.iter().any(|k| inherent(k)) {
                 return;
             }
-            if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1494_INSTR").is_some() {
+            if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1494_INSTR") {
                 eprintln!("R1494VIEW\t{}\t{leaf}", view.join(",")); // §E1 REACH COUNTER
             }
             keys.extend(view.iter().map(|k| k.to_string()));
@@ -1730,7 +1730,7 @@ impl<'a> CallCollector<'a> {
         for k in keys {
             let t2 = format!("{k}::{leaf}");
             if tails.contains(&t2) {
-                if std::env::var_os("CANDOR_R1056_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1056_INSTR") {
                     eprintln!("{route}\t{t2}"); // §E1 REACH PROBE (`[_]`/`[_;_]` in t2 = the generic arm)
                 }
                 self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: true, argc: node.args.len().min(255) as u8, entropy_arg: false, path: t2,
@@ -1833,14 +1833,14 @@ impl<'a> CallCollector<'a> {
                 }
                 i += 1;
             }
-            if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1080_INSTR") {
                 eprintln!("R1080PUSHDYN\t{name}\t{}", dyn_leaves.join(",")); // §E1 REACH PROBE
             }
             self.elem_trait_of.insert(name, dyn_leaves);
             return;
         }
         let Some(e) = self.exact_value_type(val) else { return };
-        if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1080_INSTR") {
             eprintln!("R1080PUSH\t{name}\t{e}"); // §E1 REACH PROBE
         }
         self.elem_of.insert(name, e);
@@ -1882,7 +1882,7 @@ impl<'a> CallCollector<'a> {
         // order is not meaning: repeat the pass until nothing new binds. Each pass binds at least one name or
         // stops, so it ends within (number of aliases) passes; a CYCLE (rustc E0391, nothing compiles) never
         // leaves the sentinel, which is the pre-existing answer.
-        let fixpoint = std::env::var_os("CANDOR_R1483_OFF").is_none();
+        let fixpoint = !candor_report::env::switch("CANDOR_R1483_OFF");
         let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut pass = 0usize;
         loop {
@@ -1903,13 +1903,13 @@ impl<'a> CallCollector<'a> {
                 if target.starts_with(crate::decls::ITEM_SENTINEL) {
                     continue;
                 }
-                if std::env::var_os("CANDOR_R1143_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1143_INSTR") {
                     eprintln!("R1143ALIAS\t{}\t{target}", t.ident); // §E1 REACH COUNTER
                 }
                 let n = t.ident.to_string();
                 let prev = self.uses.to_mut().insert(n.clone(), target);
                 alias_prev.push((n.clone(), prev));
-                if pass > 1 && std::env::var_os("CANDOR_R1483_INSTR").is_some() {
+                if pass > 1 && candor_report::env::trace("CANDOR_R1483_INSTR") {
                     eprintln!("R1483BLK\t{n}"); // §E1 REACH — bound only because of the fixpoint
                 }
                 bound.insert(n);
@@ -1968,7 +1968,7 @@ impl<'a> CallCollector<'a> {
                 if !self.is_std_vec_like(ty) {
                     continue;
                 }
-                if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1080_INSTR") {
                     eprintln!("R1080PRE\t{v}\t{t}"); // §E1 REACH PROBE
                 }
                 self.elem_of.insert(v.clone(), t.clone());
@@ -2010,12 +2010,12 @@ impl<'a> CallCollector<'a> {
         let ty = syn::Type::Path(tp);
         let leaves = elem_trait_leaves(&ty, &self.generic_bounds, self.callable_aliases);
         if !leaves.is_empty() {
-            if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1080_INSTR") {
                 eprintln!("R1080TURBODYN\t{name}\t{}", leaves.join(",")); // §E1 REACH PROBE
             }
             self.elem_trait_of.insert(name, leaves);
         } else if let Some(e) = elem_type(&ty, &self.uses) {
-            if std::env::var_os("CANDOR_R1080_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1080_INSTR") {
                 eprintln!("R1080TURBO\t{name}\t{e}"); // §E1 REACH PROBE
             }
             self.elem_of.insert(name, e);
@@ -2059,7 +2059,7 @@ impl<'a> CallCollector<'a> {
         }
         let Some(first) = args.first() else { return };
         if let Some(t) = self.resolve_recv_type(first) {
-            if std::env::var_os("CANDOR_R1131_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1131_INSTR") {
                 eprintln!("R1131UFCS\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
             self.charge_coercion_ty(&t, tr, m);
@@ -2074,7 +2074,7 @@ impl<'a> CallCollector<'a> {
     /// afterwards: the expansion's own `let`s are hygienic in rustc (invisible to the code around the invocation), and
     /// leaving them in place re-typed the caller's later statements.
     fn walk_expansion(&mut self, mname: &str, block: &syn::Block) {
-        if std::env::var_os("CANDOR_R1144_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1144_INSTR") {
             eprintln!("R1144EXPAND\t{mname}"); // §E1 REACH COUNTER
         }
         let snap = (
@@ -2229,7 +2229,7 @@ impl<'a> CallCollector<'a> {
     /// member the trait does not declare forms nothing. EXECUTED rustagent-r1246/fx/h3_blanket. `CANDOR_R1465_OFF=1`.
     fn self_param_bound_dispatch(&mut self, receiver: &syn::Expr, leaf: &str) {
         let syn::Expr::Path(p) = peel_value(receiver) else { return };
-        if !p.path.is_ident("self") || std::env::var_os("CANDOR_R1465_OFF").is_some() {
+        if !p.path.is_ident("self") || candor_report::env::switch("CANDOR_R1465_OFF") {
             return;
         }
         let Some(g) = self.vars.get("self") else { return };
@@ -2263,7 +2263,7 @@ impl<'a> CallCollector<'a> {
         }
         let Some(g) = self.vars.get("self").cloned() else { return };
         let own = self.uses.get(crate::decls::IMPL_TRAIT_KEY).cloned();
-        let explicit = explicit && std::env::var_os("CANDOR_R1322U_OFF").is_none();
+        let explicit = explicit && !candor_report::env::switch("CANDOR_R1322U_OFF");
         if !explicit && own.as_deref().is_some_and(|o| self.local_traits.get(o).is_some_and(|lt| lt.methods.contains(leaf))) {
             return;
         }
@@ -2475,7 +2475,7 @@ impl<'a> CallCollector<'a> {
                 } else {
                     continue;
                 };
-                if std::env::var_os("CANDOR_R1167_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1167_INSTR") {
                     eprintln!("R1167FWD\t{key}\t{inner_key}"); // §E1 REACH COUNTER, on the ADDED branch only
                 }
                 self.charge_generic_operators_at(&inner_key, args, inner_method, Some((at, arg_at)), elem, seen, depth + 1);
@@ -2549,8 +2549,8 @@ impl<'a> CallCollector<'a> {
                 let leaf = t.split('<').next().unwrap_or(&t).rsplit("::").next().unwrap_or(&t);
                 // CALL-TARGET ROUND 2 — a DEPENDENCY type's impl is reached through the chained join (the key its report
                 // publishes, `dep::Type::member`), never by this crate's leaf: `charge_licensed`'s dependency route.
-                if !r1145 && self.is_dependency_type(&t) && std::env::var_os("CANDOR_CT2_OFF").is_none() {
-                    if std::env::var_os("CANDOR_R1167_INSTR").is_some() {
+                if !r1145 && self.is_dependency_type(&t) && !candor_report::env::switch("CANDOR_CT2_OFF") {
+                    if candor_report::env::trace("CANDOR_R1167_INSTR") {
                         eprintln!("R1167DEP\t{tr}\t{m}\t{t}"); // §E1 REACH COUNTER
                     }
                     self.charge_licensed(&t, &tr, &m);
@@ -2564,11 +2564,11 @@ impl<'a> CallCollector<'a> {
                 {
                     continue;
                 }
-                if std::env::var_os("CANDOR_R1145_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1145_INSTR") {
                     eprintln!("R1145GENOP\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
                 }
                 if (elem || depth > 0 || !crate::lang::OPERATOR_TRAITS.contains(&tr.as_str()))
-                    && std::env::var_os("CANDOR_R1167_INSTR").is_some()
+                    && candor_report::env::trace("CANDOR_R1167_INSTR")
                 {
                     eprintln!("R1167GEN\t{tr}\t{m}\t{t}\telem={elem}\tdepth={depth}"); // §E1 REACH COUNTER
                 }
@@ -2660,10 +2660,10 @@ impl<'a> CallCollector<'a> {
             self.wrapper_payload_types(a, &mut from_types, 0);
             // SOUNDNESS R1196 — and the `Result` error type a call's declared return or a binding carries
             // (`dep::q(mk())`, `let r: Result<u8, Le> = ..; dep::q(r)`), which the expression typer does not record.
-            if std::env::var_os("CANDOR_R1196_OFF").is_none() {
+            if !candor_report::env::switch("CANDOR_R1196_OFF") {
                 if let Some(errs) = self.arg_err_types(a) {
                     for t in errs.split(crate::model::RET_ERR_SEP) {
-                        if std::env::var_os("CANDOR_R1196_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1196_INSTR") {
                             eprintln!("R1196ERR\t{callee}\t{}\t{t}", base + i); // §E1 REACH COUNTER, ADDED branch only
                         }
                         from_types.push(t.to_string());
@@ -2693,12 +2693,12 @@ impl<'a> CallCollector<'a> {
             });
             if !named_concrete
                 && !payload_typed
-                && std::env::var_os("CANDOR_R1196_UNTYPED_OFF").is_none()
+                && !candor_report::env::switch("CANDOR_R1196_UNTYPED_OFF")
                 && self.returns.contains_key(crate::model::FROM_ANY_KEY)
                 && self.untyped_conversion_candidate(a)
             {
                 let l = format!("{}{}", crate::model::FROM_WITNESS_PREFIX, crate::model::FROM_UNTYPED_SRC);
-                if std::env::var_os("CANDOR_R1196_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1196_INSTR") {
                     eprintln!("R1196UNTYPED\t{callee}\t{}", base + i); // §E1 REACH COUNTER, ADDED branch only
                 }
                 if !leaves.contains(&l) {
@@ -2720,10 +2720,10 @@ impl<'a> CallCollector<'a> {
                 }
             }
             for l in leaves {
-                if std::env::var_os("CANDOR_R1165_INSTR").is_some() && !l.starts_with(crate::model::FROM_WITNESS_PREFIX) {
+                if candor_report::env::trace("CANDOR_R1165_INSTR") && !l.starts_with(crate::model::FROM_WITNESS_PREFIX) {
                     eprintln!("R1165WITNESS\t{callee}\t{}\t{l}", base + i); // §E1 REACH COUNTER, ADDED branch only
                 }
-                if std::env::var_os("CANDOR_R1186_INSTR").is_some() && l.starts_with(crate::model::FROM_WITNESS_PREFIX) {
+                if candor_report::env::trace("CANDOR_R1186_INSTR") && l.starts_with(crate::model::FROM_WITNESS_PREFIX) {
                     eprintln!("R1186WITNESS\t{callee}\t{}\t{l}", base + i); // §E1 REACH COUNTER (chained or not)
                 }
                 self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
@@ -3058,7 +3058,7 @@ impl<'a> CallCollector<'a> {
     /// consumer read PURE where the report it chained had the row. `STD_RECV_JOIN_MARKER` asks `dep#Leaf::leaf`.
     /// `CANDOR_R1540_OFF=1` turns every route here off (an attribution switch; the published behaviour is the off arm).
     fn std_recv_impl_calls(&mut self, node: &syn::ExprMethodCall, leaf: &str) {
-        if leaf == "clone" || std::env::var_os("CANDOR_R1540_OFF").is_some() {
+        if leaf == "clone" || candor_report::env::switch("CANDOR_R1540_OFF") {
             return;
         }
         let argc = node.args.len();
@@ -3070,7 +3070,7 @@ impl<'a> CallCollector<'a> {
             if let syn::Expr::Path(p) = peel_recv(&node.receiver) {
                 if let Some(n) = p.path.get_ident().map(|i| i.to_string()) {
                     if self.elem_of.contains_key(&n) && self.local_fn_on("Vec", leaf) && !self.fields.contains_key("Vec") {
-                        if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1540_INSTR") {
                             eprintln!("R1540ELEM\tVec::{leaf}"); // §E1 REACH COUNTER
                         }
                         self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: argc.min(255) as u8, entropy_arg: false,
@@ -3169,7 +3169,7 @@ impl<'a> CallCollector<'a> {
         if !matches!(t_leaf.as_str(), "Box" | "Arc" | "Rc" | "Pin") && !self.local_fn_on(&t_leaf, leaf) {
             for w in ["Box", "Arc", "Rc", "Pin"] {
                 if self.local_fn_on(w, leaf) && !self.fields.contains_key(w) {
-                    if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1540_INSTR") {
                         eprintln!("R1540PEEL\t{w}::{leaf}\t{t_leaf}"); // §E1 REACH COUNTER
                     }
                     self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: argc.min(255) as u8, entropy_arg: false,
@@ -3180,7 +3180,7 @@ impl<'a> CallCollector<'a> {
             }
         }
         for tl in &leaves {
-            if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1540_INSTR") {
                 eprintln!("R1540LOCAL\t{tl}::{leaf}\tstd_named={std_named}"); // §E1 REACH COUNTER
             }
             let path = if std_named { format!("{STD_RECV_AMBIG_MARKER}::{tl}::{leaf}") } else { format!("{tl}::{leaf}") };
@@ -3198,7 +3198,7 @@ impl<'a> CallCollector<'a> {
         let crates = self.trait_import_crates();
         for cr in &crates {
             for tl in &join_leaves {
-                if std::env::var_os("CANDOR_R1540_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1540_INSTR") {
                     eprintln!("R1540JOINSITE\t{cr}\t{tl}::{leaf}"); // §E1 REACH COUNTER (a site; the join is counted in scan.rs)
                 }
                 self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: argc.min(255) as u8, entropy_arg: false,
@@ -3258,7 +3258,7 @@ impl<'a> CallCollector<'a> {
             return;
         }
         for cr in self.trait_import_crates() {
-            if std::env::var_os("CANDOR_R1136_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1136_INSTR") {
                 eprintln!("R1136EXT\t{cr}\t{t}\t.{leaf}/{}", node.args.len()); // §E1 REACH COUNTER, on the ADDED branch only
             }
             self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
@@ -3281,7 +3281,7 @@ impl<'a> CallCollector<'a> {
         // path is multi-segment, so `visit_expr_method_call` records dependency provenance for it) is NOT evidence the
         // receiver was typed: the call loop drops it (std is no dependency), and reading it as a call this site formed
         // stood the floor aside, so `d.m()` over a crate's effectful `impl Tr for Duration` read ABSENT (EXECUTED).
-        let r1540 = std::env::var_os("CANDOR_R1540_OFF").is_none();
+        let r1540 = !candor_report::env::switch("CANDOR_R1540_OFF");
         // Only for a method std itself does not define: a std-named one (`try_into`, `is_empty`) on a std factory's value is
         // std's own, and asking the floor about it hedged on every crate method of that name (measured on tokio).
         let std_untyped = |c: &Call| {
@@ -3323,7 +3323,7 @@ impl<'a> CallCollector<'a> {
                 if matches!(mc.method.to_string().as_str(), "as_slices" | "as_mut_slices")) => return,
             _ => {}
         }
-        if std::env::var_os("CANDOR_R1095_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1095_INSTR") {
             eprintln!("R1095SITE\t{leaf}"); // §E1 REACH PROBE — a site, before the candidate judgement
         }
         self.untyped_methods.insert(leaf.to_string());
@@ -3518,7 +3518,7 @@ impl<'a> CallCollector<'a> {
         {
             return None;
         }
-        if std::env::var_os("CANDOR_R1055_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1055_INSTR") {
             eprintln!("R1055CTOR\t{full}"); // §E1 REACH PROBE
         }
         Some(full)
@@ -3551,7 +3551,7 @@ impl<'a> CallCollector<'a> {
             }
         }
         if tys.len() >= 2 && tys.contains(&cur) {
-            if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("R899UNION");
             }
             tys.sort();
@@ -3585,7 +3585,7 @@ impl<'a> CallCollector<'a> {
         primary: Option<&str>,
         leaf_under: impl Fn(&HashMap<String, String>) -> Option<String>,
     ) {
-        if std::env::var_os("CANDOR_R1474_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1474_OFF") {
             return;
         }
         let head = written.split("::").next().unwrap_or(written);
@@ -3595,7 +3595,7 @@ impl<'a> CallCollector<'a> {
         // `fx2/drop_mxa_let`: the active alias arm's `Drop` writes and only the inactive struct's was marked).
         let (key, arms) = match self.use_alts.get(head).filter(|a| a.len() >= 2).cloned() {
             Some(a) => (head.to_string(), a),
-            None if std::env::var_os("CANDOR_R1488_OFF").is_none() => {
+            None if !candor_report::env::switch("CANDOR_R1488_OFF") => {
                 let segs: Vec<&str> = written.split("::").collect();
                 let Some((k, v)) = (1..=segs.len()).rev().find_map(|n| {
                     let k = segs[..n].join("::");
@@ -3616,7 +3616,7 @@ impl<'a> CallCollector<'a> {
             let Some(l) = leaf_under(&u2) else { continue };
             let full = crate::lang::expand(written, &u2);
             let q = self.ctor_twin_qual(Some(&l), &full, false);
-            if std::env::var_os("CANDOR_R1474_INSTR").is_some() && self.drop_relevant.contains(&l) {
+            if candor_report::env::trace("CANDOR_R1474_INSTR") && self.drop_relevant.contains(&l) {
                 eprintln!("R1474ARMS\tctor\t{written}\t{l}\t{}", q.as_deref().unwrap_or("-")); // §E1
             }
             self.note_release_q(Some(l), true, q);
@@ -3630,7 +3630,7 @@ impl<'a> CallCollector<'a> {
     /// as the leaf-only marker always has.
     fn ctor_twin_qual(&self, leaf: Option<&str>, written: &str, expand_it: bool) -> Option<String> {
         let l = leaf?;
-        if std::env::var_os("CANDOR_R1253_OFF").is_some() || !self.assign_drop.twin_leaves.is_some_and(|t| t.contains(l)) {
+        if candor_report::env::switch("CANDOR_R1253_OFF") || !self.assign_drop.twin_leaves.is_some_and(|t| t.contains(l)) {
             return None;
         }
         let full = if expand_it { crate::lang::expand(written, &self.uses) } else { written.to_string() };
@@ -3856,7 +3856,7 @@ impl<'a> CallCollector<'a> {
         if !self.marked_cross_ctors.insert(format!("{cr}\u{0}{leaf}")) {
             return;
         }
-        if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
+        if candor_report::env::trace("CANDOR_CTOR_DEBUG") {
             eprintln!("CTOR-RELEASE-CROSS {cr}::{leaf} in {}", self.modpath);
         }
         self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
@@ -3958,7 +3958,7 @@ impl<'a> CallCollector<'a> {
                     let leaf = p.rsplit("::").next().unwrap_or(&p).to_string();
                     let twin = self.assign_drop.twin_leaves.is_some_and(|t| t.contains(&leaf));
                     if self.drop_relevant.contains(&leaf) && !twin {
-                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                             eprintln!("R1118CONTAINER {leaf} in {}", self.modpath); // §E1 REACH COUNTER
                         }
                         self.note_owned_param_drop(Some(leaf));
@@ -4053,7 +4053,7 @@ impl<'a> CallCollector<'a> {
             }
         }
         for l in pos.into_iter().flatten() {
-            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && self.drop_relevant.contains(&l) {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") && self.drop_relevant.contains(&l) {
                 eprintln!("R1123RELEASED {l} in {}", self.modpath); // §E1 REACH COUNTER
             }
             self.note_owned_param_drop(Some(l));
@@ -4114,11 +4114,11 @@ impl<'a> CallCollector<'a> {
         // WOULD have suppressed this construction's drop". Printed only when it really fires, so a
         // zero count in an A/B means the corpus never reached the change.
         if gate_on_escape && charge_at_construction() && self.escaping_ctors.contains(&leaf)
-            && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+            && candor_report::env::trace("CANDOR_ALIAS_DEBUG")
         {
             eprintln!("S2CTOR {} in {}", leaf, self.modpath);
         }
-        if !gate_on_escape && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && self.escaping_ctors.contains(&leaf) {
+        if !gate_on_escape && candor_report::env::trace("CANDOR_ALIAS_DEBUG") && self.escaping_ctors.contains(&leaf) {
             // §E1 HIT COUNTER — the branch this change adds is exactly "the leaf gate WOULD have
             // suppressed this parameter's drop". Printed only when it really fires, so a zero count in an
             // A/B means the corpus never reached the change rather than that the change was quiet.
@@ -4137,7 +4137,7 @@ impl<'a> CallCollector<'a> {
         // WRONG leaf, only that some row moved. Every collision found while building this — tokio's
         // `Ordering::Acquire`, isahc's `match` pattern, the `self: Pin<&mut Self>` receiver — was
         // identified by reading this stream, and by reasoning about the diff not at all.
-        if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
+        if candor_report::env::trace("CANDOR_CTOR_DEBUG") {
             eprintln!("CTOR-MARK {} in {}", leaf, self.modpath);
         }
         self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
@@ -4183,14 +4183,14 @@ impl<'a> CallCollector<'a> {
             if !charge_at_construction() {
                 return;
             }
-            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("S2CROSS {cr}::{leaf} in {}", self.modpath);
             }
         }
         if !self.marked_cross_ctors.insert(format!("{cr}\u{0}{leaf}")) {
             return;
         }
-        if std::env::var("CANDOR_CTOR_DEBUG").is_ok() {
+        if candor_report::env::trace("CANDOR_CTOR_DEBUG") {
             eprintln!("CTOR-MARK-CROSS {cr}::{leaf} in {}", self.modpath);
         }
         self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
@@ -4318,14 +4318,14 @@ impl<'a> CallCollector<'a> {
         // CONCRETE argument answers — an argument that is one of this scope's own type parameters (`impl<F: Read> Read for
         // NamedTempFile<F>`) is left to the walk below exactly as before — and only a std I/O handle, which no crate
         // `impl_fn_key` can name (the gate R452 put on every other corrected receiver is kept for those).
-        if std::env::var_os("CANDOR_R1643_OFF").is_none() {
+        if !candor_report::env::switch("CANDOR_R1643_OFF") {
             if let syn::Expr::Path(p) = r {
                 if p.path.is_ident("self") {
                     let arg = self.uses.get(crate::decls::IMPL_ARGS_KEY).and_then(|a| a.split(',').nth(pos).map(str::to_string));
                     if let Some(a) = arg.filter(|a| a != "_" && !self.generic_bounds.contains_key(a.as_str())) {
                         let full = crate::lang::expand(&a, &self.uses);
                         if let Some(h) = std_io_handle(&full) {
-                            if std::env::var_os("CANDOR_R1643_INSTR").is_some() {
+                            if candor_report::env::trace("CANDOR_R1643_INSTR") {
                                 eprintln!("R1643HANDLE\t{base_leaf}.{leaf}\tself<{a}>\t{h}"); // §E1 REACH COUNTER
                             }
                             return Some(h);
@@ -4398,10 +4398,10 @@ impl<'a> CallCollector<'a> {
         // published 0.41.3 and 65889f2 while the field spelling `self.file.read(b)` and `let f: &mut File = ..; f.read(b)`
         // read `Fs`; tempfile's `impl Read for NamedTempFile`). A std handle is not a crate type, so the ambiguity this
         // gate guards against (three local `Selector::deregister` claimants) cannot arise for it. `CANDOR_R1643_OFF=1`.
-        if std::env::var_os("CANDOR_R1643_OFF").is_none() {
+        if !candor_report::env::switch("CANDOR_R1643_OFF") {
             let full = crate::lang::expand(ret, &self.uses);
             if let Some(h) = std_io_handle(&full).or_else(|| std_io_handle(ret)) {
-                if std::env::var_os("CANDOR_R1643_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1643_INSTR") {
                     eprintln!("R1643HANDLE\t{base_leaf}.{leaf}\t{h}"); // §E1 REACH COUNTER, on the ADDED branch only
                 }
                 return Some(h);
@@ -4444,7 +4444,7 @@ impl<'a> CallCollector<'a> {
             .filter(|(_, l)| !l.is_empty())
             .filter_map(|(p, l)| crate::lang::single_pat_ident(p).map(|n| (n, l.clone())))
             .collect();
-        if std::env::var_os("CANDOR_R1429_INSTR").is_some() && !binds.is_empty() {
+        if candor_report::env::trace("CANDOR_R1429_INSTR") && !binds.is_empty() {
             eprintln!("R1429BIND\t{name}\t{}", binds.iter().map(|b| b.0.as_str()).collect::<Vec<_>>().join(",")); // §E1 REACH COUNTER
         }
         (!binds.is_empty()).then_some(binds)
@@ -4487,7 +4487,7 @@ impl<'a> CallCollector<'a> {
         if self.uses.contains_key(&format!("{}{leaf}", crate::model::SCOPE_MACRO_PREFIX)) {
             return None;
         }
-        if std::env::var_os("CANDOR_R474_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R474_OFF") {
             return None;
         }
         let bound = self.macro_twins.iter().filter_map(|k| k.strip_prefix(crate::model::MACRO_USE_LOG_PREFIX)).any(|rest| {
@@ -4500,7 +4500,7 @@ impl<'a> CallCollector<'a> {
             let attrs = syn::parse::Parser::parse_str(syn::Attribute::parse_outer, &src).unwrap_or_default();
             !crate::lang::is_cfg_inactive(&attrs)
         });
-        if bound && std::env::var_os("CANDOR_R474_INSTR").is_some() {
+        if bound && candor_report::env::trace("CANDOR_R474_INSTR") {
             eprintln!("R474MACUSE\t{leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
         }
         bound.then(|| format!("log::{leaf}"))
@@ -4574,13 +4574,13 @@ impl<'a> CallCollector<'a> {
             .map(|(c, e)| (c.into_iter().filter(not_std).collect::<Vec<_>>(), e))
         {
             Some((mut c, true)) if c.len() == 1 => {
-                if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_V053_INSTR") {
                     eprintln!("R1153EXCL\t{ty}\t{}", c[0]); // §E1 REACH COUNTER
                 }
                 (c.pop().unwrap_or(ty), Vec::new())
             }
             Some((c, false)) => {
-                if prelude && !c.is_empty() && std::env::var_os("CANDOR_V054_INSTR").is_some() {
+                if prelude && !c.is_empty() && candor_report::env::trace("CANDOR_V054_INSTR") {
                     eprintln!("R1160PRELUDE\t{ty}\t.{leaf}\t{}", c.join(",")); // §E1 REACH COUNTER
                 }
                 (ty, c)
@@ -4705,7 +4705,7 @@ impl<'a> CallCollector<'a> {
             // `return`, so the pre-1.65 let-else idiom left the binding untyped. An arm that binds anything else, or a
             // value arm that does not type, still refuses the whole match.
             syn::Expr::Match(m)
-                if std::env::var_os("CANDOR_R1323_OFF").is_none()
+                if !candor_report::env::switch("CANDOR_R1323_OFF")
                     && m.arms.iter().any(|a| crate::lang::some_ok_unwrap_pat(&a.pat) && arm_yields_own_binding(a)) =>
             {
                 let mut found: Option<String> = None;
@@ -4755,7 +4755,7 @@ impl<'a> CallCollector<'a> {
                 Some(_) => return None,
             }
         }
-        if found.is_some() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+        if found.is_some() && candor_report::env::trace("CANDOR_V053_INSTR") {
             eprintln!("R1155LET\t{}", found.as_deref().unwrap_or("")); // §E1 REACH COUNTER
         }
         found
@@ -4873,7 +4873,7 @@ impl<'a> CallCollector<'a> {
     /// SOUNDNESS R1587 — `<factory path>::<peeled>` when `expr` is a dependency factory call followed ONLY by
     /// `unwrap`/`expect` (and `?`/`.await`) — at least one `unwrap`/`expect` — the shape that recorded no provenance.
     fn r1587_peeled_factory(&self, expr: &syn::Expr) -> Option<String> {
-        if std::env::var_os("CANDOR_R1587_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1587_OFF") {
             return None;
         }
         let mut cur = expr;
@@ -4993,7 +4993,7 @@ impl<'a> CallCollector<'a> {
     /// bare leaf) has no provable module and gets `None`, so every caller keeps its pre-existing reading. So does a path
     /// the qualified indexes never saw declared. Kill switch `CANDOR_R1624_OFF`.
     fn owner_qual(&self, base_expr: &syn::Expr, base: &str) -> Option<(&'a crate::cache::QualIndexes, String)> {
-        if std::env::var_os("CANDOR_R1624_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1624_OFF") {
             return None;
         }
         let qi = self.assign_drop.fields_q?;
@@ -5024,7 +5024,7 @@ impl<'a> CallCollector<'a> {
         let (own, legacy) = if elem { (&qi.field_elem, self.field_elem) } else { (&qi.fields, self.fields) };
         let leaf = base.rsplit("::").next().unwrap_or(base);
         let instr = |what: &str, v: &str| {
-            if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1624_INSTR") {
                 eprintln!("R1624QUAL\t{}\t{what}\t{qual}.{key}\t{v}", if elem { "elem" } else { "field" }); // §E1 REACH
             }
         };
@@ -5039,7 +5039,7 @@ impl<'a> CallCollector<'a> {
                 // twin's, so it must not answer either. The bound route answers it (`qual_trait_field_in`). Measured: redis
                 // 1.7.1's sync `ClusterConnection::{is_open, check_connection, set_*_timeout}` formed `C::is_open` and went
                 // ABSENT (EXECUTED twin fixture `fx/ge2`: `a::W::ge_map` `deny Fs` 1 -> 0 under R1624 alone).
-                if elem && qi.names_param(&qual, v) && std::env::var_os("CANDOR_R1624ELEM_OFF").is_none() {
+                if elem && qi.names_param(&qual, v) && !candor_report::env::switch("CANDOR_R1624ELEM_OFF") {
                     instr("param", v);
                     return Some(None);
                 }
@@ -5071,7 +5071,7 @@ impl<'a> CallCollector<'a> {
         let (own, legacy) = if elem { (&qi.field_elem_trait, self.field_elem_trait) } else { (&qi.trait_fields, self.trait_fields) };
         let legacy_has = legacy.get(leaf).is_some_and(|m| m.contains_key(key));
         let instr = |what: &str, v: &str| {
-            if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1624_INSTR") {
                 eprintln!("R1624QUAL\t{}\t{what}\t{qual}.{key}\t{v}", if elem { "elemtrait" } else { "trait" }); // §E1 REACH
             }
         };
@@ -5086,7 +5086,7 @@ impl<'a> CallCollector<'a> {
             None => {
                 // SOUNDNESS R1624 (twin element) — an element typed by the owner's own parameter: its bounds HERE, mapped by position
                 // (`payload_decision`), as the leaf-keyed index's R476 join would have filed them for a non-twin.
-                if elem && std::env::var_os("CANDOR_R1624ELEM_OFF").is_none() {
+                if elem && !candor_report::env::switch("CANDOR_R1624ELEM_OFF") {
                     if let Some(p) = qi.field_elem.get(&qual).and_then(|m| m.get(key)).filter(|v| qi.names_param(&qual, v)) {
                         // By the owner's OWN parameter list (`qi.params`): the leaf-keyed `type_params_key` fact
                         // `payload_decision` reads is withdrawn when a same-leaf twin declares different parameters.
@@ -5130,7 +5130,7 @@ impl<'a> CallCollector<'a> {
         };
         let hit = self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}{key}"))
             || self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}*"));
-        if hit && std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+        if hit && candor_report::env::trace("CANDOR_VEINB_INSTR") {
             eprintln!("VEINB_AMBFIELD\t{leaf}.{key}");
         }
         hit
@@ -5207,7 +5207,7 @@ impl<'a> CallCollector<'a> {
             // lost its edge once `PollFd` carried its two arms (polling, measured in the R1488 A/B). An arm whose return
             // the index cannot answer contributes nothing, exactly as a single receiver of that type would; if none
             // answers, unknown, as before.
-            if std::env::var_os("CANDOR_R1488_OFF").is_some() {
+            if candor_report::env::switch("CANDOR_R1488_OFF") {
                 return None;
             }
             let mut arms: Vec<String> = Vec::new();
@@ -5256,7 +5256,7 @@ impl<'a> CallCollector<'a> {
         {
             return None;
         }
-        if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_VEINB_INSTR") {
             eprintln!("VEINB_WRAP\t{kind}.{method}");
         }
         Some(e)
@@ -5418,7 +5418,7 @@ impl<'a> CallCollector<'a> {
                     // §E1 REACH COUNTER, on the CHANGED branch — this arm both ADDS an element answer
                     // and WITHDRAWS a chain-walk one, so "it did not fire" and "it fired and moved
                     // nothing" are different claims and the A/B must be able to tell them apart.
-                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R446ACC");
                     }
                     if !self.resolve_elem_trait_leaves(&m.receiver).is_empty() {
@@ -5440,7 +5440,7 @@ impl<'a> CallCollector<'a> {
                     if let Some(e) = self.elem_after_accessor(&m.receiver, &m.method.to_string()) {
                         // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
                         if crate::lang::is_r536_added_name(&m.method.to_string())
-                            && std::env::var_os("CANDOR_R536_INSTR").is_some()
+                            && candor_report::env::trace("CANDOR_R536_INSTR")
                         {
                             eprintln!("R536ACC\t{}", m.method);
                         }
@@ -5469,7 +5469,7 @@ impl<'a> CallCollector<'a> {
                     // §E1 REACH COUNTER, on the CHANGED branch: this arm exists only to return a
                     // DIFFERENT answer from the walk below it, so "never fired" and "fired and moved
                     // nothing" must be distinguishable in the A/B.
-                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R451RET");
                     }
                     return Some(ret);
@@ -5510,7 +5510,7 @@ impl<'a> CallCollector<'a> {
                 // evidence the new code ran, and a byte-identical A/B over a corpus that cannot reach
                 // these arms is the most flattering measurement available.
                 let probe = |tag: &str| {
-                    if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("{tag}");
                     }
                 };
@@ -5559,7 +5559,7 @@ impl<'a> CallCollector<'a> {
                     let written_full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                     let std_rooted = matches!(written_full.split("::").next(), Some("std" | "core" | "alloc"))
                         || written_full.starts_with("::");
-                    if std::env::var_os("CANDOR_R1426_OFF").is_none()
+                    if !candor_report::env::switch("CANDOR_R1426_OFF")
                         && p.qself.is_none()
                         && !std_rooted
                         && !self.is_dependency_type(&written_full)
@@ -5578,7 +5578,7 @@ impl<'a> CallCollector<'a> {
                             }
                         }
                         if let Some(t) = &t {
-                            if std::env::var_os("CANDOR_R1426_INSTR").is_some() {
+                            if candor_report::env::trace("CANDOR_R1426_INSTR") {
                                 eprintln!("R1426VALUE\t{}\t{t}", crate::lang::path_to_string_lc(&p.path)); // §E1 REACH COUNTER
                             }
                         }
@@ -5732,7 +5732,7 @@ impl<'a> CallCollector<'a> {
                     if let Some(l) = self.field_twin_leaf(&base, &f.member) {
                         return Some(l);
                     }
-                    if std::env::var_os("CANDOR_R1624_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1624_INSTR") {
                         let is_self = matches!(&*f.base, syn::Expr::Path(p) if p.path.is_ident("self"));
                         let kind = if is_self { "self" } else if base.starts_with("crate::") { "anchored" } else { "other" };
                         eprintln!("R1624PICK\t{kind}\t{base}\t{}", self.modpath); // §E1 — the residual leaf pick
@@ -5787,7 +5787,7 @@ impl<'a> CallCollector<'a> {
             // `rustagent-v044/fxrange`: nothing written). The re-slice is answered by `nonpath_recv_calls`
             // (R1056), which forms the crate's `[T]` impl key from the base's element.
             syn::Expr::Index(idx) if is_range_index(idx) => {
-                if std::env::var_os("CANDOR_R1070_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1070_INSTR") {
                     if let Some(t) = self.resolve_elem_type_as(&idx.expr, crate::lang::LayerBinder::Index) {
                         eprintln!("R1070RANGE\t{outer}\t{t}"); // §E1 REACH PROBE — the old answer, withdrawn
                     }
@@ -5819,7 +5819,7 @@ impl<'a> CallCollector<'a> {
                 }
                 // SOUNDNESS R535 §E1 REACH COUNTER, on the CHANGED branch only — an unchanged row is
                 // not evidence the new code ran.
-                if found.is_some() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                if found.is_some() && candor_report::env::trace("CANDOR_R535_INSTR") {
                     eprintln!("R535CONC");
                 }
                 found
@@ -5956,7 +5956,7 @@ impl<'a> CallCollector<'a> {
             if self.vars.get(&n) != Some(t) || self.elem_of.contains_key(&n) {
                 return None;
             }
-            if std::env::var_os("CANDOR_R962_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R962_INSTR") {
                 eprintln!("R962NAME\t{t}");
             }
             return Some(t.clone());
@@ -5964,7 +5964,7 @@ impl<'a> CallCollector<'a> {
         let t = self.nominal_ctor_type(expr);
         // §E1 REACH PROBE, on the ADDED branch only — an unchanged corpus row is not evidence it ran.
         if let Some(t) = &t {
-            if std::env::var_os("CANDOR_R946_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R946_INSTR") {
                 eprintln!("R946PAYLOAD\t{t}");
             }
         }
@@ -5986,7 +5986,7 @@ impl<'a> CallCollector<'a> {
     /// unwrap). Asked LAST, so it can only add a type where every other route answered nothing.
     /// `CANDOR_R1323_OFF=1` restores the old reading.
     fn payload_via_unwrap(&self, pat: &syn::Pat, e: &syn::Expr) -> Option<String> {
-        if std::env::var_os("CANDOR_R1323_OFF").is_some() || !crate::lang::some_ok_unwrap_pat(pat) {
+        if candor_report::env::switch("CANDOR_R1323_OFF") || !crate::lang::some_ok_unwrap_pat(pat) {
             return None;
         }
         let mc = syn::ExprMethodCall {
@@ -6090,7 +6090,7 @@ impl<'a> CallCollector<'a> {
             return Some(Bound::Concrete(r));
         }
         let out = crate::lang::layer_bind(&r, binder, method)?;
-        if std::env::var_os("CANDOR_R1023_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1023_INSTR") {
             eprintln!("R1023BIND\t{binder:?}\t{}", crate::lang::wrapped_layers(&r)); // §E1, CHANGED branch
         }
         Some(match out {
@@ -6146,7 +6146,7 @@ impl<'a> CallCollector<'a> {
         };
         let e = self.resolve_elem_type_raw(arg)?;
         // The argument's own entry is one layer (plain) or several (layered): the wrapper adds one on top.
-        if std::env::var_os("CANDOR_R893_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R893_INSTR") {
             eprintln!("R893CTOR\t{w}");
         }
         Some(crate::lang::prefix_layer(code, inner, &e))
@@ -6159,7 +6159,7 @@ impl<'a> CallCollector<'a> {
         if !crate::lang::is_wrapped(&t) {
             return Some(t);
         }
-        if std::env::var_os("CANDOR_R893_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R893_INSTR") {
             eprintln!("R893ELEM"); // §E1 REACH COUNTER, on the CHANGED branch only
         }
         match crate::lang::layer_step(&t, method)? {
@@ -6278,7 +6278,7 @@ impl<'a> CallCollector<'a> {
                     // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
                     if r.is_some()
                         && crate::lang::is_r536_added_name(&m.method.to_string())
-                        && std::env::var_os("CANDOR_R536_INSTR").is_some()
+                        && candor_report::env::trace("CANDOR_R536_INSTR")
                     {
                         eprintln!("R536PRESCON\t{}", m.method);
                     }
@@ -6316,7 +6316,7 @@ impl<'a> CallCollector<'a> {
                         return None;
                     }
                     let e = self.returns.get(&crate::model::qual_elem_ret_key(&full)).cloned();
-                    if e.is_some() && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                    if e.is_some() && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R893QUALELEM {full}");
                     }
                     e
@@ -6325,7 +6325,7 @@ impl<'a> CallCollector<'a> {
                     return qual_elem();
                 }
                 let e = self.returns.get(&crate::model::elem_ret_key(leaf)).cloned().or_else(qual_elem);
-                if e.is_some() && std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                if e.is_some() && candor_report::env::trace("CANDOR_VEINB_INSTR") {
                     eprintln!("VEINB_ELEMRET\t{leaf}");
                 }
                 e
@@ -6359,7 +6359,7 @@ impl<'a> CallCollector<'a> {
                         Some(_) => return None,
                     }
                 }
-                if found.is_some() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                if found.is_some() && candor_report::env::trace("CANDOR_R535_INSTR") {
                     eprintln!("R535ELEM");
                 }
                 found
@@ -6437,7 +6437,7 @@ impl<'a> CallCollector<'a> {
         if !leaves.is_empty() && !(Self::callable_hedge_only(&leaves) && elem.is_some()) {
             // SOUNDNESS R538 §E1 REACH COUNTER, on the CHANGED branch only — the branch that binds a
             // DISPATCH slot where the old code could only bind a concrete one.
-            if std::env::var_os("CANDOR_R538_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R538_INSTR") {
                 eprintln!("R538DYN");
             }
             return Some(Bound::Traits(leaves));
@@ -6477,7 +6477,7 @@ impl<'a> CallCollector<'a> {
                 Some(_) => {}
             }
         }
-        if answer.is_some() && std::env::var_os("CANDOR_R582_INSTR").is_some() {
+        if answer.is_some() && candor_report::env::trace("CANDOR_R582_INSTR") {
             eprintln!("R582DYN"); // §E1 REACH COUNTER, on the CHANGED branch only.
         }
         answer.unwrap_or_default()
@@ -6502,7 +6502,7 @@ impl<'a> CallCollector<'a> {
                 Some(_) => {}
             }
         }
-        if answer.is_some() && std::env::var_os("CANDOR_R582_INSTR").is_some() {
+        if answer.is_some() && candor_report::env::trace("CANDOR_R582_INSTR") {
             eprintln!("R586CONC"); // §E1 REACH COUNTER, on the CHANGED branch only.
         }
         answer
@@ -6538,7 +6538,7 @@ impl<'a> CallCollector<'a> {
                         }
                     }
                 }
-                if !out.is_empty() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                if !out.is_empty() && candor_report::env::trace("CANDOR_R535_INSTR") {
                     eprintln!("R535ELEMDYN");
                 }
                 out
@@ -6633,7 +6633,7 @@ impl<'a> CallCollector<'a> {
                     if !by_recv.is_empty() {
                         // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
                         if crate::lang::is_r536_added_name(&m.method.to_string())
-                            && std::env::var_os("CANDOR_R536_INSTR").is_some()
+                            && candor_report::env::trace("CANDOR_R536_INSTR")
                         {
                             eprintln!("R536PRESDYN\t{}", m.method);
                         }
@@ -6761,7 +6761,7 @@ impl<'a> CallCollector<'a> {
     /// inherent form `<T>::m` is already restored to `T::m` by the call visitor. `CANDOR_R1616U_OFF=1` disables it.
     fn r1616_ufcs_dep_type(&mut self, p: &syn::ExprPath) {
         let Some(q) = &p.qself else { return };
-        if q.position == 0 || std::env::var_os("CANDOR_R1616U_OFF").is_some() {
+        if q.position == 0 || candor_report::env::switch("CANDOR_R1616U_OFF") {
             return;
         }
         let Some(method) = p.path.segments.last().map(|s| s.ident.to_string()) else { return };
@@ -6773,7 +6773,7 @@ impl<'a> CallCollector<'a> {
         if !crate::lang::is_type_ident(leaf) {
             return;
         }
-        if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1616_INSTR").is_some() {
+        if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1616_INSTR") {
             eprintln!("R1616UFCS\t{ty}::{method}"); // §E1 REACH COUNTER
         }
         self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
@@ -6893,7 +6893,7 @@ impl<'a> CallCollector<'a> {
             }
         }
         for t in targets {
-            if std::env::var_os("CANDOR_R1038_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1038_INSTR") {
                 eprintln!("R1038DEPTRAIT\t{full} -> {t}"); // §E1 REACH COUNTER, on the CHANGED branch only
             }
             self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
@@ -6944,7 +6944,7 @@ impl<'a> CallCollector<'a> {
             if self.std_payload(&ty) || !self.payload_reachable(&ty, tr) {
                 continue;
             }
-            if std::env::var_os("CANDOR_R1111_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1111_INSTR") {
                 eprintln!("R1111PAYLOAD\t{tr}\t{ty}\t{role:?}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
             self.charge_coercion_ty(&ty, tr, method);
@@ -6959,7 +6959,7 @@ impl<'a> CallCollector<'a> {
         if elem.is_empty() {
             return;
         }
-        if std::env::var_os("CANDOR_R1098_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1098_INSTR") {
             eprintln!("R1098PAYLOAD\t{tr}\t{elem}"); // §E1 REACH COUNTER, on the ADDED branch only
         }
         self.charge_coercion_ty(&elem, tr, method);
@@ -6995,7 +6995,7 @@ impl<'a> CallCollector<'a> {
                 } else if let Some(t) = self.tuple_of.get(&name) {
                     out.extend(t.iter().flatten().map(|t| (t.clone(), CmpRole::Value)));
                 } else if let Some(p) = self.assign_drop.let_payload.get(&name) {
-                    if std::env::var_os("CANDOR_R1130_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1130_INSTR") {
                         eprintln!("R1130LET\t{name}"); // §E1 REACH COUNTER, on the ADDED branch only
                     }
                     out.extend(p.iter().cloned());
@@ -7022,7 +7022,7 @@ impl<'a> CallCollector<'a> {
                         syn::Member::Unnamed(i) => i.index.to_string(),
                     };
                     if let Some(enc) = self.returns.get(&crate::model::cmp_field_key(l, &m)) {
-                        if std::env::var_os("CANDOR_R1130_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1130_INSTR") {
                             eprintln!("R1130FIELD\t{l}\t{m}"); // §E1 REACH COUNTER, on the ADDED branch only
                         }
                         out.extend(decode_cmp_payload(enc));
@@ -7209,10 +7209,12 @@ impl<'a> CallCollector<'a> {
     /// SOUNDNESS R1625 — whether one CONSUMER of the expected-type rule is on. `CANDOR_R1625_OFF` (set) turns every consumer
     /// off (empty, `1` or `all`), `CANDOR_R1625_OFF=parse,collect,try_into,default` only the ones named: the same-binary attribution control.
     fn r1625_on(kind: &str) -> bool {
-        match std::env::var("CANDOR_R1625_OFF") {
-            Err(_) => true,
-            Ok(v) => !(matches!(v.as_str(), "" | "1" | "all") || v.split(',').any(|k| k.trim() == kind)),
-        }
+        // SET (§3.4 (a)) means the value, as read HERE, turns THIS consumer off: a value naming only other consumers
+        // selects the branch an unset variable selects, so it is not recorded by this read.
+        !candor_report::env::switch_value(
+            "CANDOR_R1625_OFF",
+            candor_report::env::Selects::ListOrAny { whole: &["", "1", "all"], member: kind },
+        )
     }
 
     /// The first generic argument of `ty` when its last segment is `name` (`Result<T, E>` -> `T`).
@@ -7324,7 +7326,7 @@ impl<'a> CallCollector<'a> {
                 let Some(target) = target else { return };
                 if name == "parse" {
                     let Some(t) = self.r1625_target_path(target) else { return };
-                    if std::env::var_os("CANDOR_R1625_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1625_INSTR") {
                         eprintln!("R1625REACH\tparse\t{t}"); // §E1 REACH COUNTER
                     }
                     self.charge_std_method_site_ret(m, "parse", Some(t));
@@ -7334,7 +7336,7 @@ impl<'a> CallCollector<'a> {
             }
             "collect" if m.args.is_empty() && !wrapped => {
                 let Some(t) = self.r1625_target_path(ty) else { return };
-                if std::env::var_os("CANDOR_R1625_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1625_INSTR") {
                     eprintln!("R1625REACH\tcollect\t{t}"); // §E1 REACH COUNTER
                 }
                 self.charge_std_method_site_ret(m, "collect", Some(t));
@@ -7359,7 +7361,7 @@ impl<'a> CallCollector<'a> {
 
     fn r1625_charge_target(&mut self, t: &syn::Type, kind: &str, trait_leaf: &str, member: &str) {
         let Some(p) = self.r1625_target_path(t) else { return };
-        if std::env::var_os("CANDOR_R1625_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1625_INSTR") {
             eprintln!("R1625REACH\t{kind}\t{p}"); // §E1 REACH COUNTER
         }
         self.charge_licensed(&p, trait_leaf, member);
@@ -7433,7 +7435,7 @@ impl<'a> CallCollector<'a> {
             }
         }
         for t in tys {
-            if std::env::var_os("CANDOR_R1130_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1130_INSTR") {
                 eprintln!("R1130COLLECT\t{name}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
             self.charge_cmp_family(&t, hashed, !hashed, hashed);
@@ -7793,7 +7795,7 @@ impl<'a> CallCollector<'a> {
         if let Some(t) = self.type_of(e) {
             return Some(t);
         }
-        if std::env::var_os("CANDOR_R1430_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1430_OFF") {
             return None;
         }
         let syn::Expr::Path(p) = peel_value(e) else { return None };
@@ -7825,7 +7827,7 @@ impl<'a> CallCollector<'a> {
             return None;
         }
         let ty = full.clone();
-        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_CT2_INSTR") {
             eprintln!("R1430VALUE\t{full}\t{ty}"); // §E1 REACH COUNTER
         }
         Some(ty)
@@ -7838,14 +7840,15 @@ impl<'a> CallCollector<'a> {
     /// `CANDOR_CT2_INSTR` prints every recognised-unresolved site whatever the setting, for pricing.
     fn ct2_unresolved(&mut self, trait_leaf: &str, member: &str) {
         let class_b = ct2_class_b(trait_leaf);
-        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_CT2_INSTR") {
             eprintln!("CT2UNRESOLVED\t{}\t{trait_leaf}.{member}", if class_b { "B" } else { "A" }); // §E1 REACH COUNTER
         }
-        let on = match std::env::var("CANDOR_CT2_DISCLOSE").as_deref() {
-            Ok("A") => true,
-            Ok("B") => class_b,
-            _ => false,
-        };
+        // SET means the value selects the disclosing branch for THIS site (`A` every site, `B` class B only); any other
+        // value, set or not, selects the branch an unset variable selects.
+        let on = candor_report::env::switch_value(
+            "CANDOR_CT2_DISCLOSE",
+            candor_report::env::Selects::AnyOf(if class_b { &["A", "B"] } else { &["A"] }),
+        );
         if on {
             if member == "call" {
                 self.mark_unresolved(format!("callback:{trait_leaf} argument of a std entry point"));
@@ -7870,8 +7873,8 @@ impl<'a> CallCollector<'a> {
         // std entry point's licensed member on such a value (`r.to_string()` → the arm's `Display::fmt`, `for x in r` → its
         // `IntoIterator::into_iter`) formed no edge and no disclosure (EXECUTED: `deny Fs` and `deny Unknown` both exit 0
         // over a file write). Each arm is licensed on its own: the union.
-        if ty.contains(crate::decls::ALIAS_ALT_SEP) && std::env::var_os("CANDOR_R1474_OFF").is_none() {
-            if std::env::var_os("CANDOR_R1474_INSTR").is_some() {
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) && !candor_report::env::switch("CANDOR_R1474_OFF") {
+            if candor_report::env::trace("CANDOR_R1474_INSTR") {
                 eprintln!("R1474ARMS\tlicensed\t{trait_leaf}.{member}\t{}", ty.replace(crate::decls::ALIAS_ALT_SEP, " | ")); // §E1
             }
             for arm in ty.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
@@ -7895,7 +7898,7 @@ impl<'a> CallCollector<'a> {
             }
             head = if full.starts_with("crate::") { full } else { head.rsplit("::").next().unwrap_or(&head).to_string() };
         }
-        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_CT2_INSTR") {
             eprintln!("CT2LICENSED\t{}\t{trait_leaf}::{member}\t{head}", if ct2_class_b(trait_leaf) { "B" } else { "A" }); // §E1 REACH COUNTER
         }
         if self.is_dependency_type(&head) {
@@ -7915,7 +7918,7 @@ impl<'a> CallCollector<'a> {
             // `PgConnectOptions::from_str` reads the twelve `PG*` variables and `stat`s the socket directories (EXECUTED); the
             // join-only edge asked nothing of the classifier, so `url.parse::<PgConnectOptions>()` read ABSENT in both arms.
             let io_member = matches!(trait_leaf, "Read" | "Write" | "BufRead" | "Seek")
-                || (trait_leaf == "FromStr" && member == "from_str" && std::env::var_os("CANDOR_R1623_OFF").is_none());
+                || (trait_leaf == "FromStr" && member == "from_str" && !candor_report::env::switch("CANDOR_R1623_OFF"));
             let path = if candor_classify::is_syscall_crate(segs[0]) || !io_member {
                 format!("{}::{HOOK_JOIN_MARKER}::{}::{}", segs[0], leaf, member)
             } else {
@@ -7999,7 +8002,7 @@ impl<'a> CallCollector<'a> {
                 None => shapes.push(v),
             }
         }
-        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_CT2_INSTR") {
             eprintln!("CT2DERIVE\t{trait_leaf}\t{leaf}\t{}", work.len()); // §E1 REACH COUNTER
         }
         for (t, tl, m) in work {
@@ -8015,7 +8018,7 @@ impl<'a> CallCollector<'a> {
     /// members std's impl for that shape licenses on each type argument. `false` when the operand is not a std
     /// shape or std declares no impl of `trait_leaf` for it.
     fn charge_shape_hooks(&mut self, operand: &syn::Expr, trait_leaf: &str) -> bool {
-        if std::env::var_os("CANDOR_CT2_OFF").is_some() || CT2_EMPTY_CMP.with(|c| c.get()) {
+        if candor_report::env::switch("CANDOR_CT2_OFF") || CT2_EMPTY_CMP.with(|c| c.get()) {
             return false;
         }
         if self.charge_derive_ctor(operand, trait_leaf) {
@@ -8043,7 +8046,7 @@ impl<'a> CallCollector<'a> {
                 work.push((t, h.trait_leaf, h.member));
             }
         }
-        if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
+        if candor_report::env::trace("CANDOR_CT2_TRACE") {
             eprintln!("CT2SHAPE\t{trait_leaf}\t{shape}\t{}", work.len()); // §E1 REACH COUNTER
         }
         for (t, tl, m) in work {
@@ -8081,7 +8084,7 @@ impl<'a> CallCollector<'a> {
         if !last.chars().next().is_some_and(|c| c.is_lowercase() || c == '_') || !last.chars().any(|c| c.is_lowercase()) {
             return;
         }
-        if std::env::var_os("CANDOR_CT2_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_CT2_INSTR") {
             eprintln!("CT2CALLABLE\t{path}"); // §E1 REACH COUNTER
         }
         let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
@@ -8260,7 +8263,7 @@ impl<'a> CallCollector<'a> {
     /// trait member spelled as a path (`Clone::clone(&x)`, `Iterator::count(i)`) — asked of the table.
     fn charge_std_path_call(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
         use crate::std_bounds::{method_hooks, Recv};
-        if std::env::var_os("CANDOR_CT2_OFF").is_some() || p.qself.is_some() {
+        if candor_report::env::switch("CANDOR_CT2_OFF") || p.qself.is_some() {
             return;
         }
         let written = crate::lang::path_to_string_lc(&p.path);
@@ -8327,7 +8330,7 @@ impl<'a> CallCollector<'a> {
         if hooks.is_empty() {
             return;
         }
-        if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
+        if candor_report::env::trace("CANDOR_CT2_TRACE") {
             eprintln!("CT2PATH\t{full}\t{}", hooks.len()); // §E1 REACH COUNTER
         }
         let ctor = recv.is_none() && !owner_is_module;
@@ -8435,7 +8438,7 @@ impl<'a> CallCollector<'a> {
     /// `let o: T = s.parse()?` / `fn f(..) -> Result<T, _> { s.parse() }` call `T::from_str` exactly as `s.parse::<T>()` does.
     /// A turbofish, when written, wins.
     fn charge_std_method_site_ret(&mut self, node: &syn::ExprMethodCall, leaf: &str, ret_override: Option<String>) {
-        if std::env::var_os("CANDOR_CT2_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_CT2_OFF") {
             return;
         }
         let args: Vec<&syn::Expr> = node.args.iter().collect();
@@ -8457,7 +8460,7 @@ impl<'a> CallCollector<'a> {
                 && args.is_empty()
                 && {
                     let t = !self.clone_receiver_peeled(&node.receiver, 0);
-                    if t && self.local_fn_on(&tl, leaf) && std::env::var_os("CANDOR_R1477_INSTR").is_some() {
+                    if t && self.local_fn_on(&tl, leaf) && candor_report::env::trace("CANDOR_R1477_INSTR") {
                         eprintln!("R1477CLONE\t{tl}"); // §E1 REACH COUNTER: a hand-written `clone` the old question asked
                     }
                     t
@@ -8491,7 +8494,7 @@ impl<'a> CallCollector<'a> {
         if hooks.is_empty() {
             return;
         }
-        if std::env::var_os("CANDOR_CT2_TRACE").is_some() {
+        if candor_report::env::trace("CANDOR_CT2_TRACE") {
             eprintln!("CT2METHOD\t.{leaf}\t{}\t{}", shape.as_deref().unwrap_or("-"), hooks.len()); // §E1 REACH COUNTER
         }
         let cha_self = leaf == "to_string" && args.is_empty();
@@ -8543,8 +8546,8 @@ impl<'a> CallCollector<'a> {
         // joined string, i.e. the LAST arm in sorted order, so `format!("{}", r)` edged one arm alone (EXECUTED: the unix
         // arm's `Display::fmt` wrote a file, `deny Fs` exit 0). Each arm is charged on its own, the union every other
         // position of a cfg-duplicated name already takes (`union_over_arms`).
-        if ty.contains(crate::decls::ALIAS_ALT_SEP) && std::env::var_os("CANDOR_R1474_OFF").is_none() {
-            if std::env::var_os("CANDOR_R1474_INSTR").is_some() {
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) && !candor_report::env::switch("CANDOR_R1474_OFF") {
+            if candor_report::env::trace("CANDOR_R1474_INSTR") {
                 eprintln!("R1474ARMS\tcoercion\t{trait_leaf}.{method}\t{}", ty.replace(crate::decls::ALIAS_ALT_SEP, " | ")); // §E1
             }
             for arm in ty.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
@@ -8568,10 +8571,10 @@ impl<'a> CallCollector<'a> {
         // edge; every other right operand does (no name-typing claim withholds it).
         let prim_lit = crate::model::PRIMITIVE_LEAVES.contains(&ty_leaf) && RHS_LITERAL.with(|c| c.get());
         if !prim_lit && self.returns.contains_key(&crate::model::impl_ref_self_key(trait_leaf, ty_leaf)) {
-            if std::env::var_os("CANDOR_V054_INSTR").is_some() && crate::model::PRIMITIVE_LEAVES.contains(&ty_leaf) {
+            if candor_report::env::trace("CANDOR_V054_INSTR") && crate::model::PRIMITIVE_LEAVES.contains(&ty_leaf) {
                 eprintln!("R1162REFPRIM\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
-            if std::env::var_os("CANDOR_R1131_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1131_INSTR") {
                 eprintln!("R1131REFSELF\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
             self.push_coercion_edge(&format!("&{ty_leaf}"), method);
@@ -8590,7 +8593,7 @@ impl<'a> CallCollector<'a> {
         {
             let hand = self.returns.contains_key(&crate::model::prim_op_key(trait_leaf, ty_leaf, false));
             let lit = RHS_LITERAL.with(|c| c.get());
-            if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_V053_INSTR") {
                 eprintln!("R1157PRIMOP\t{trait_leaf}\t{ty_leaf}\tliteral={lit}"); // §E1 REACH COUNTER
             }
             if !lit {
@@ -8624,7 +8627,7 @@ impl<'a> CallCollector<'a> {
                 self.push_coercion_edge(ty_leaf, method);
                 // EXACT-FIRST — the leaf edge above is what every route reads; the typer's crate-anchored answer rides
                 // beside it, for the one place that may use it (a contested leaf tail, `scan::exact_ty_target`).
-                if std::env::var_os("CANDOR_EXACTTY_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_EXACTTY_INSTR") {
                     eprintln!("EXACTTY\tHELD\t{}\t{ty}\t{trait_leaf}.{method}", self.modpath); // §E1 — what the typer held
                 }
                 if let Some(q) = exact_anchored_ty(ty) {
@@ -8664,7 +8667,7 @@ impl<'a> CallCollector<'a> {
             // `Guard::eq` at `a == b`, ABSENT before). A hashed key reached this way is also hashed by `==`.
             let mut hashed_keys: Vec<String> = Vec::new();
             if let Some(enc) = self.returns.get(&crate::model::cmp_type_key(ty_leaf)) {
-                if std::env::var_os("CANDOR_R1130_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1130_INSTR") {
                     eprintln!("R1130DERIVE\t{trait_leaf}\t{ty_leaf}"); // §E1 REACH COUNTER, on the ADDED branch only
                 }
                 for (t, role) in decode_cmp_payload(enc) {
@@ -8683,7 +8686,7 @@ impl<'a> CallCollector<'a> {
             }
             field_tys.sort();
             field_tys.dedup();
-            if std::env::var_os("CANDOR_R1111_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1111_INSTR") {
                 eprintln!("R1111DERIVE\t{trait_leaf}\t{ty_leaf}\t{}", field_tys.len()); // §E1 REACH COUNTER
             }
             for f in field_tys {
@@ -8848,7 +8851,7 @@ impl<'a> CallCollector<'a> {
         if selves.is_empty() {
             return;
         }
-        if std::env::var_os("CANDOR_V055_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_V055_INSTR") {
             eprintln!("R1164OPRHS\t{route}\t{tr}\t{cr}\t{rleaf}\t{}", selves.join(",")); // §E1 REACH COUNTER, ADDED branch only
         }
         for s in selves {
@@ -9035,7 +9038,7 @@ impl<'a> CallCollector<'a> {
                         const_str_value(&c.args[0]).or_else(|| self.resolve_str_expr(&c.args[0]));
                     // REACH probe for the A/B: an empty diff must be distinguishable from a corpus
                     // that never reached this arm (R242/R289). Env-gated, stderr, off by default.
-                    if inner.is_some() && std::env::var_os("CANDOR_R416_DEBUG").is_some() {
+                    if inner.is_some() && candor_report::env::trace("CANDOR_R416_DEBUG") {
                         eprintln!("R416FIRE");
                     }
                     return inner;
@@ -9051,7 +9054,7 @@ impl<'a> CallCollector<'a> {
                 if ident == "Command::new" {
                     let inner =
                         const_str_value(&c.args[0]).or_else(|| self.resolve_str_expr(&c.args[0]));
-                    if inner.is_some() && std::env::var_os("CANDOR_R460_DEBUG").is_some() {
+                    if inner.is_some() && candor_report::env::trace("CANDOR_R460_DEBUG") {
                         eprintln!("R460ROOT");
                     }
                     return inner;
@@ -9333,7 +9336,7 @@ impl<'a> CallCollector<'a> {
     /// SOUNDNESS R1319 (generic-field half, rustagent-0415) — did `recv_trait_full` spell `tr` ONLY from the enclosing
     /// impl's written bound (neither the receiver parameter's own bound nor the fn signature answered)? Mirrors its order.
     fn trait_spelled_by_impl_only(&self, receiver: &syn::Expr, tr: &str) -> bool {
-        if std::env::var_os("CANDOR_R1319F_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1319F_OFF") {
             return false;
         }
         let recv_param = match receiver {
@@ -9364,7 +9367,7 @@ impl<'a> CallCollector<'a> {
     ///
     /// `CANDOR_R1319G_OFF=1` disables it.
     fn glob_unkeyable_dispatch(&self, receiver: &syn::Expr, full: &str, tr_leaf: &str, leaf: &str) -> bool {
-        if full.contains("::") || std::env::var_os("CANDOR_R1319G_OFF").is_some() {
+        if full.contains("::") || candor_report::env::switch("CANDOR_R1319G_OFF") {
             return false;
         }
         // A BINDING or a FIELD only. A CALL's bound is its RETURN type's (`mlaf<T: MulAdd>(..) -> T` then `.max(..)` in
@@ -9409,7 +9412,7 @@ impl<'a> CallCollector<'a> {
     ///
     /// `CANDOR_R1325_OFF=1` disables it.
     fn blanket_ext_over_std_io(&self, receiver: &syn::Expr, full: &str, tr_leaf: &str, leaf: &str) -> Option<String> {
-        if std::env::var_os("CANDOR_R1325_OFF").is_some() || !crate::lang::is_std_io_trait(full, tr_leaf) {
+        if candor_report::env::switch("CANDOR_R1325_OFF") || !crate::lang::is_std_io_trait(full, tr_leaf) {
             return None;
         }
         if crate::lang::std_io_trait_member(tr_leaf, leaf) || matches!(peel_recv(receiver), syn::Expr::MethodCall(_)) {
@@ -9476,7 +9479,7 @@ impl<'a> CallCollector<'a> {
                 }
             }
         }
-        if !out.is_empty() && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+        if !out.is_empty() && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
             eprintln!("R897WHERE {base_leaf}.{field} {out:?}");
         }
         out
@@ -9486,7 +9489,7 @@ impl<'a> CallCollector<'a> {
         let old_guard_would_skip =
             self.trait_vars.is_empty() && self.trait_fields.is_empty() && !self.has_dyn_return;
         let out = self.resolve_recv_traits_walk(expr);
-        if old_guard_would_skip && !out.is_empty() && std::env::var_os("CANDOR_R540_INSTR").is_some() {
+        if old_guard_would_skip && !out.is_empty() && candor_report::env::trace("CANDOR_R540_INSTR") {
             eprintln!("R540REACH");
         }
         let out = if out.is_empty() { self.scoped_generic_recv(expr) } else { out };
@@ -9503,7 +9506,7 @@ impl<'a> CallCollector<'a> {
     /// a declared local trait. A RESOLUTION: the bounded fan-out and the key the plain spelling already gets.
     /// `CANDOR_R1347A_OFF=1` disables it.
     fn canon_local_trait_aliases(&self, out: Vec<String>) -> Vec<String> {
-        if std::env::var_os("CANDOR_R1347A_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1347A_OFF") {
             return out;
         }
         out.into_iter()
@@ -9542,7 +9545,7 @@ impl<'a> CallCollector<'a> {
     /// `Endianity` (EXECUTED rustagent-0415 `fx/r1347` `proj_skip` reaches `LoudE::big`, which writes; `deny Fs` 0).
     /// Answers only when every other route answered nothing. A RESOLUTION (bounded fan-out + key). `CANDOR_R1347P_OFF=1`.
     fn projection_return_traits(&self, expr: &syn::Expr) -> Vec<String> {
-        if std::env::var_os("CANDOR_R1347P_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1347P_OFF") {
             return Vec::new();
         }
         let syn::Expr::MethodCall(mc) = peel_recv(expr) else { return Vec::new() };
@@ -9599,7 +9602,7 @@ impl<'a> CallCollector<'a> {
         let container = self.resolve_recv_type(&fe.base).map(|b| b.rsplit("::").next().unwrap_or(&b).to_string());
         let ev = self.scrut_evidence(&fe.base);
         let d = self.payload_decision(container.as_deref(), &t, ev.as_ref());
-        if std::env::var_os("CANDOR_R1267_INSTR").is_some() && !matches!(d, PayloadTy::Old) {
+        if candor_report::env::trace("CANDOR_R1267_INSTR") && !matches!(d, PayloadTy::Old) {
             eprintln!("R1267FIELD\t{t}\t{d:?}"); // §E1 REACH COUNTER
         }
         d
@@ -9641,7 +9644,7 @@ impl<'a> CallCollector<'a> {
     /// parameter is mapped by POSITION through the scrutinee's instantiation to this scope's bounds. A concrete argument is
     /// R979's and stays `Old`. Kill switch `CANDOR_R1631_OFF`.
     fn accessor_payload(&self, expr: &syn::Expr) -> PayloadTy {
-        if std::env::var_os("CANDOR_R1631_OFF").is_some() || (self.generic_bounds.is_empty() && self.impl_generic_bounds.is_empty()) {
+        if candor_report::env::switch("CANDOR_R1631_OFF") || (self.generic_bounds.is_empty() && self.impl_generic_bounds.is_empty()) {
             return PayloadTy::Old;
         }
         let syn::Expr::MethodCall(m) = peel_recv(expr) else { return PayloadTy::Old };
@@ -9670,7 +9673,7 @@ impl<'a> CallCollector<'a> {
             if !inner_param {
                 return PayloadTy::Old;
             }
-            if std::env::var_os("CANDOR_R1631_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1631_INSTR") {
                 eprintln!("R1631ACC\t{acc_leaf}.{}\t-\tHedge(nonfield)", m.method); // §E1 REACH COUNTER
             }
             return PayloadTy::Hedge;
@@ -9691,7 +9694,7 @@ impl<'a> CallCollector<'a> {
         let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner).to_string();
         let ev = self.scrut_evidence(&fe.base);
         let d = self.payload_decision(Some(&owner_leaf), t, ev.as_ref());
-        if std::env::var_os("CANDOR_R1631_INSTR").is_some() && !matches!(d, PayloadTy::Old) {
+        if candor_report::env::trace("CANDOR_R1631_INSTR") && !matches!(d, PayloadTy::Old) {
             eprintln!("R1631ACC\t{owner_leaf}.{key}.{}\t{t}\t{d:?}", m.method); // §E1 REACH COUNTER
         }
         d
@@ -9708,7 +9711,7 @@ impl<'a> CallCollector<'a> {
     /// would pick on the wrapper first) — Pass B has no blanket index, so that case would over-charge, never silence.
     /// Kill switch `CANDOR_R1630_OFF`.
     fn deref_param_recv(&self, recv: &syn::Expr, ty: &str, leaf: &str) -> Option<String> {
-        if std::env::var_os("CANDOR_R1630_OFF").is_some() {
+        if candor_report::env::switch("CANDOR_R1630_OFF") {
             return None;
         }
         let wl = ty.rsplit("::").next().unwrap_or(ty);
@@ -9745,7 +9748,7 @@ impl<'a> CallCollector<'a> {
         if self.returns.get(&crate::model::type_params_key(owner_leaf)).is_some_and(|ps| ps.split(',').any(|p| p == arg)) {
             return None;
         }
-        if std::env::var_os("CANDOR_R1630_INSTR").is_some() {
+        if candor_report::env::trace("CANDOR_R1630_INSTR") {
             // The owner's module-qualified path where R1624 proves it (else its leaf), so an independent checker can find
             // the declaration the argument was read from.
             let oq = self.owner_qual(&fe.base, &owner).map_or_else(|| owner_leaf.to_string(), |(_, q)| q);
@@ -9941,7 +9944,7 @@ impl<'a> CallCollector<'a> {
             } else {
                 Vec::new()
             };
-            if !leaves.is_empty() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+            if !leaves.is_empty() && candor_report::env::trace("CANDOR_R535_INSTR") {
                 eprintln!("R535CAST");
             }
             return leaves;
@@ -10061,12 +10064,12 @@ impl<'a> CallCollector<'a> {
                     let e = self.resolve_elem_trait_leaves(&m.receiver);
                     if !e.is_empty() {
                         // §E1 REACH COUNTER, on the CHANGED branch.
-                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                             eprintln!("R446DYN");
                         }
                         // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch only.
                         if crate::lang::is_r536_added_name(&m.method.to_string())
-                            && std::env::var_os("CANDOR_R536_INSTR").is_some()
+                            && candor_report::env::trace("CANDOR_R536_INSTR")
                         {
                             eprintln!("R536DYN\t{}", m.method);
                         }
@@ -10112,7 +10115,7 @@ impl<'a> CallCollector<'a> {
             // exactly as `b` does.
             syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Deref(_)) => {
                 let leaves = self.resolve_recv_traits(&u.expr);
-                if !leaves.is_empty() && std::env::var_os("CANDOR_R541_INSTR").is_some() {
+                if !leaves.is_empty() && candor_report::env::trace("CANDOR_R541_INSTR") {
                     eprintln!("R541DEREF");
                 }
                 leaves
@@ -10130,7 +10133,7 @@ impl<'a> CallCollector<'a> {
                         }
                     }
                 }
-                if !out.is_empty() && std::env::var_os("CANDOR_R535_INSTR").is_some() {
+                if !out.is_empty() && candor_report::env::trace("CANDOR_R535_INSTR") {
                     eprintln!("R535DYN");
                 }
                 out
@@ -10168,7 +10171,7 @@ impl<'a> CallCollector<'a> {
         // (two crates for one leaf in one impl read as absent), so it can only SUPPLY a spelling where the fn's own
         // signature has none, never displace one. `CANDOR_R1319F_OFF=1` restores the old reading.
         let impl_written = || {
-            if std::env::var_os("CANDOR_R1319F_OFF").is_some() {
+            if candor_report::env::switch("CANDOR_R1319F_OFF") {
                 return None;
             }
             let q = self.impl_trait_quals.get(tr).map(|q| q.as_str()).filter(|q| !q.is_empty())?;
@@ -10213,7 +10216,7 @@ impl<'a> CallCollector<'a> {
                 // §E1 REACH PROBE, on the CHANGED branch only — the `CANDOR_ALIAS_DEBUG`
                 // channel `R504HIT`/`R551HIT`/`R562HIT` already use. A byte-identical A/B is
                 // not evidence until reach is counted.
-                if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("R577HIT {q}::{leaf}");
                 }
                 full = crate::lang::expand(q, &self.uses);
@@ -10248,7 +10251,7 @@ impl<'a> CallCollector<'a> {
         // REACH PROBE, same `CANDOR_ALIAS_DEBUG` channel `R446DYN`/`R271ADAPT` already use. Prints the
         // §4 KIND only, so a corpus A/B can count hits PER SITE CLASS on the changed branch rather than
         // infer reach from a byte-identical diff — "CHANGED 0 is not evidence until REACH is measured".
-        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
             eprintln!("R485HIT {}", why.split(':').next().unwrap_or(""));
         }
         self.unresolved = true;
@@ -10293,7 +10296,7 @@ impl<'a> CallCollector<'a> {
             // `dispatch:<Trait>.<member>`. EXECUTED rustagent-0415 `fx/r1347`. Only for a `pub` trait (a private trait's
             // implementors are all visible), only for a std supertrait whose member list is closed (`fmt::Write`,
             // `io::{Read,Write,BufRead,Seek}`). `CANDOR_R1347S_OFF=1` disables it.
-            if std::env::var_os("CANDOR_R1347S_OFF").is_none()
+            if !candor_report::env::switch("CANDOR_R1347S_OFF")
                 && self.returns.contains_key(&crate::model::pub_trait_key(tr))
                 && self.std_supertrait_declares(tr, leaf)
             {
@@ -10334,7 +10337,7 @@ impl<'a> CallCollector<'a> {
                 // implementor keeps the spelling it had; only where `tr` itself declares `leaf` (a supertrait's member
                 // lives in another trait's blocks). A block the walk did not record leaves the old spelling in place.
                 // `CANDOR_R1246_OFF=1` disables it.
-                let r1246 = std::env::var_os("CANDOR_R1246_OFF").is_none()
+                let r1246 = !candor_report::env::switch("CANDOR_R1246_OFF")
                     && (lt.methods.contains(leaf) || (assoc && lt.assoc.contains(leaf)));
                 let mut owner_paths: std::collections::BTreeSet<(String, bool)> = std::collections::BTreeSet::new();
                 for ty in impls {
@@ -10402,7 +10405,7 @@ impl<'a> CallCollector<'a> {
                 // Only a `pub` trait (`model::pub_trait_key`): a crate-private one's implementors are all visible, and
                 // the inherited-default route already reaches the body for each that does not override.
                 if self.returns.contains_key(&crate::model::pub_trait_key(tr)) {
-                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_V053_INSTR") {
                         eprintln!("R1151DEFAULT\t{tr}::{leaf}"); // §E1 REACH COUNTER
                     }
                     // SOUNDNESS R1246 — by the trait's own declaration qual where known: the bare `{tr}::{leaf}` tail is
@@ -10411,7 +10414,7 @@ impl<'a> CallCollector<'a> {
                     // leaf-tail implementor edge the owner naming above replaced (measured: `FlatMapSerializeMap::
                     // serialize_entry` lost the default's `serialize_key`/`serialize_value` keys).
                     let (path, exact) = match crate::model::trait_decl_qual(self.impl_owners, tr)
-                        .filter(|_| std::env::var_os("CANDOR_R1246_OFF").is_none())
+                        .filter(|_| !candor_report::env::switch("CANDOR_R1246_OFF"))
                     {
                         // NOT typed: a typed method path to a requirement with no default body falls into scan.rs'
                         // trait-requirement CHA, which fans out by leaf tail and reached regex-automata's `hybrid::dfa::DFA`
@@ -10594,7 +10597,7 @@ impl<'a> CallCollector<'a> {
             if !matches!(ty.as_str(), "std::fs::File" | "std::net::TcpStream" | "std::os::unix::net::UnixStream") {
                 continue;
             }
-            if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_VEINB_INSTR") {
                 eprintln!("VEINB_HANDLEARG\t{path}\t{ty}::{verb}");
             }
             self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 1, entropy_arg: false,
@@ -10697,7 +10700,7 @@ impl<'a> CallCollector<'a> {
     /// `tr` is the WRITTEN trait of the UFCS spelling; `None` for the receiver spelling `self.0.fmt(f)`, where the
     /// member must be one a std bound of the parameter REQUIRES (`std_bounds::std_required_member`).
     fn hedge_dep_param_wrapper(&mut self, tr: Option<&str>, m: &str, recv: &syn::Expr) {
-        if std::env::var_os("CANDOR_R1638_OFF").is_some() || tr.is_some_and(|t| !crate::std_bounds::is_std_trait_leaf(t)) {
+        if candor_report::env::switch("CANDOR_R1638_OFF") || tr.is_some_and(|t| !crate::std_bounds::is_std_trait_leaf(t)) {
             return;
         }
         let syn::Expr::Field(fe) = peel_recv(recv) else { return };
@@ -10723,7 +10726,7 @@ impl<'a> CallCollector<'a> {
                     None => crate::std_bounds::is_std_trait_leaf(l) && crate::std_bounds::std_required_member(l, m),
                 });
                 if let Some(l) = hit.cloned() {
-                    if std::env::var_os("CANDOR_R1638_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1638_INSTR") {
                         eprintln!("R1638WRAP\t{owner_leaf}.{key}\t{rt}<{t}>\t{l}.{m}"); // §E1 REACH COUNTER
                     }
                     self.mark_unresolved(format!("dispatch:{l}.{m}"));
@@ -10795,7 +10798,7 @@ impl<'a> CallCollector<'a> {
             // parameter (palette's `S::TransferFn::into_linear(..)`). The projection's own bound is not
             // indexed, so every LOCAL trait declaring the member is a candidate — the bounded CHA over
             // what `S::Tf` can be, never a guess at one implementor. Formed no edge at all before.
-            if std::env::var_os("CANDOR_R1037_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1037_INSTR") {
                 eprintln!("R1037PROJ\t{path}");
             }
             // The projection's bound, read off the generic's own LOCAL bounds (`S: Std` → `Std`'s `type Tf:
@@ -10866,7 +10869,7 @@ impl<'a> CallCollector<'a> {
                     // TYPED METHOD calls, so this read ABSENT while `r.make()`-style spellings resolved.
                     // Push the same call TYPED, so Pass B answers it exactly as it answers the method
                     // spelling — an own or inherent `RealSink::make` first, the trait default otherwise.
-                    if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_VEINC_INSTR") {
                         eprintln!("VEINC_TYPEPATH\t{path}");
                     }
                     self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: path.to_string(),
@@ -10886,7 +10889,7 @@ impl<'a> CallCollector<'a> {
             if !is_method && !is_assoc {
                 continue; // not this trait's member — a blanket/unrelated name, left as it was
             }
-            if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_VEINC_INSTR") {
                 eprintln!("VEINC_PATH\t{tr}::{leaf}\t{}", if concrete.is_some() { "named" } else { "cha" });
             }
             match concrete {
@@ -10904,9 +10907,9 @@ impl<'a> CallCollector<'a> {
                     // one that reaches it. `CANDOR_R1494_OFF=1`.
                     let std_root = matches!(ty.split("::").next().unwrap_or(""), "std" | "core" | "alloc")
                         && !ty.contains(crate::decls::ALIAS_ALT_SEP)
-                        && std::env::var_os("CANDOR_R1494_OFF").is_none();
+                        && !candor_report::env::switch("CANDOR_R1494_OFF");
                     let p2 = if std_root {
-                        if crate::lang::reach_debug() || std::env::var_os("CANDOR_R1494_INSTR").is_some() {
+                        if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1494_INSTR") {
                             eprintln!("R1494UFCSSTD\t{tr}::{leaf}\t{ty}"); // §E1 REACH COUNTER
                         }
                         format!("{}::{leaf}", ty.rsplit("::").next().unwrap_or(&ty))
@@ -10957,7 +10960,7 @@ impl<'a> CallCollector<'a> {
         let saved = self.uses.clone();
         // §E1 HIT COUNTER — an unchanged row is not evidence the new code ran, so the corpus A/B has to
         // be able to prove it REACHES the nested-impl rebinding. Same switch as R160's `SELFALIAS`.
-        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
             eprintln!("R175SELFNEST {:?} -> {:?}", self.uses.get(crate::lang::SELF_KEY), bound);
         }
         match bound {
@@ -11273,7 +11276,7 @@ impl<'a> CallCollector<'a> {
         let Some(t) = ty.as_deref().filter(|_| leaves.is_empty()) else { return (leaves, ty) };
         let ev = self.scrut_args.clone();
         let d = self.payload_decision(container, t, ev.as_ref());
-        if std::env::var_os("CANDOR_R1267_INSTR").is_some() && !matches!(d, PayloadTy::Old) {
+        if candor_report::env::trace("CANDOR_R1267_INSTR") && !matches!(d, PayloadTy::Old) {
             eprintln!("R1267BIND\t{t}\t{d:?}"); // §E1 REACH COUNTER
         }
         match d {
@@ -11494,7 +11497,7 @@ impl<'a> CallCollector<'a> {
                 // §E1 HIT COUNTER — an unchanged row is not evidence the new code ran. Same switch and
                 // shape as R160's `SELFALIAS` and R161's `R161ALIAS`/`R161OPT` lines; gated on the
                 // positive answer so the env lookup is off the hot path.
-                if callable && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if callable && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("R238FIELD");
                 }
                 callable
@@ -11544,7 +11547,7 @@ impl<'a> CallCollector<'a> {
                         if crate::lang::turbofish_return_ty(p, &last.ident.to_string(), self.returns)
                             .is_some_and(|t| is_callable_type(t, &self.generic_bounds, self.callable_aliases))
                         {
-                            if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                            if candor_report::env::trace("CANDOR_VEINB_INSTR") {
                                 eprintln!("VEINB_FNTURBO\t{}", last.ident);
                             }
                             return true;
@@ -11666,7 +11669,7 @@ impl<'a> CallCollector<'a> {
                                     // bar, and the same switch the R140/BODYSHADOW/ALTSHADOW counters
                                     // use. A differential that prints 0/0/0 cannot tell "inert" from
                                     // "never reached"; this is what tells them apart (R376).
-                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                         eprintln!("R371ALIAS {written} :: {full}");
                                     }
                                     targets.push(full);
@@ -11906,7 +11909,7 @@ impl<'a> CallCollector<'a> {
         // mutated a bound name's state, so a corpus A/B that shows no movement proves nothing unless the
         // window was actually LIVE somewhere in it. Print the call sites where `pre` and `now` genuinely
         // differ: those are the reads that would have seen this statement's own writes.
-        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
             for (p, n) in pre.iter().zip(now.iter()) {
                 if (&p.vars, &p.trait_vars, &p.fn_alias, &p.elem_of, &p.tuple_trait_of, p.closure_vars, p.fn_typed_vars)
                     != (&n.vars, &n.trait_vars, &n.fn_alias, &n.elem_of, &n.tuple_trait_of, n.closure_vars, n.fn_typed_vars)
@@ -12520,7 +12523,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // published — the method-receiver spelling already publishes it.
                             .or_else(|| if leaf == "to_socket_addrs" {
                                 let l = node.args.first().and_then(|a| self.socket_name_lit(a));
-                                if l.is_some() && std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
+                                if l.is_some() && candor_report::env::trace("CANDOR_MASK_DEBUG") {
                                     eprintln!("R950UFCS lit={l:?}");
                                 }
                                 l
@@ -12565,7 +12568,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // consulted `ctor_type`/`returns` and this one did not.
                             .or_else(|| {
                                 let leaf = crate::lang::ctor_leaf_from_call_returns(&path, self.returns);
-                                if leaf.is_some() && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                if leaf.is_some() && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                     eprintln!("R165RET {path} -> {leaf:?}"); // §E1 HIT COUNTER
                                 }
                                 leaf
@@ -12579,12 +12582,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // SOUNDNESS R1474 — a callee whose RETURN is a `#[cfg]`-duplicated type (`fn mk() -> A1`): the
                         // R165 route above answered one arm's leaf; every arm dies here (EXECUTED `fx3/dropscope_escape_ff`).
                         // Gated on the expression's escape exactly as that answer is.
-                        if std::env::var_os("CANDOR_R1474_OFF").is_none()
+                        if !candor_report::env::switch("CANDOR_R1474_OFF")
                             && crate::lang::ctor_leaf_from_call_path(&path, &self.uses).is_none()
                             && !(ctor.as_ref().is_some_and(|c| self.escaping_ctors.contains(c)) && !charge_at_construction())
                         {
                             for l in crate::lang::ctor_arm_leaves_from_call_returns(&path, self.returns) {
-                                if std::env::var_os("CANDOR_R1474_INSTR").is_some() && self.drop_relevant.contains(&l) {
+                                if candor_report::env::trace("CANDOR_R1474_INSTR") && self.drop_relevant.contains(&l) {
                                     eprintln!("R1474ARMS\tret\t{path}\t{l}"); // §E1
                                 }
                                 self.note_release_q(Some(l), true, None);
@@ -12678,7 +12681,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // SOUNDNESS R1168 — R980's stated residual, a NAME or CALL operand (`let f = mk(); f.await`, `mk().await`):
             // `local_future_leaf` excludes exactly the leaf R980 measured (`ctl_await_asyncfn`) — one some crate `async fn`
             // returns, whose name may hold that fn's awaited VALUE by the return index's convention.
-            if std::env::var_os("CANDOR_R1168_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1168_INSTR") {
                 eprintln!("R1168AWAIT\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
             }
             // A crate-anchored type names WHICH twin (`crate::udp::udp_stream::NextRandomUdpSocket`); a bare leaf asks by leaf.
@@ -12742,7 +12745,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 let only_dep_traits = !traits.is_empty()
                     && traits.iter().all(|t| !self.local_traits.contains_key(t.rsplit("::").next().unwrap_or(t)));
                 if generic_ty && only_dep_traits {
-                    if crate::lang::reach_debug() || std::env::var_os("CANDOR_R963_INSTR").is_some() {
+                    if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R963_INSTR") {
                         eprintln!("R963PINGEN {leaf}");
                     }
                     self.mark_unresolved(format!("dispatch:generic pinned receiver of `{leaf}`"));
@@ -12965,7 +12968,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if lt.contains("::") && !lt.contains(crate::decls::ALIAS_ALT_SEP)
                     && !matches!(root, "std" | "core" | "alloc" | "crate" | "self" | "super")
                 {
-                    if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_VEINB_INSTR") {
                         eprintln!("VEINB_LEGACY\t{lt}::{leaf}");
                     }
                     self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: true, argc: node.args.len().min(255) as u8, entropy_arg: false,
@@ -13034,7 +13037,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             && self.resolve_recv_traits(&node.receiver).is_empty()
         {
             let lit = self.socket_name_lit(&node.receiver);
-            if std::env::var_os("CANDOR_MASK_DEBUG").is_some() {
+            if candor_report::env::trace("CANDOR_MASK_DEBUG") {
                 eprintln!("R950RECV {} lit={lit:?}", recv_why.unwrap_or(""));
             }
             self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false,
@@ -13169,7 +13172,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // type's call (see `GLOB_CAND_MARKER`).
                 for g in &glob_extra {
                     let (root, rest) = g.split_once("::").unwrap_or((g.as_str(), ""));
-                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_V053_INSTR") {
                         eprintln!("R1153CAND\t{g}\t.{leaf}"); // §E1 REACH COUNTER
                     }
                     self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false,
@@ -13200,7 +13203,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 let strict = self.chain_steps(&node.receiver);
                 let guess = strict.clone()
                     .or_else(|| {
-                        (std::env::var_os("CANDOR_R1617H_OFF").is_none())
+                        (!candor_report::env::switch("CANDOR_R1617H_OFF"))
                             .then(|| self.chain_steps_ex(&node.receiver, true))
                             .flatten()
                             .map(|(st, b)| {
@@ -13219,7 +13222,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // SOUNDNESS R1617(4) — the chain's provenance (`r1578_prov`'s format) rides on the marker, so an
                         // UNCHAINED dependency's chain can be re-typed from its lock-pinned source the way R861 re-types a
                         // chained one from its report (`scan::r1617_chain_type`). `None` for the unit-struct guess (no steps).
-                        let prov = (!steps.is_empty() && std::env::var_os("CANDOR_R1617H_OFF").is_none())
+                        let prov = (!steps.is_empty() && !candor_report::env::switch("CANDOR_R1617H_OFF"))
                             .then(|| self.r1578_prov(&node.receiver))
                             .flatten();
                         self.calls.push(Call { prov, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false,
@@ -13252,7 +13255,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // only while its `BoxConn` alias mistyped the field as `Box`). Dispatch on those supertraits too, exactly as
             // if the receiver had been written as an object of each. `CANDOR_R1495_OFF=1`.
             let mut recv_trs = self.resolve_recv_traits(&node.receiver);
-            if std::env::var_os("CANDOR_R1495_OFF").is_none() {
+            if !candor_report::env::switch("CANDOR_R1495_OFF") {
                 let mut extra: Vec<String> = Vec::new();
                 for tr in &recv_trs {
                     if self.local_traits.contains_key(tr) && !self.trait_declares_method(tr, &leaf, 0) {
@@ -13280,7 +13283,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }
                     }
                 }
-                if !extra.is_empty() && (crate::lang::reach_debug() || std::env::var_os("CANDOR_R1495_INSTR").is_some()) {
+                if !extra.is_empty() && (crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1495_INSTR")) {
                     eprintln!("R1495SUPER\t{leaf}\t{}", extra.join(",")); // §E1 REACH COUNTER
                 }
                 // The foreign route answers for the DEPENDENCY's implementors only; where THIS crate implements that
@@ -13318,7 +13321,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // one (an over-report where the leaf really was the local trait, never a silence).
                 let dep_written = self.local_traits.get(&tr).is_some()
                     && self.receiver_written_dep_trait(&node.receiver, &tr);
-                if dep_written && std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                if dep_written && candor_report::env::trace("CANDOR_VEINC_INSTR") {
                     eprintln!("VEINC_COLLIDE\t{tr}::{leaf}");
                 }
                 if self.local_traits.get(&tr).is_none() || dep_written {
@@ -13387,7 +13390,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             && (matches!(root, "std" | "core" | "alloc") || !full.contains("::"))
                             && !std_conventionally_pure(&tr, &leaf))
                     {
-                        if std::env::var_os("CANDOR_R1280_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1280_INSTR") {
                             eprintln!("R1280HEDGE\t{tr}\t{leaf}"); // §E1 REACH COUNTER
                         }
                         if io_hedge && crate::lang::reach_debug() {
@@ -13510,7 +13513,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // §E1 REACH PROBE, on the CHANGED branch only — the `CANDOR_ALIAS_DEBUG` channel
                         // `R485HIT`/`R446DYN`/`R549HIT` already use. A byte-identical A/B is not evidence
                         // until reach is counted.
-                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                             eprintln!("R551HIT {ext}::{leaf} (was {full}::{leaf})");
                         }
                         // The reachability fact, keyed on the trait that ACTUALLY declares the member.
@@ -13531,7 +13534,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // use: a corpus A/B counts hits on the CHANGED branch rather than inferring
                             // reach from a byte-identical diff. "CHANGED 0 is not evidence until REACH is
                             // measured" — 17,944 units once read inert while the code never ran.
-                            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                 eprintln!("R504HIT {owner}");
                             }
                             // SOUNDNESS R1319 (generic-field half, rustagent-0415) — R981's case, reached by the new
@@ -13672,7 +13675,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             && (self.dyn_sig_traits.contains(&tr) || self.dyn_local_traits.contains(&tr))
                             && crate::lang::is_dependency_crate_root(root)
                             && self.trait_impls.contains_key(&tr)
-                            && std::env::var_os("CANDOR_R571_INSTR").is_some()
+                            && candor_report::env::trace("CANDOR_R571_INSTR")
                         {
                             eprintln!("R571SUPPRESS {full}::{leaf}");
                         }
@@ -13702,10 +13705,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             crate::lang::is_dependency_crate_root(root)
                                 && ((!mono && self.dyn_sig_traits.contains(&tr)) || via_local || via_recv)
                         }) {
-                            if via_recv && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                            if via_recv && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                 eprintln!("R562HIT {full}::{leaf} impls={}", impls.len());
                             }
-                            if via_local && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            if via_local && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                 eprintln!("R556HIT {full}::{leaf} impls={}", impls.len());
                             }
                             if impls.len() <= 12 {
@@ -13742,7 +13745,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // `Trait::m(x)`. Where no rule exists (`std::io::Write::write_all`) nothing
                         // changes, which is exactly the answer `&mut dyn Write` and the UFCS spelling
                         // already give.
-                        if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_VEINC_INSTR") {
                             eprintln!("VEINC_STD\t{full}::{leaf}");
                         }
                         self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: true, argc: node.args.len().min(255) as u8,
@@ -13786,7 +13789,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             let recv_is_self = matches!(peel_recv(&node.receiver),
                 syn::Expr::Path(rp) if rp.qself.is_none() && rp.path.is_ident("self"));
             if recv_is_self && self.trait_declares_method(&tr, &leaf, 0) {
-                if std::env::var_os("CANDOR_VEINC_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_VEINC_INSTR") {
                     eprintln!("VEINC_SELF\t{tr}::{leaf}");
                 }
                 self.dispatch_calls_for_trait_method(&tr, &leaf, str_arg_self);
@@ -13960,7 +13963,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // R485 — genuinely `callback:` (an opaque function value handed to an adapter that
                     // invokes it); detail unchanged.
                     self.mark_unresolved("callback:unresolved call".to_string());
-                    if peeled && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    if peeled && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R271ADAPT");
                     }
                     continue;
@@ -14001,7 +14004,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
                                 self.calls.push(Call { prov: None, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false, path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });
                             }
-                            if peeled && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            if peeled && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                 eprintln!("R271ADAPT");
                             }
                         }
@@ -14068,7 +14071,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // R177 — same rule as the for-loop binder: the hedge never displaces a
                             // concrete element type (`xs.iter().for_each(|h| h.run())`).
                             if Self::callable_hedge_only(&elem_leaves) && elem_ty.is_some() {
-                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                     eprintln!("R177HEDGEKEEP closure {name} : {elem_ty:?}");
                                 }
                                 self.scoped_var(&name, elem_ty.clone(), |s| s.visit_expr(&cl.body));
@@ -14096,7 +14099,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if let syn::Expr::Closure(cl) = a {
                         // §E1 REACH COUNTER, on the CHANGED branch — an unchanged corpus row is not
                         // evidence the code ran, so the A/B counts this rather than inferring reach.
-                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                             eprintln!("R349BIND");
                         }
                         self.bind_elem_slots(&binds, Box::new(|s| s.visit_expr(&cl.body)));
@@ -14123,7 +14126,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // before, `k.encrypt` fell to the bare-leaf route, met the crate's own `impl PacketKey for Box<dyn ..>`
             // under its leaf, read as a resolved concrete call, and published NO `PacketKey::encrypt` key (quinn-proto
             // `PartialEncode::finish`). Only dispatch-typed positions bind; the rest walk as before.
-            if std::env::var_os("CANDOR_R1429_OFF").is_none() {
+            if !candor_report::env::switch("CANDOR_R1429_OFF") {
                 if let Some(binds) = self.payload_tuple_dispatch_binds(&el.pat, &el.expr) {
                     self.visit_expr(&el.expr);
                     let then_branch = &node.then_branch;
@@ -14370,7 +14373,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.charge_iter_next(&node.expr);
         // CALL-TARGET ROUND 2 — `for x in v` is `IntoIterator::into_iter(v)` then `next` until `None`: the table's
         // `into_iter` row (with std's blanket `impl<I: Iterator> IntoIterator for I`) on the iterated value's type.
-        if std::env::var_os("CANDOR_CT2_OFF").is_none() && self.std_shape_of(&node.expr).is_none() {
+        if !candor_report::env::switch("CANDOR_CT2_OFF") && self.std_shape_of(&node.expr).is_none() {
             let hooks = crate::std_bounds::method_hooks(crate::std_bounds::Recv::Implementor, "into_iter", 0, None);
             if let Some(t) = self.resolve_recv_type(&node.expr) {
                 for h in hooks.iter().filter(|h| h.slot == crate::std_bounds::Slot::SelfRecv) {
@@ -14408,7 +14411,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // R177 — the synthetic callable hedge does not displace a concrete element type; see
                 // `callable_hedge_only`. Both the hedge and the concrete typing are installed.
                 if Self::callable_hedge_only(&leaves) && elem.is_some() {
-                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R177HEDGEKEEP for-loop {name} : {elem:?}");
                     }
                     self.scoped_var(&name, elem, |s| s.visit_block(&node.body));
@@ -14431,7 +14434,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 self.visit_block(&node.body);
             } else {
                 // §E1 REACH COUNTER — see `R349BIND`.
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("R349FOR");
                 }
                 self.bind_elem_slots(&binds, Box::new(|s| s.visit_block(&node.body)));
@@ -14552,13 +14555,13 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let bound = self.bound_trait_leaves.contains(&tr);
                         let implemented = self.foreign_impls.contains_key(&key);
                         if bound || implemented {
-                            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                 eprintln!("R549HIT {key}"); // §E1 REACH PROBE
                             }
                             // §E1 REACH PROBE on the CHANGED branch ONLY — fires where the implementor
                             // witness is what opened the gate and the signature bound did not, because
                             // "CHANGED 0 is not evidence until REACH is measured".
-                            if !bound && std::env::var_os("CANDOR_R693_INSTR").is_some() {
+                            if !bound && candor_report::env::trace("CANDOR_R693_INSTR") {
                                 eprintln!("R693KEY\t{key}");
                             }
                             fd_prov_push(format!("{key}\u{1f}D\u{1f}{}", fd_prov_site())); // F3
@@ -14702,7 +14705,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 crate::lang::expand(&full, &self.uses).rsplit("::").next().unwrap_or(&full),
                 self.static_types,
             );
-            if caps_const && std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+            if caps_const && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("R722CONSTPATH {full}");
             }
             let ctor = (!caps_const)
@@ -14733,14 +14736,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if !self.assign_drop.exempt.contains(&(node as *const syn::ExprAssign as usize)) {
             let (local, cross) = self.assigned_drop_targets(node);
             for leaf in local {
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("R297ASSIGN {leaf} in {}", self.modpath); // §E1 REACH COUNTER
                 }
                 self.note_owned_param_drop(Some(leaf));
             }
             // R1118 — a DEPENDENCY's type, joined against its chained report's `Type::drop`.
             for (cr, leaf) in cross {
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("R1118ASSIGN {cr}::{leaf} in {}", self.modpath); // §E1 REACH COUNTER
                 }
                 self.note_cross_release(cr, leaf);
@@ -14781,7 +14784,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // SOUNDNESS R1129 (closure half) — `let f = |_h: H| {}; f(H::new())`: the closure's typed by-value
         // parameter dies in its body (EXECUTED: 1 drop), and the call of a local VALUE carries no callee row.
         for leaf in crate::lang::closure_param_releases(node, &self.uses) {
-            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && self.drop_relevant.contains(&leaf) {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") && self.drop_relevant.contains(&leaf) {
                 eprintln!("R1129CLOSURE {leaf} in {}", self.modpath); // §E1 REACH COUNTER
             }
             self.note_owned_param_drop(Some(leaf));
@@ -14929,7 +14932,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // must tell them apart, and it could previously ask only the signature and the
                         // annotated `let`. Same helper as both of those, ADDITIVE like both of those.
                         // §E1 REACH COUNTER, on the CHANGED branch.
-                        if std::env::var_os("CANDOR_ALIAS_DEBUG").is_some() {
+                        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                             eprintln!("R561HIT");
                         }
                         crate::lang::collect_dyn_trait_leaves(&pt.ty, &mut self.dyn_local_traits);
@@ -15493,7 +15496,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // unresolved, which is exactly the inline-runtime-value answer: `incomplete`, no literal.
                 let changed = id.mutability.is_some() && !self.literal_survives(&name, &init.expr);
                 // REACH probe for the A/B (§E1): a literal this rule WITHHELD. Env-gated, stderr only.
-                if changed && resolved.is_some() && std::env::var_os("CANDOR_R810_DEBUG").is_some() {
+                if changed && resolved.is_some() && candor_report::env::trace("CANDOR_R810_DEBUG") {
                     eprintln!("R810WITHHELD {} {}", self.modpath, name);
                 }
                 if let Some(v) = resolved.filter(|_| !changed) {
@@ -15520,7 +15523,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         .is_some_and(|i| self.closure_vars.contains(&i.to_string())),
                     _ => false,
                 };
-                if init_is_closure_var && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if init_is_closure_var && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("CLOSURE-REBIND {}", id.ident);
                 }
                 if matches!(&*init.expr, syn::Expr::Closure(_)) || init_is_closure_var {
@@ -15692,7 +15695,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             if let Some(t) =
                                 self.with_pre_bindings(&pre_bindings, |s| s.resolve_recv_type(&init.expr))
                             {
-                                if std::env::var_os("CANDOR_R569_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R569_INSTR") {
                                     eprintln!("R569HIT\t{}\t{t}", id.ident); // §E1 REACH PROBE
                                 }
                                 self.vars.insert(id.ident.to_string(), t);
@@ -15724,7 +15727,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 .then(|| self.with_pre_bindings(&pre_bindings, |s| s.type_of(&init.expr)))
                                 .flatten()
                             {
-                                if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_VEINB_INSTR") {
                                     eprintln!("VEINB_LET\t{}\t{t}", id.ident);
                                 }
                                 self.veinb_typed.insert(id.ident.to_string(), t.clone());
@@ -15740,7 +15743,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 // already turns into a `typeSurface.returns` join and, on a miss,
                                 // `dispatch:untyped cross-package receiver` — the chained `let c =
                                 // dep::build()` route, one receiver over.
-                                if std::env::var_os("CANDOR_VEINB_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_VEINB_INSTR") {
                                     eprintln!("VEINB_DEPPROV\t{}\t{prov}", id.ident);
                                 }
                                 let pv = self.with_pre_bindings(&pre_bindings, |s| s.r1578_prov(&init.expr));
@@ -15760,7 +15763,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 // `Net`. R950 refused ANY untyped receiver (async-std's IP impls); this types
                                 // only what `is_provably_str` proves — a `format!`, a `+` onto a string,
                                 // `.to_string()`/`.as_str()`, `String::from` — the R949 authority, not a guess.
-                                if std::env::var_os("CANDOR_R963_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R963_INSTR") {
                                     eprintln!("R963STRLET");
                                 }
                                 // SOUNDNESS R1160 — a value std MADE (`format!`, `.to_string()`, a `+` onto one) is std's `String`
@@ -15813,7 +15816,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             }
                             if !targets.is_empty() {
                                 // §E1 REACH COUNTERS, on the CHANGED branches themselves.
-                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                     if r271_peeled {
                                         eprintln!("R271LET");
                                     }
@@ -15877,7 +15880,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if !r536_leaves.is_empty() {
                         // SOUNDNESS R536 §E1 REACH COUNTER, on the CHANGED branch, and keyed apart from
                         // the LIST half so the A/B can price the two mechanisms separately.
-                        if std::env::var_os("CANDOR_R536_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R536_INSTR") {
                             eprintln!("R536LET");
                         }
                         self.elem_trait_of.insert(id.ident.to_string(), r536_leaves);
@@ -15909,7 +15912,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let types: Vec<Option<String>> = it.elems.iter()
                             .map(|e| self.nominal_ctor_type(e).or_else(|| {
                                 // SOUNDNESS R1494 — a suffixed literal names its primitive (`(1u8, 2u8)` is `(u8,u8)`).
-                                std::env::var_os("CANDOR_R1494_OFF").is_none().then(|| typed_literal_prim(e)).flatten()
+                                (!candor_report::env::switch("CANDOR_R1494_OFF")).then(|| typed_literal_prim(e)).flatten()
                             }))
                             .collect();
                         if types.iter().any(|t| t.is_some()) {
@@ -15952,7 +15955,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         init: Some(syn::LocalInit { eq_token: Default::default(), expr: Box::new(field), diverge: None }),
                         semi_token: Default::default(),
                     };
-                    if std::env::var_os("CANDOR_R963_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R963_INSTR") {
                         eprintln!("R963STRUCTPAT");
                     }
                     self.visit_local(&synth);
@@ -16019,7 +16022,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // `mb::a3_collision_hole` goes ['Fs'] → ['Unknown'], a concrete effect lost. So this adds the
         // disclosure and nothing else; the order-dependence stays open, now visibly rather than silently.
         if !mpath.contains("::") && self.macro_twins.contains(&mleaf) {
-            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("R208DISCLOSE {mleaf}"); // §E1 HIT COUNTER
             }
             self.refusals.insert("ambiguous:same-name macro_rules! definitions".to_string());
@@ -16046,7 +16049,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             && !self.macro_expanding.contains(&mleaf))
             .then(|| self.uses.get(&format!("{}{mleaf}", crate::model::SCOPE_MACRO_PREFIX)).cloned())
             .flatten();
-        if scoped_def.is_some() && std::env::var_os("CANDOR_V053_INSTR").is_some() {
+        if scoped_def.is_some() && candor_report::env::trace("CANDOR_V053_INSTR") {
             eprintln!("R1156SCOPED\t{mleaf}"); // §E1 REACH COUNTER
         }
         let mbody = if mpath.contains("::") {
@@ -16098,7 +16101,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // only where a template the body itself declares is about to be walked, which is
                     // the only case this cut adds. A crate-level expansion (the pre-existing path)
                     // does not count it.
-                    if self.body_macros.contains_key(&mname) && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    if self.body_macros.contains_key(&mname) && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R142BODY {mname}");
                     }
                     self.macro_expanding.insert(mname.clone());
@@ -16132,7 +16135,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // for "no owner could be formed at all". Same kind, same field and same
                     // ADD-ONLY direction as the R208 site above; it costs the caller an `Unknown`
                     // and makes `deny Unknown` able to see the gap, which is the whole point.
-                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R143DISCLOSE {mname} arms={arm_count}"); // §E1 HIT COUNTER
                     }
                     self.refusals
@@ -16167,7 +16170,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     // NOT the same thing as expanding it: this only refuses to certify. `ambiguous:`
                     // follows `ambiguous:module items hidden by an unexpanded macro`, which is already
                     // this engine's kind for a macro-opacity refusal that is not a name collision.
-                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                         eprintln!("R144DISCLOSE {mname} arms={arm_count}"); // §E1 HIT COUNTER
                     }
                     self.refusals
@@ -16211,14 +16214,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // exactly as it does an `async move` block. Named macros only: a code-shaped body such as `quote!`'s is NOT run.
         if parsed.is_err()
             && matches!(mleaf.as_str(), "stream" | "try_stream")
-            && std::env::var_os("CANDOR_R1649_OFF").is_none()
+            && !candor_report::env::switch("CANDOR_R1649_OFF")
         {
             let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(proc_macro2::Group::new(
                 proc_macro2::Delimiter::Brace,
                 respan_call_site(node.tokens.clone()),
             )));
             if let Ok(block) = syn::parse2::<syn::Block>(braced) {
-                if std::env::var_os("CANDOR_R1649_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1649_INSTR") {
                     eprintln!("R1649STREAM\t{mleaf}"); // §E1 REACH COUNTER
                 }
                 self.visit_block(&block);
@@ -16287,7 +16290,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // dispatch receiver for `Add`/`PartialEq`/…). A std/primitive operand resolves to no local impl
         // → no edge (no flood on arithmetic over `i32`/`usize`/etc.).
         if let Some((tr, method)) = binop_trait(&node.op) {
-            if crate::lang::is_assign_operator_trait(tr) && std::env::var_os("CANDOR_R1177_INSTR").is_some() {
+            if crate::lang::is_assign_operator_trait(tr) && candor_report::env::trace("CANDOR_R1177_INSTR") {
                 eprintln!("R1177ASSIGN\t{tr}"); // §E1 REACH COUNTER: a compound-assignment site, which formed no edge before
             }
             // R1157 — whether the RIGHT operand is a literal, for `charge_coercion_ty_at`; reset below.
@@ -16322,7 +16325,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     return None;
                 }
                 let t = cast_target_ident(&node.left)?;
-                if std::env::var_os("CANDOR_V054_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_V054_INSTR") {
                     eprintln!("R1161CAST\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
                 }
                 Some(t)
@@ -16357,7 +16360,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         || self.returns.contains_key(&crate::model::prim_op_key(tr, p, true))
                         || self.returns.contains_key(&crate::model::impl_ref_self_key(tr, p));
                     if implemented {
-                        if std::env::var_os("CANDOR_V054_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_V054_INSTR") {
                             eprintln!("R1162LITLEFT\t{tr}\t{p}"); // §E1 REACH COUNTER, on the ADDED branch only
                         }
                         self.charge_coercion_ty(p, tr, method);
@@ -16389,7 +16392,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         && self.operator_reachable(&t, tr)
                         && !(prim && right_prim)
                     {
-                        if std::env::var_os("CANDOR_R1137_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1137_INSTR") {
                             eprintln!("R1137DECLRET\t{tr}\t{t}"); // §E1 REACH COUNTER, on the ADDED branch only
                         }
                         self.charge_coercion_ty(&t, tr, method);
@@ -16405,7 +16408,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if let Some(id) = tp.path.get_ident().filter(|_| tp.qself.is_none()) {
                         let p = id.to_string();
                         if crate::model::PRIMITIVE_LEAVES.contains(&p.as_str()) && self.generic_bounds.contains_key(&p) {
-                            if std::env::var_os("CANDOR_R1140_INSTR").is_some() {
+                            if candor_report::env::trace("CANDOR_R1140_INSTR") {
                                 eprintln!("R1140PRIMWHERE\t{tr}\t{p}"); // §E1 REACH COUNTER, on the ADDED branch only
                             }
                             self.charge_coercion_ty(&p, tr, method);
@@ -16424,7 +16427,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if !crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str()) {
                         for p in crate::model::PRIMITIVE_LEAVES {
                             if self.returns.contains_key(&crate::model::prim_alias_key(&leaf, p)) {
-                                if std::env::var_os("CANDOR_R1139_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R1139_INSTR") {
                                     eprintln!("R1139PRIMALIAS\t{tr}\t{leaf}\t{p}"); // §E1 REACH COUNTER, on the ADDED branch only
                                 }
                                 self.charge_coercion_ty(p, tr, method);
@@ -16956,7 +16959,7 @@ pub(crate) fn arm_exact_target<'a>(
             // §E1 REACH COUNTER, same shape as R160's `SELFALIAS` and the R186 refusal counter: an
             // unchanged corpus row is not evidence this pass ran. Env-gated and behind the match, so it
             // costs a lookup only where the ranking is what decided the call.
-            if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+            if candor_report::env::trace("CANDOR_R186_DEBUG") {
                 eprintln!("EXACTQUAL {path} -> {hit}");
             }
             return Some(hit);
@@ -17046,7 +17049,7 @@ pub(crate) fn arm_exact_target<'a>(
     if top.next().is_some() {
         return None; // a TIE at the maximum refuses, exactly as the unranked loop did
     }
-    if std::env::var("CANDOR_R186_DEBUG").is_ok() {
+    if candor_report::env::trace("CANDOR_R186_DEBUG") {
         eprintln!("SPECRANK {path} -> {hit}");
     }
     Some(hit)
@@ -17295,7 +17298,7 @@ pub(crate) fn reexport_aliases(
             // §E1 HIT COUNTER — this is precisely the branch the R169 precedence used to take the other
             // way; without it a byte-identical A/B says nothing about whether the corpus reached it.
             if *cfg_gated && !explicit_quals.is_empty() && explicit_quals != quals
-                && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+                && candor_report::env::trace("CANDOR_ALIAS_DEBUG")
             {
                 eprintln!("R176CFGUNION {mlast}::{name} -> {quals:?} (was {explicit_quals:?})");
             }
@@ -17346,7 +17349,7 @@ pub(crate) fn reexport_aliases(
             if from_edges.len() > 1
                 && macro_last.get(mlast).is_some_and(|ms| ms.iter().any(|m| *m != module))
             {
-                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                     eprintln!("R169MACROCONTEST {key} (module {module})");
                 }
                 // R190(e), third spelling: R169's guard refuses this key because a macro-hidden module
@@ -17363,7 +17366,7 @@ pub(crate) fn reexport_aliases(
                 refused.insert(key, "macro:re-export key a macro-hidden module could also own");
                 continue;
             }
-            if from_edges.len() > 1 && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            if from_edges.len() > 1 && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 // §E1 HIT COUNTER — this is precisely the branch the old `!= 1` test dropped.
                 eprintln!("R169MULTI {key} -> {effective:?}");
             }
@@ -17480,7 +17483,7 @@ fn template_blocks(body: &str, flat: bool) -> (usize, Vec<syn::Block>) {
             // §E1 counter, and it counts the arms this flattening is the ONLY reader of — an arm the
             // plain transform could already parse is not evidence the branch did anything. The extra
             // parse happens only under the debug flag, so the hot path is unchanged.
-            if flat && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            if flat && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 let plain = TokenStream::from(TokenTree::Group(Group::new(
                     Delimiter::Brace,
                     strip_dollars(tmpl.clone()),

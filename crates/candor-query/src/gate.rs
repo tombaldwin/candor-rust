@@ -61,6 +61,9 @@ pub(crate) struct GateReport {
     net_partners: Vec<candor_report::NetPartners>,
     /// ⟨0.15⟩ the κ ledger's package NAMES, unioned across reports — the verdict's advisory note.
     coverage_packages: BTreeSet<String>,
+    /// ⟨0.42⟩ SPEC §2 `switches` (SOUNDNESS R1634) — the result-moving switches the PRODUCING scans ran under, unioned across
+    /// the reports under the locator. Non-empty makes the gate unanswerable (§3.3 cause (e)), exit 2 and the refusal document.
+    switches: BTreeSet<String>,
     /// ⟨0.24⟩ The PACKAGES under this locator whose report says it JUDGED NOTHING (SPEC §2's
     /// `analyzed.count == 0` rule — [`candor_report::report_judged_nothing`]). SPEC §3.1 ⟨0.24⟩ binds the
     /// same rule to this verb: such a report *"has judged nothing, so it licenses no purity claim and
@@ -142,6 +145,7 @@ fn load_gate_report(prefix: &str, own_rules: &[String]) -> Result<GateReport, St
         unasked_rules_predates_033: false,
         net_partners: Vec::new(),
         coverage_packages: BTreeSet::new(),
+        switches: BTreeSet::new(),
         judged_nothing_pkgs: Vec::new(),
     };
     let mut hard_fail = false;
@@ -376,6 +380,17 @@ fn load_gate_report(prefix: &str, own_rules: &[String]) -> Result<GateReport, St
             Default::default()
         );
         out.coverage_packages.extend(cov.uncovered.into_iter().map(|e| e.name));
+        // ⟨0.42⟩ SPEC §2 `switches` (§3.4 (c)(ii)): the producing run was SET under a result-moving switch, so this report is not
+        // a conforming report of the `spec` it names and a gate over it is unanswerable. STRICT like every verdict-bearing key
+        // here: a present-but-unreadable value is corrupt input, never coerced to "no switches" — the safe-LOOKING reading
+        // deletes the very refusal the key exists to trigger. ABSENT is a run under no switch (or a pre-⟨0.42⟩ producer).
+        out.switches.extend(strict!(
+            candor_report::report_switches(&text),
+            "switches",
+            "a list of non-empty switch names",
+            "the EMPTY list — \"this run was under no switch\", which deletes the §3.3 (e) refusal",
+            Vec::new()
+        ));
     }
     if hard_fail {
         let why = "refusing to gate over a report that did not load cleanly — re-run the scan (a \
@@ -1043,6 +1058,76 @@ fn refuse_disclosing(
     2
 }
 
+/// ⟨0.42⟩ SPEC §3.3 cause (e) (SOUNDNESS R1634): REFUSE because a result-moving switch is set. Exit 2, and the §3.1 refusal
+/// document — `ok: false`, `refused: true`, NO `violations`, `reason`, `switches` — to every sink the run was given, so
+/// `scan --policy` and `gate --report` write the same bytes over a report a switched scan produced. `switches` is the union of
+/// the switches THIS process consulted and the ones the judged report(s) carry.
+fn refuse_switched(names: &[String], want_json: bool, gate_json: Option<&str>) -> i32 {
+    let why = candor_report::env::switch_refusal_reason(names);
+    eprintln!("candor-query gate: {why}");
+    let mut targets: Vec<&str> = Vec::new();
+    if want_json {
+        targets.push("-");
+    }
+    if let Some(p) = gate_json
+        && !(want_json && p == "-")
+    {
+        targets.push(p);
+    }
+    if !targets.is_empty() {
+        match candor_report::gate_switch_refusal_json(&why, names) {
+            Ok(json) => {
+                for t in targets {
+                    if t == "-" {
+                        println!("{json}");
+                    } else if let Err(e) = candor_report::write_atomic(Path::new(t), format!("{json}\n").as_bytes()) {
+                        eprintln!(
+                            "candor-query gate: could not write the refusal document to --gate-json {t} ({e}) — a consumer reading \
+                             that path will see the PREVIOUS run's verdict, which is stale. Delete it, or treat exit 2 as a failure."
+                        );
+                    }
+                }
+            }
+            Err(e) => eprintln!("candor-query gate: could not serialize the refusal document ({e})"),
+        }
+    }
+    2
+}
+
+/// ⟨0.42⟩ The `switches` of every report under `prefix`, unioned, read LENIENTLY: this only ever ADDS a refusal. A file that
+/// does not parse is the loader's business (it is loud there), and an element that is not a name is not one.
+pub(crate) fn switches_at(prefix: &str) -> Vec<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for p in glob_reports(prefix) {
+        let Ok(text) = std::fs::read_to_string(&p) else { continue };
+        if let candor_report::KeyRead::Present(v) = candor_report::report_switches(&text) {
+            out.extend(v);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// ⟨0.42⟩ SPEC §3.4 (c): the advisory verbs that answer `ok` (`unverified`, `fix-gate`, `whatif`) FOLLOW the gate. A verb that
+/// answered over a switched report would accept what the gate refuses, and an advisory verb may be less certain than the gate,
+/// never more (§3.3.1). They refuse with the same document and exit 2 whether or not `--strict` is given: the claim "this is not
+/// what the engine implements" is not a completeness hedge but a withdrawn answer. `fix`, which answers no `ok`, is not bound.
+/// The document goes to stdout under `--json`; the reason is on stderr always.
+pub(crate) fn refuse_advisory_under_switches(verb: &str, prefix: &str, want_json: bool) -> Option<i32> {
+    let names = candor_report::union_switches(&candor_report::env::consulted_switches(), &switches_at(prefix));
+    if names.is_empty() {
+        return None;
+    }
+    let why = candor_report::env::switch_refusal_reason(&names);
+    eprintln!("candor-query {verb}: {why}");
+    if want_json {
+        match candor_report::gate_switch_refusal_json(&why, &names) {
+            Ok(json) => println!("{json}"),
+            Err(e) => eprintln!("candor-query {verb}: could not serialize the refusal document ({e})"),
+        }
+    }
+    Some(2)
+}
+
 /// `candor-query gate --report <locator> --policy <file> [--json] [--gate-json <file>]`
 ///
 /// A QUERY verb, not a scan flag, so it inherits §3.3.1's grammar unchanged: the same `--report` locator
@@ -1167,8 +1252,8 @@ pub(crate) fn cmd_gate(args: &[String]) -> i32 {
         // is how `set_refusal_sink` came to overwrite an operator's config file on this route.
         let named_sinks = distinct_gate_sinks(&all_gate_sinks(args));
         if let Some(gp) = gate {
-            let env_policy = std::env::var("CANDOR_POLICY").ok();
-            let env_config = std::env::var("CANDOR_CONFIG").ok();
+            let env_policy = candor_report::env::operator("CANDOR_POLICY").ok();
+            let env_config = candor_report::env::operator("CANDOR_CONFIG").ok();
             // ⟨0.28⟩ …AND THE FILES THE LOCATOR EXPANDS TO, because the raw flag value below is not
             // what this verb READS. A `--report` value is a PREFIX (or a discovery, when absent), and
             // `load_gate_report` reads its expansion — so a sink naming one of the expanded files named
@@ -1985,6 +2070,18 @@ pub(crate) fn gate_core(
             return Err(mode.stop(&why, &[]));
         }
     };
+    // ⟨0.42⟩ SPEC §3.3 cause (e), §3.4 (c)(i)+(ii): a gate over a report whose producer ran under a set result-moving switch, or
+    // evaluated by a process that itself consulted one, is UNANSWERABLE. The union of the two, code-point sorted. Taken BEFORE
+    // any rule is evaluated and not dominated by a violation (§3.1's ⟨0.24⟩ corruption boundary: the findings of an engine that is
+    // not the one `spec` names are not evidence). `accepts` reads the same gate but answers no `ok`, so it is not bound.
+    if let CoreMode::Gate { want_json, gate_json } = mode {
+        let own: Vec<String> = rep.switches.iter().cloned().collect();
+        let names = candor_report::union_switches(&candor_report::env::consulted_switches(), &own);
+        if !names.is_empty() {
+            let why = candor_report::env::switch_refusal_reason(&names);
+            return Err(CoreStop { code: refuse_switched(&names, want_json, gate_json), why, no_rules: false });
+        }
+    }
     // ⟨0.32⟩ DOES THIS POLICY'S ANSWER DEPEND ON THE CODE THE PRODUCER LEFT UNREAD? — the ONE place that
     // condition is applied on this route (see the rule stated at the recording site in
     // `load_gate_report`). `rules` is the DENY list; `allow`/`forbid`/`only`/`layer` live in their own,
@@ -2272,7 +2369,7 @@ pub(crate) fn config_value(text: &str, key: &str) -> Option<String> {
 /// The policy ladder §3.3.1 gives every gate-shaped verb: `--policy`, then `CANDOR_POLICY`, then the config `policy`
 /// key. One copy, for `gate` and for `accepts`.
 pub(crate) fn resolve_policy_path(flag: Option<String>) -> Option<String> {
-    flag.or_else(|| std::env::var("CANDOR_POLICY").ok().filter(|s| !s.is_empty())).or_else(|| {
+    flag.or_else(|| candor_report::env::operator("CANDOR_POLICY").ok().filter(|s| !s.is_empty())).or_else(|| {
         candor_classify::policy::discover_config_text(Path::new(".")).and_then(|t| config_value(&t, "policy"))
     })
 }

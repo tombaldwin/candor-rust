@@ -750,7 +750,7 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
         let mut inst_impls = std::collections::HashSet::new();
         for (env, root) in walk.roots(did, body) {
             for l in walk.reach(env, root).iter() {
-                if !impls.contains(l) && inst_impls.insert(*l) && std::env::var_os("CANDOR_DROP_DEBUG").is_some() {
+                if !impls.contains(l) && inst_impls.insert(*l) && candor_report::env::trace("CANDOR_DROP_DEBUG") {
                     eprintln!(
                         "CANDOR_DROP_INST_EDGE {} <- {} (drop impl {})",
                         tcx.def_path_str(owner.to_def_id()),
@@ -772,7 +772,7 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
                 // REACH is measured: the register has a row (R756's own vein) where 17,944 analysed
                 // units read "inert" and a probe showed the code had never run. This is the probe, kept
                 // rather than rebuilt, so the next A/B over this path can quote a reach count.
-                if owner != did && std::env::var_os("CANDOR_DROP_DEBUG").is_some() {
+                if owner != did && candor_report::env::trace("CANDOR_DROP_DEBUG") {
                     eprintln!(
                         "CANDOR_DROP_BODY_EDGE {} <- body {} (drop impl {})",
                         tcx.def_path_str(owner.to_def_id()),
@@ -784,7 +784,7 @@ pub(crate) fn drop_edges(tcx: TyCtxt<'_>) -> Vec<(LocalDefId, LocalDefId)> {
             }
         }
     }
-    if walk.truncated > 0 && std::env::var_os("CANDOR_DROP_DEBUG").is_some() {
+    if walk.truncated > 0 && candor_report::env::trace("CANDOR_DROP_DEBUG") {
         eprintln!("CANDOR_DROP_INST_TRUNCATED {}", walk.truncated);
     }
     edges

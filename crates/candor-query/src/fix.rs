@@ -288,7 +288,7 @@ fn compute_remedy<'a>(
 /// Returns the resolved policy PATH beside the parse — the ⟨0.28⟩ zero-rule caveat names the whole
 /// policy, so the callers need to know which file that was.
 fn load_rules(policy_path: Option<String>) -> Result<(String, candor_classify::policy::ParsedPolicy), i32> {
-    let policy_path = policy_path.or_else(|| std::env::var("CANDOR_POLICY").ok());
+    let policy_path = policy_path.or_else(|| candor_report::env::operator("CANDOR_POLICY").ok());
     let Some(pp) = policy_path else {
         eprintln!("candor fix: a policy is required (pass a policy file or set CANDOR_POLICY) — the fix is the refactor that restores the boundary the edit crossed.");
         return Err(2);
@@ -560,6 +560,10 @@ pub(crate) fn cmd_fix_gate(args: &[String]) -> i32 {
     };
     let prefix = &prefix;
     let want_json = g.want_json;
+    // ⟨0.42⟩ SPEC §3.4 (c): refuse over a report a switched run produced (SOUNDNESS R1634).
+    if let Some(code) = crate::gate::refuse_advisory_under_switches("fix-gate", prefix, want_json) {
+        return code;
+    }
     let policy_path = g.policy.clone();
     let (pp_path, parsed) = match load_rules(policy_path) {
         Ok(p) => p,

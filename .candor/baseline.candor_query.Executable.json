@@ -1077,6 +1077,28 @@
       ]
     },
     {
+      "fn": "gate::refuse_advisory_under_switches",
+      "loc": "crates/candor-query/src/gate.rs:1115:1: 1115:103",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "109d97b98736048ee666a44537aac013",
+      "calls": [
+        "gate::switches_at"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "gate::refuse_disclosing",
       "loc": "crates/candor-query/src/gate.rs:1008:1: 1013:9",
       "inferred": [
@@ -1199,6 +1221,31 @@
       "hash": "8be192a8d345fdf8537924c98dd6fd6e",
       "invisible": [
         "candor_classify"
+      ]
+    },
+    {
+      "fn": "gate::switches_at",
+      "loc": "crates/candor-query/src/gate.rs:1099:1: 1099:55",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "109d97b98736048e86f2058f41223e9e",
+      "calls": [
+        "load::glob_reports"
+      ],
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
       ]
     },
     {

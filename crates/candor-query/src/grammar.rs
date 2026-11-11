@@ -58,7 +58,7 @@ pub(crate) fn resolve_locator(loc: &str) -> String {
 /// `.candor/` directory and use `<that>/.candor/report`. `None` if neither is found (the caller then
 /// fails loud via the usual no-files path).
 pub(crate) fn discover_report_prefix() -> Option<String> {
-    if let Ok(env) = std::env::var("CANDOR_REPORT")
+    if let Ok(env) = candor_report::env::operator("CANDOR_REPORT")
         && !env.is_empty()
     {
         // `CANDOR_REPORT` resolves by the SAME §3.3.1 locator rule as `--report`: a directory →

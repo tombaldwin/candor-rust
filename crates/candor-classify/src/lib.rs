@@ -2518,7 +2518,7 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 return None;
             }
             // §E1 HIT COUNTER (`CANDOR_ALIAS_DEBUG`) for `bin/corpus-ab.py --mark`.
-            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("R335SENTINEL {path}");
             }
             return Some("Db");
@@ -3339,7 +3339,7 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         let sys_rng = path.contains("SysRng") && !matches!(m, "clone" | "fork" | "default");
         // §E1 HIT COUNTER (`CANDOR_ALIAS_DEBUG`), for `bin/corpus-ab.py --mark`: a widened charge that
         // moves no rows is either inert or unreached, and those two print identically.
-        if sys_rng && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+        if sys_rng && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
             eprintln!("R320SYSRNG {path}");
         }
         if rng_verb || os_rng || sys_rng {
@@ -6777,7 +6777,7 @@ pub fn password_hash_explicit_salt(crate_name: &str, path: &str, argc: u8, metho
     // §E1 HIT COUNTER, the `CANDOR_ALIAS_DEBUG` pattern. A refinement that narrows a charge must be
     // able to prove it REACHED real code, because "nothing moved" and "the branch never ran" print the
     // same corpus A/B. This is what `bin/corpus-ab.py --mark` counts.
-    if hit && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+    if hit && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
         eprintln!("R330EXPLICITSALT {path} argc={argc} method={method}");
     }
     hit

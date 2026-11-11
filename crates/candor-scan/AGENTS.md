@@ -278,6 +278,15 @@ CI fail any PR that makes a function gain an effect. That's a *team* decision (i
 PR flow), so it's not part of this setup — suggest it to the maintainer if candor proves useful, and
 point them at the project README's "CI guardrail" section and `examples/candor-guard.yml`.
 
+- **⟨0.42⟩ A REPORT THAT CARRIES `switches` IS NOT A REPORT OF THE `spec` IT NAMES.** A `CANDOR_*` environment variable that
+  selects which logic ran (a kill switch such as `CANDOR_R1608_OFF=1`, an opt-in such as `CANDOR_R1580=1`) is listed by name in the
+  report's `switches` key when it was set and the run consulted it; an unset or default-valued one, and one the engine never reads,
+  is not. A gate run under one — `candor-scan --policy`, or the same policy over that report with `candor-query gate --report`, or
+  `unverified` / `fix-gate` / `whatif` — answers the refusal document (`ok:false`, `refused:true`, no `violations`, `switches`, a
+  `reason` saying to unset them) at **exit 2**, whatever the findings: do not "fix" it by gating on a different arm, unset the variable
+  and re-scan. A chained dependency report that carries `switches` adds `switchedDependencies` to the verdict (advisory; the exit is
+  unchanged), so re-scan that dependency without the variable. A scan with no policy is not refused: it writes its report, naming the switch.
+
 - **⟨0.30⟩ A GREEN GATE CAN NOW EXIT 2 — read `outOfScope` before you trust a pass.** When a policy is
   configured, candor also reads the files the scan EXCLUDED (test files, build scripts, archives under the
   root, files outside the build's program) and reports any that perform an effect the policy DENIES, under

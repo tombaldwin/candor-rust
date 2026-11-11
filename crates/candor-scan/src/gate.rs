@@ -1595,8 +1595,48 @@ pub(crate) fn arm_gate_json() {
     }
 }
 
+/// ⟨0.42⟩ SPEC §3.3 cause (e) (SOUNDNESS R1634): the switches that made this run's gate unanswerable. Set once, by
+/// [`refuse_under_switches`], read by [`write_gate_json`].
+static SWITCH_REFUSAL: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// ⟨0.42⟩ SPEC §3.4 (c)(i): **A GATE EVALUATED UNDER A SET RESULT-MOVING SWITCH IS UNANSWERABLE.** `code` is the verdict the run
+/// reached; `gating` says this run HAS a gate (a policy or a baseline): a scan that asks no question has nothing to refuse and
+/// its report names the switch (disclosure, nothing refuses — the route harnesses attribute on). The names are the switches
+/// THIS process consulted: the analysis that just ran is the evaluator. A violation does NOT dominate (the second instance of
+/// §3.1's ⟨0.24⟩ corruption boundary): the engine that found it was itself altered by its environment, so the finding is
+/// computed from bytes whose meaning relative to `spec` is unknown, and the exit is 2 whatever `code` was.
+///
+/// Called at the one place a run's exit is final, after every verdict producer (the policy gate, the AS-EFF-005 guard, `accept`
+/// settlement) has run, so no producer needs to know about it. The report was written BEFORE this and carries `switches`: a
+/// refused `scan --policy` still writes its report, because the refusal is the GATE's and the report is what a harness
+/// attributes on and what `gate --report` is bound to answer over.
+pub(crate) fn refuse_under_switches(code: i32, gating: bool) -> i32 {
+    let names = candor_report::env::consulted_switches();
+    if !gating || names.is_empty() {
+        return code;
+    }
+    eprintln!("candor-scan: {}", candor_report::env::switch_refusal_reason(&names));
+    let _ = SWITCH_REFUSAL.set(names);
+    2
+}
+
 pub(crate) fn write_gate_json(exit_code: i32) {
     let Some(Some(path)) = GATE_JSON_PATH.get() else { return };
+    // ⟨0.42⟩ cause (e): the refusal document, and no verdict. It carries no `violations` key whatever the run established.
+    if let Some(names) = SWITCH_REFUSAL.get() {
+        let why = candor_report::env::switch_refusal_reason(names);
+        match candor_report::gate_switch_refusal_json(&why, names) {
+            Ok(json) if path == "-" => println!("{json}"),
+            Ok(json) => {
+                if let Err(e) = candor_report::write_atomic(std::path::Path::new(path), format!("{json}\n").as_bytes()) {
+                    eprintln!("candor-scan: could not write --gate-json {path}: {e}");
+                }
+            }
+            Err(e) => eprintln!("candor-scan: could not serialize the switch refusal: {e}"),
+        }
+        let _ = exit_code;
+        return;
+    }
     // ⟨0.21⟩ COMPLETENESS MANIFEST: the accumulated analyzed count + the units that couldn't be analyzed.
     let analyzed_count = *GATE_ANALYZED.get_or_init(|| std::sync::Mutex::new(0)).lock().unwrap();
     let unanalyzed: Vec<candor_report::UnanalyzedUnit> = GATE_UNANALYZED

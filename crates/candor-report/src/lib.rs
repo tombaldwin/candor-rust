@@ -2,6 +2,8 @@
 //! reports) and the CLI / tooling (which read them) depend on one definition instead of re-deriving
 //! the JSON shape in every script. This is the type-safe, DRY core the bash+Python tooling lacked.
 
+pub mod env;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -513,6 +515,9 @@ pub const RESOLVES_TYPED: &[&str] = &["fs", "incomplete", "holds", "returnsProto
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Report {
     pub candor: ReportMeta,
+    /// ⟨0.42⟩ SPEC §2 `switches`: the result-moving switches the PRODUCER ran under. Empty (omitted) when none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switches: Vec<String>,
     /// ⟨0.15 staged⟩ the optional coverage ledger; `None` (omitted) when fully covered. `default`
     /// so every pre-⟨0.15⟩ report still deserializes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -875,6 +880,11 @@ pub fn to_packaged_report_json_full(
         // analyzed set. Field order: coverage, analyzed, unanalyzed, functions (matches the java reference).
         #[serde(skip_serializing_if = "Option::is_none")]
         analyzed: Option<&'a Analyzed>,
+        /// ⟨0.42⟩ SPEC §2 `switches` (SOUNDNESS R1634): the result-moving switches SET and CONSULTED by this process,
+        /// beside `analyzed`. Names only, code-point sorted, OMITTED when empty so a scan under no switch is
+        /// byte-identical to a pre-rung report. Read from the one registry (`env`) at write time, by BOTH writers.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        switches: Vec<String>,
         // Keys sort by serde field order in the struct; `unanalyzed` after `analyzed`, before `functions`.
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         unanalyzed: &'a [UnanalyzedUnit],
@@ -906,8 +916,8 @@ pub fn to_packaged_report_json_full(
         functions: &'a [ReportEntry],
     }
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, resolves: RESOLVES, excluded, out_of_scope,
-        scanned_under, net_partners, functions,
+        candor, package, coverage, analyzed, switches: crate::env::consulted_switches(), unanalyzed, resolves: RESOLVES,
+        excluded, out_of_scope, scanned_under, net_partners, functions,
     })
 }
 
@@ -957,6 +967,9 @@ pub fn to_packaged_report_json_typed_src(
         coverage: Option<&'a Coverage>,
         #[serde(skip_serializing_if = "Option::is_none")]
         analyzed: Option<&'a Analyzed>,
+        /// ⟨0.42⟩ see the untyped writer: the same key in the same position.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        switches: Vec<String>,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         unanalyzed: &'a [UnanalyzedUnit],
         #[serde(rename = "typeSurface", skip_serializing_if = "Option::is_none")]
@@ -995,8 +1008,8 @@ pub fn to_packaged_report_json_typed_src(
     // every one is empty (a crate with no types still answered); `None` keeps the pre-rung list.
     let resolves = if type_surface.is_some() { RESOLVES_TYPED } else { RESOLVES };
     serde_json::to_string_pretty(&Out {
-        candor, package, coverage, analyzed, unanalyzed, excluded, out_of_scope, scanned_under,
-        net_partners, type_surface: ts, dependency_sources, resolves, functions,
+        candor, package, coverage, analyzed, switches: crate::env::consulted_switches(), unanalyzed, excluded,
+        out_of_scope, scanned_under, net_partners, type_surface: ts, dependency_sources, resolves, functions,
     })
 }
 
@@ -1052,6 +1065,17 @@ fn read_key<T: serde::de::DeserializeOwned>(text: &str, key: &str) -> KeyRead<T>
             Ok(t) => KeyRead::Present(t),
             Err(_) => KeyRead::Corrupt,
         },
+    }
+}
+
+/// ⟨0.42⟩ Read a report's `switches` (SPEC §2, §3.4, SOUNDNESS R1634): the result-moving switches the producing run
+/// was SET under and CONSULTED. ABSENT is a run under no switch (or a pre-⟨0.42⟩ producer) and takes the empty default;
+/// PRESENT-BUT-UNREADABLE (not a list of non-empty names) is `Corrupt` — never coerced to "no switches", because that
+/// safe-LOOKING reading deletes the refusal it exists to trigger.
+pub fn report_switches(text: &str) -> KeyRead<Vec<String>> {
+    match read_key::<Vec<String>>(text, "switches") {
+        KeyRead::Present(v) if v.iter().any(String::is_empty) => KeyRead::Corrupt,
+        other => other,
     }
 }
 
@@ -1891,6 +1915,11 @@ fn gate_verdict_json_impl(
         /// ⟨0.41⟩ SPEC §6.2 — the rows an `accept` line took out of `violations`. A VERDICT key.
         #[serde(skip_serializing_if = "Option::is_none")]
         accepted: Option<&'a [AcceptedItem]>,
+        /// ⟨0.42⟩ SPEC §3.4 (d), SOUNDNESS R1634 — the chained dependency reports that CARRIED `switches`: each was produced by an altered
+        /// engine, so its absent rows are a claim about code that engine misread. ADVISORY: the exit code is what it would be without
+        /// this key. Ordered by package, omitted when empty. Only the scan route chains dependencies, so `gate --report` never has any.
+        #[serde(rename = "switchedDependencies", skip_serializing_if = "<[_]>::is_empty")]
+        switched_dependencies: Vec<SwitchedDependency>,
     }
     // ⟨0.30⟩ EITHER cause suppresses `ok`. `unanalyzed` is "I opened this file and could not read it";
     // `out_of_scope` is "I never opened it, and when I peeked afterwards it performed the denied effect".
@@ -1922,7 +1951,18 @@ fn gate_verdict_json_impl(
         net_partners,
         vocabulary,
         accepted: if incomplete && violations.is_empty() { None } else { accepted },
+        switched_dependencies: env::switched_dependencies()
+            .into_iter()
+            .map(|(package, switches)| SwitchedDependency { package, switches })
+            .collect(),
     })
+}
+
+/// ⟨0.42⟩ One chained dependency whose report carried `switches` (SPEC §3.4 (d)): the verdict's `switchedDependencies` element.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SwitchedDependency {
+    pub package: String,
+    pub switches: Vec<String>,
 }
 
 /// ⟨0.24⟩ THE REFUSAL DOCUMENT (SPEC §3.1) — what a gate writes to `--gate-json` when it could not
@@ -1970,6 +2010,30 @@ pub fn gate_refusal_json_v24(reason: &str, unevaluated: &[Unevaluated]) -> serde
         reason,
         unevaluated,
     })
+}
+
+/// ⟨0.42⟩ The §3.1 REFUSAL document for SPEC §3.3 cause (e), **a set result-moving switch** (SOUNDNESS R1634): `ok: false`,
+/// `refused: true`, NO `violations` key, `reason` (a string naming the cause and saying to unset the variable) and
+/// `switches` — the names, code-point sorted without duplicates: the union of the switches the evaluating process
+/// consulted and the ones the judged report carries. No `unevaluated` and no manifest: a violation does not dominate
+/// this refusal (the second instance of §3.1's ⟨0.24⟩ corruption boundary), so nothing a switched engine found is carried.
+pub fn gate_switch_refusal_json(reason: &str, switches: &[String]) -> serde_json::Result<String> {
+    #[derive(Serialize)]
+    struct Refusal<'a> {
+        spec: &'static str,
+        ok: bool,
+        refused: bool,
+        reason: &'a str,
+        switches: &'a [String],
+    }
+    serde_json::to_string_pretty(&Refusal { spec: SPEC_VERSION, ok: false, refused: true, reason, switches })
+}
+
+/// ⟨0.42⟩ The union of two sets of switch names, code-point sorted, no duplicates (§3.4 (c): "the union of (i) and (ii)").
+pub fn union_switches(a: &[String], b: &[String]) -> Vec<String> {
+    let mut s: std::collections::BTreeSet<String> = a.iter().cloned().collect();
+    s.extend(b.iter().cloned());
+    s.into_iter().collect()
 }
 
 /// The engine version that produced a v0.2 report (its envelope `candor.version`). None for a legacy
@@ -2312,10 +2376,36 @@ mod tests {
         assert!(some_out.contains("\"undeclared\":[\"Fs\"]"), "Some must be written: {some_out}");
     }
 
+    /// SOUNDNESS R1634 / SPEC ⟨0.42⟩ §2 `switches`: ABSENT is a run under no switch, a list of names is read, and a PRESENT-but-unreadable
+    /// value is `Corrupt` — never coerced to "no switches", which would delete the refusal the key exists to trigger.
+    #[test]
+    fn switches_is_read_strictly_and_the_refusal_document_has_the_pinned_shape() {
+        assert_eq!(report_switches(r#"{"functions":[]}"#), KeyRead::Absent);
+        assert_eq!(report_switches(r#"{"switches":[]}"#), KeyRead::Present(vec![]), "an empty list is an ANSWER: no switch");
+        assert_eq!(report_switches(r#"{"switches":["B","A"]}"#), KeyRead::Present(vec!["B".into(), "A".into()]));
+        for bad in [r#"{"switches":[1]}"#, r#"{"switches":"A"}"#, r#"{"switches":[""]}"#, r#"{"switches":{"A":1}}"#, r#"{"switches":null}"#, "not json"] {
+            assert_eq!(report_switches(bad), KeyRead::Corrupt, "{bad}");
+        }
+        let names = vec!["CANDOR_A_OFF".to_string(), "CANDOR_B_OFF".to_string()];
+        let doc: serde_json::Value =
+            serde_json::from_str(&gate_switch_refusal_json(&env::switch_refusal_reason(&names), &names).unwrap()).unwrap();
+        assert_eq!(doc["ok"], false);
+        assert_eq!(doc["refused"], true);
+        assert!(doc.get("violations").is_none(), "a refusal makes no claim about violations");
+        assert_eq!(doc["switches"], serde_json::json!(names));
+        assert!(doc["reason"].as_str().unwrap().contains("CANDOR_A_OFF, CANDOR_B_OFF"));
+        assert_eq!(
+            union_switches(&["B".into(), "A".into()], &["C".into(), "A".into()]),
+            ["A", "B", "C"],
+            "the union is code-point sorted and each name once"
+        );
+    }
+
     #[test]
     fn round_trips() {
         let r = Report {
             candor: ReportMeta { version: "v".into(), toolchain: "t".into(), spec: SPEC_VERSION.into() },
+            switches: vec![],
             coverage: None,
             unanalyzed: vec![],
             type_surface: None, dependency_sources: Vec::new(),

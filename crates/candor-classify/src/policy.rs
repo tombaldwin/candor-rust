@@ -452,7 +452,7 @@ pub fn discover_config(start: &std::path::Path) -> Option<(std::path::PathBuf, S
     // pin, an `unknown-alias` vocabulary. The SCAN route already refuses; this QUERY route did not, so
     // `gate --report R --policy P` with a broken CANDOR_CONFIG exited 1 here and 2 in java and ts on the
     // same input. §3.4's posture does not vary by verb.
-    if let Ok(p) = std::env::var("CANDOR_CONFIG") {
+    if let Ok(p) = candor_report::env::operator("CANDOR_CONFIG") {
         let p = std::path::PathBuf::from(p);
         match std::fs::read_to_string(&p) {
             Ok(t) => return Some((canon(&p), t)),

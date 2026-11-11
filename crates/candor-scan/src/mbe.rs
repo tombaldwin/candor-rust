@@ -623,7 +623,7 @@ impl Ctx<'_> {
             if let Some(a) = self.arms.get(&key) {
                 return a.clone();
             }
-            if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_V053_INSTR") {
                 eprintln!("R1156ITEM\t{name}"); // §E1 REACH COUNTER
             }
             let a = t.parse::<TokenStream>().ok().and_then(|t| parse_arms(&t)).map(std::rc::Rc::new);
@@ -670,7 +670,7 @@ impl Ctx<'_> {
         let arms = self.arms_of(&name)?;
         let ts = expand(&arms, &mac.tokens)?;
         let ts = if cross_file {
-            if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1004_INSTR") {
                 eprintln!("R1004XFILE\t{name}"); // §E1 REACH COUNTER, on the CHANGED branch only
             }
             respan_to(ts, mac.path.segments.first().map(|s| s.ident.span()).unwrap_or_else(proc_macro2::Span::call_site))
@@ -699,7 +699,7 @@ impl Ctx<'_> {
                 crate::lang::item_attrs(it).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
             })
         {
-            if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1004_INSTR") {
                 eprintln!("R1004XCFG\t{name}");
             }
             return None;
@@ -768,7 +768,7 @@ impl Ctx<'_> {
                             *a = na;
                         }
                     }
-                    if std::env::var_os("CANDOR_R1245_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1245_INSTR") {
                         eprintln!(
                             "R1245EXPAND\t{}\t{}",
                             m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default(),
@@ -823,7 +823,7 @@ impl Ctx<'_> {
                                 _ => false,
                             })
                             .collect();
-                        if !fns.is_empty() && std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+                        if !fns.is_empty() && candor_report::env::trace("CANDOR_R1004_INSTR") {
                             eprintln!(
                                 "R1004EXPAND\t{}\t{}",
                                 m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default(),
@@ -842,7 +842,7 @@ impl Ctx<'_> {
                                 if prim_operator_impl(i) {
                                     let id = syn::Ident::new(crate::model::MBE_PRIM_ATTR, proc_macro2::Span::call_site());
                                     i.attrs.push(syn::parse_quote!(#[#id]));
-                                    if std::env::var_os("CANDOR_V053_INSTR").is_some() {
+                                    if candor_report::env::trace("CANDOR_V053_INSTR") {
                                         eprintln!("R1157SPLICE"); // §E1 REACH COUNTER
                                     }
                                 }
@@ -852,7 +852,7 @@ impl Ctx<'_> {
                                     let id = syn::Ident::new(crate::model::MBE_OP_ATTR, proc_macro2::Span::call_site());
                                     i.attrs.push(syn::parse_quote!(#[#id]));
                                 }
-                                if std::env::var_os("CANDOR_R1004_INSTR").is_some() {
+                                if candor_report::env::trace("CANDOR_R1004_INSTR") {
                                     eprintln!("R1004IMPL\t{}", i.items.len()); // §E1 REACH PROBE
                                 }
                                 // R1146 — at every depth, not only the top: `impl Add<&'a $t> for &'a $t` holds the
@@ -1037,7 +1037,7 @@ fn operator_trait_impl(i: &syn::ItemImpl) -> bool {
 /// `sea_orm` names in (a glob of a `sea_orm` path, or the derive by name). Not spliced where the module already declares
 /// an item named `Entity` (the derive would not compile), or for a generic `DeriveEntity` type.
 pub(crate) fn splice_sea_orm_entities(items: &mut Vec<syn::Item>) {
-    if std::env::var_os("CANDOR_R1605_OFF").is_some() {
+    if candor_report::env::switch("CANDOR_R1605_OFF") {
         return;
     }
     fn use_brings_sea_orm(t: &syn::UseTree, under: bool) -> bool {
@@ -1108,7 +1108,7 @@ pub(crate) fn splice_sea_orm_entities(items: &mut Vec<syn::Item>) {
         // overrides are field accessors with no effect and are NOT spliced (a member stub would publish an interface-union
         // row per member for every entity): a call to one goes to the classifier under the trait's spelling (R1607), which
         // names only the members that run a statement.
-        if kinds.contains(&"model") && st.ident == "Model" && st.generics.params.is_empty() && std::env::var_os("CANDOR_R1607_OFF").is_none() {
+        if kinds.contains(&"model") && st.ident == "Model" && st.generics.params.is_empty() && !candor_report::env::switch("CANDOR_R1607_OFF") {
             srcs.push("impl sea_orm::ModelTrait for Model {}".to_string());
             if !has_active_model && !active_added {
                 srcs.push("pub struct ActiveModel;".to_string());
@@ -1122,7 +1122,7 @@ pub(crate) fn splice_sea_orm_entities(items: &mut Vec<syn::Item>) {
         for src in srcs {
             let Ok(ts) = src.parse::<TokenStream>() else { continue };
             let Ok(item) = syn::parse2::<syn::Item>(respan_to(ts, st.ident.span())) else { continue };
-            if std::env::var_os("CANDOR_R1605_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1605_INSTR") {
                 eprintln!("R1605SPLICE\t{}\t{src}", st.ident); // §E1 REACH COUNTER
             }
             adds.push(item);
@@ -1219,7 +1219,7 @@ pub(crate) fn splice_derived_comparisons(items: &mut Vec<syn::Item>) {
             if let Ok(marker) = syn::parse_str::<syn::ItemImpl>(&format!("#[{}] impl X {{}}", crate::model::DERIVE_SYNTH_ATTR)) {
                 im.attrs.extend(marker.attrs);
             }
-            if std::env::var_os("CANDOR_R1146_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1146_INSTR") {
                 eprintln!("R1146DERIVE\t{ident}\t{m}"); // §E1 REACH COUNTER
             }
             out.push(syn::Item::Impl(im));

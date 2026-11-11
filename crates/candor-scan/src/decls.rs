@@ -171,7 +171,7 @@ pub(crate) fn scan_items(
                 // `self_io_receiver_spelled` could not see the handle: `std::io::Write::write_all(self, b)` in the body
                 // read pure (EXECUTED rustagent-r1494 fx1 `w_localtrait`, the previous lane's `sib/bx`).
                 if let syn::Type::Path(tp) = &*im.self_ty {
-                    if tp.qself.is_none() && tp.path.segments.len() >= 2 && std::env::var_os("CANDOR_R1494_OFF").is_none() {
+                    if tp.qself.is_none() && tp.path.segments.len() >= 2 && !candor_report::env::switch("CANDOR_R1494_OFF") {
                         let full = crate::lang::expand(&path_to_string(&tp.path), uses);
                         if crate::collector::std_io_handle(&full).is_some() {
                             uses.insert(IMPL_STD_HANDLE_KEY.to_string(), full);
@@ -191,7 +191,7 @@ pub(crate) fn scan_items(
                 // `as_file() -> &F` answered with `File` (`impl_generic_return`), or the call falls back to the by-value
                 // `NamedTempFile::read` and the row reads pure.
                 let args_self_ty: &syn::Type = match &*im.self_ty {
-                    syn::Type::Reference(r) if std::env::var_os("CANDOR_R1641_OFF").is_none() => &r.elem,
+                    syn::Type::Reference(r) if !candor_report::env::switch("CANDOR_R1641_OFF") => &r.elem,
                     t => t,
                 };
                 if let syn::Type::Path(tp) = args_self_ty {
@@ -273,7 +273,7 @@ pub(crate) fn scan_items(
                     info.unresolved = true;
                     info.unresolved_why = vec!["native:extern fn".to_string()];
                     info.extern_decl = true;
-                    if std::env::var_os("CANDOR_R894_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R894_INSTR") {
                         eprintln!("R894UNIT\t{}", info.qual); // §E1 reach: the units this arm publishes
                     }
                     out.push(info);
@@ -433,7 +433,7 @@ pub(crate) fn submodule_uses(
     // `collect_use` reads `super::super::X` from the key with that many `super::`s. Identifier keys only (the reserved
     // `*…`/`\u{5}…`/`crate::…` keys and `Self` are scope facts, not bindings an ancestor path can name). A key of these
     // shapes cannot be a real binding: `collect_use` stores bare identifiers. `CANDOR_R400_OFF` carries nothing.
-    if std::env::var_os("CANDOR_R400_OFF").is_none() {
+    if !candor_report::env::switch("CANDOR_R400_OFF") {
         let ident = |k: &str| {
             k != crate::lang::SELF_KEY
                 && k.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
@@ -639,7 +639,7 @@ fn body_declared_items(
     block: &syn::Block,
     local_macros: &HashMap<String, String>,
 ) -> std::collections::HashSet<String> {
-    let dbg = std::env::var("CANDOR_ALIAS_DEBUG").is_ok();
+    let dbg = candor_report::env::trace("CANDOR_ALIAS_DEBUG");
     // `include_tests: false` throughout — a `#[cfg(test)]` item inside a body is not compiled into the
     // build this report describes, so it shadows nothing in it. Under `--include-tests` that makes this
     // UNDER-shadow, i.e. exactly the pre-R106 behaviour for that one case, which is the safe way to be
@@ -1180,7 +1180,7 @@ pub(crate) fn file_module_test_verdict(
     // marker to count a corpus A/B on is `R459MOVE` (scan.rs), which fires only where the evidence
     // DISAGREED with the filename. The R457 line is still printed for stem candidates, so that row's
     // 365-file census stays reproducible.
-    if std::env::var("CANDOR_TESTMOD_DEBUG").is_ok() {
+    if candor_report::env::trace("CANDOR_TESTMOD_DEBUG") {
         let v = match verdict { Some(true) => "exclude", Some(false) => "SCAN", None => "no-evidence" };
         eprintln!("R459PROBE {v} {route} {}", rel.display());
         if rel.file_stem().and_then(|s| s.to_str()).is_some_and(crate::lang::is_test_file_stem) {
@@ -2058,7 +2058,7 @@ pub(crate) fn collect_reexports(
                         // file, and the reason R438's own corpus number is worth anything: a
                         // byte-identical A/B over a corpus that never reaches this line is the most
                         // flattering measurement available, and reads exactly like a safely-inert fix.
-                        if std::env::var("CANDOR_R438_PROBE").is_ok() {
+                        if candor_report::env::trace("CANDOR_R438_PROBE") {
                             eprintln!("R438 REACH {}", qualify(modpath, &alias));
                         }
                         for m in &from {
@@ -2115,7 +2115,7 @@ pub(crate) fn collect_reexports(
                 {
                     pointee = format!("crate::{modpath}::{pointee}");
                 }
-                if std::env::var_os("CANDOR_R1487_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1487_INSTR") {
                     eprintln!("R1487DECL\t{}\t{pointee}\t{peeled}", qualify(modpath, &t.ident.to_string())); // §E1 REACH
                 }
                 let v = if peeled { format!("{}{pointee}", crate::lang::REF_ALIAS_PEELED) } else { pointee };
@@ -2130,7 +2130,7 @@ pub(crate) fn collect_reexports(
                 };
                 if let syn::Type::Path(p) = &*t.ty {
                     if p.qself.is_none() && !own_param(&p.path) {
-                        if !t.generics.params.is_empty() && std::env::var_os("CANDOR_R1025_INSTR").is_some() {
+                        if !t.generics.params.is_empty() && candor_report::env::trace("CANDOR_R1025_INSTR") {
                             eprintln!("R1025ALIAS\t{}", t.ident); // §E1 REACH COUNTER, CHANGED branch only
                         }
                         let mut written = path_to_string(&p.path);
@@ -2938,7 +2938,7 @@ pub(crate) fn fninfo(
     // `os_version/apple.rs`) must still expand `dlsym!(..)` from its own template. Measured: the map
     // spelling withdrew that body's `macro:unreadable macro_rules! template` reason.
     let externs = body_declared_externs(block, local_macros);
-    if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+    if candor_report::env::trace("CANDOR_VEINE_INSTR") {
         for n in &externs {
             eprintln!("VEINE_BODYEXTERN\t{qual}\t{n}"); // §E1 REACH PROBE
         }
@@ -2953,7 +2953,7 @@ pub(crate) fn fninfo(
     // that differs only in the body item's NAME reported `["Exec"]`. So the sig keeps the OUTER map.
     // Body-level `use`s stay merged into it: that is the pre-existing additive over-approximation, which
     // can attribute a name to its origin but never take one away.
-    if !shadowed.is_empty() && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+    if !shadowed.is_empty() && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
         // The A/B's hit counter for THIS half: a shadowed name that the signature also mentions is
         // exactly where the two maps now answer differently.
         for n in &shadowed {
@@ -2986,7 +2986,7 @@ pub(crate) fn fninfo(
     } else {
         let mut m = use_alts.clone();
         for n in shadowed.iter().chain(local_uses.keys()) {
-            if m.remove(n).is_some() && std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            if m.remove(n).is_some() && candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 // Instrument the PRECONDITION, not just the output — the standing bar, and the same
                 // switch the `BODYSHADOW` counter twenty lines down uses. A removal that hits no key
                 // changes nothing, so only one that took an alternative away counts as this firing.
@@ -3006,7 +3006,7 @@ pub(crate) fn fninfo(
             // key changes nothing, so only a removal that actually took a binding away counts as this
             // branch having fired. `CANDOR_ALIAS_DEBUG` is the same switch scan.rs's R105 counter uses.
             if m.insert(n.clone(), format!("{ITEM_SENTINEL}{n}")).is_some()
-                && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+                && candor_report::env::trace("CANDOR_ALIAS_DEBUG")
             {
                 eprintln!("BODYSHADOW {qual} :: {n}");
             }
@@ -3048,7 +3048,7 @@ pub(crate) fn fninfo(
             && sig_uses.get(crate::lang::DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == root))
             && vars.contains_key("self")
         {
-            if std::env::var_os("CANDOR_R1169_INSTR").is_some() {
+            if candor_report::env::trace("CANDOR_R1169_INSTR") {
                 eprintln!("R1169SELF\t{}\t{w}", self_ty.unwrap_or("")); // §E1 REACH COUNTER, on the ADDED branch only
             }
             vars.insert("self".to_string(), w);
@@ -3067,7 +3067,7 @@ pub(crate) fn fninfo(
     // forwarder), a primitive and any referent that is not a crate-local struct are excluded, and so is an impl R1034 keys `&Name` (a free-fn collision): its `self` is typed by
     // that key, which `self.m()` needs to reach the impl's own sibling units (quick-xml's `&Deserializer`; a first cut that
     // retyped it REMOVED those rows with their `invisible: [serde]`). `CANDOR_R1641_OFF=1` restores the untyped `self`.
-    if std::env::var_os("CANDOR_R1641_OFF").is_none() && !vars.contains_key("self") {
+    if !candor_report::env::switch("CANDOR_R1641_OFF") && !vars.contains_key("self") {
         if let Some(syn::Type::Reference(r)) = impl_self {
             if let syn::Type::Path(p) = crate::lang::peel_ty_refs(&r.elem) {
                 let leaf = p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
@@ -3086,7 +3086,7 @@ pub(crate) fn fninfo(
                         fields.contains_key(leaf.as_str()) && !foreign
                     });
                     if let Some(w) = w {
-                        if std::env::var_os("CANDOR_R1641_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1641_INSTR") {
                             eprintln!("R1641REFSELF\t{qual}\t{w}"); // §E1 REACH COUNTER, on the ADDED branch only
                         }
                         vars.insert("self".to_string(), w);
@@ -3116,7 +3116,7 @@ pub(crate) fn fninfo(
             }
             if let Some((cands, true)) = crate::lang::glob_candidates(&[t.as_str()], sig_uses, &generic) {
                 if let [c] = cands.as_slice() {
-                    if std::env::var_os("CANDOR_V052GLOB_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_V052GLOB_INSTR") {
                         eprintln!("V052GLOBTYPE\t{t}\t{c}"); // §E1 REACH COUNTER
                     }
                     vars.insert(n, c.clone());
@@ -3183,7 +3183,7 @@ pub(crate) fn fninfo(
     if let Some(st) = impl_self {
         if !elem_of.contains_key("self") {
             if let Some(e) = elem_type(st, sig_uses) {
-                if std::env::var_os("CANDOR_R1024_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1024_INSTR") {
                     eprintln!("R1024SELF\t{qual}\t{e}"); // §E1 REACH COUNTER, on the CHANGED branch only
                 }
                 elem_of.insert("self".to_string(), e);
@@ -3203,7 +3203,7 @@ pub(crate) fn fninfo(
             }
             let leaves = elem_trait_leaves(st, &gb, elems.callable_aliases);
             if !leaves.is_empty() {
-                if std::env::var_os("CANDOR_R1024_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R1024_INSTR") {
                     eprintln!("R1024SELF\t{qual}\t{leaves:?}");
                 }
                 elem_trait_of.insert("self".to_string(), leaves);
@@ -3237,7 +3237,7 @@ pub(crate) fn fninfo(
                         } else if let Some(t) = type_path(inner, sig_uses) {
                             vars.insert(crate::collector::SELF_DEREF_VAR.to_string(), t);
                         }
-                        if std::env::var_os("CANDOR_R1036_INSTR").is_some() {
+                        if candor_report::env::trace("CANDOR_R1036_INSTR") {
                             eprintln!("R1036SELFDEREF\t{qual}");
                         }
                     }
@@ -3257,7 +3257,7 @@ pub(crate) fn fninfo(
     // rustagent-r1246/fx/h3_blanket: `show(&dyn Expected)` reads pure, writes a file). The bound dispatch is added BESIDE
     // the name typing, which R1318's std-I/O hedge reads. `CANDOR_R1465_OFF=1` restores the skip.
     let self_is_param_name = |gb: &HashMap<String, Vec<String>>| {
-        std::env::var_os("CANDOR_R1465_OFF").is_none() && vars.get("self").is_some_and(|g| gb.contains_key(g))
+        !candor_report::env::switch("CANDOR_R1465_OFF") && vars.get("self").is_some_and(|g| gb.contains_key(g))
     };
     if let Some(st) = impl_self {
         let gb0 = {
@@ -3292,7 +3292,7 @@ pub(crate) fn fninfo(
                     .filter(|l| own.as_deref() != Some(l.rsplit("::").next().unwrap_or(l)))
                     .collect();
                 if !leaves.is_empty() {
-                    if std::env::var_os("CANDOR_R1292_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1292_INSTR") {
                         eprintln!("R1292SELF\t{qual}\t{leaves:?}"); // §E1 REACH COUNTER
                     }
                     trait_vars.insert("self".to_string(), leaves);
@@ -3319,7 +3319,7 @@ pub(crate) fn fninfo(
     // statements directly); every nested block that declares such a name gets its own index variant,
     // which the collector swaps in for that block (`CallCollector::block_field_variants`).
     let (local_structs, dup_scopes) = crate::lang::scope_duplicate_body_structs(block, &all_local_structs, include_tests);
-    if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+    if candor_report::env::trace("CANDOR_R529_INSTR") {
         for (_, eff) in &dup_scopes {
             for it in eff {
                 if let syn::Item::Struct(st) = it {
@@ -3340,7 +3340,7 @@ pub(crate) fn fninfo(
             let mut f2 = fields.clone();
             let mut e2 = elems.field_elem.clone();
             for (k, m) in add {
-                if std::env::var_os("CANDOR_R529_INSTR").is_some() {
+                if candor_report::env::trace("CANDOR_R529_INSTR") {
                     eprintln!("R529CBODY\t{qual}\t{k}"); // §E1 REACH PROBE
                 }
                 if let Some(e) = be.get(&k) {
@@ -3723,12 +3723,12 @@ pub(crate) fn fninfo(
     // SOUNDNESS R1488 — and a name whose SEEDED alias value carries the arms (`#[cfg(unix)] type A1 = D; #[cfg(not(unix))]
     // type A1 = DQ;` — a `type` alias is a module alias, never a `use`, so `use_alts` does not list it and the joined value
     // in `uses` named no leaf at all: EXECUTED `fx2/drop_a1cfg_param`, the unix arm's `Drop` writes, `deny Fs` 0).
-    let r1488 = std::env::var_os("CANDOR_R1488_OFF").is_none();
+    let r1488 = !candor_report::env::switch("CANDOR_R1488_OFF");
     let seeded_arms = |h: &str| -> Option<Vec<String>> {
         let v = uses.get(h).filter(|v| r1488 && v.contains(ALIAS_ALT_SEP))?;
         Some(v.split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()).map(String::from).collect())
     };
-    if std::env::var_os("CANDOR_R1474_OFF").is_none() && (!use_alts.is_empty() || r1488) {
+    if !candor_report::env::switch("CANDOR_R1474_OFF") && (!use_alts.is_empty() || r1488) {
         let mut heads: Vec<(String, Vec<String>)> = Vec::new();
         for input in &sig.inputs {
             let syn::FnArg::Typed(pt) = input else { continue };
@@ -3757,7 +3757,7 @@ pub(crate) fn fninfo(
                 let mut u2 = uses.clone();
                 u2.insert(h.clone(), a.clone());
                 for (leaf, spelled) in crate::lang::owned_drop_params(sig, self_ty, &u2, &escapes.names, block) {
-                    if std::env::var_os("CANDOR_R1474_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_R1474_INSTR") {
                         eprintln!("R1474ARMS\tparam\t{qual}\t{leaf}\t{}", spelled.as_deref().unwrap_or("-")); // §E1
                     }
                     c.note_owned_param_drop_spelled(leaf, spelled.as_deref());
@@ -3955,7 +3955,7 @@ pub(crate) fn seed_dyn_aliases(
     include_tests: bool,
 ) -> crate::lang::DynAliasMaps {
     let mut out: crate::lang::DynAliasMaps = Default::default();
-    if std::env::var_os("CANDOR_R1495_OFF").is_some() {
+    if candor_report::env::switch("CANDOR_R1495_OFF") {
         return out;
     }
     fn walk<'a>(
@@ -4621,7 +4621,7 @@ fn field_type_args(
     // `#[cfg(..)] enum Fallback<E>` / `#[cfg(not(..))] type Fallback<E> = PhantomData<E>;`), so the nominal arm's methods
     // were unreachable through the field (EXECUTED `rustagent-aliasres/sib/hy2`). The written name is kept and the
     // crate-wide alias map gives it both arms (`cache::add_nominal_twin_arms`).
-    let nominal_twin = std::env::var_os("CANDOR_R1489_OFF").is_none()
+    let nominal_twin = !candor_report::env::switch("CANDOR_R1489_OFF")
         && items.iter().any(|it| match it {
             syn::Item::Struct(x) => x.ident == seg.ident,
             syn::Item::Enum(x) => x.ident == seg.ident,
@@ -4700,7 +4700,7 @@ fn ret_generic_position(sig: &syn::Signature, ty: &syn::Type) -> Option<usize> {
 fn r372_type_path(ty: &syn::Type, uses_ty: &HashMap<String, String>) -> Option<String> {
     let tp = type_path(ty, uses_ty);
     if tp.as_deref().is_some_and(|t| t.contains(ALIAS_ALT_SEP))
-        && std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+        && candor_report::env::trace("CANDOR_ALIAS_DEBUG")
     {
         eprintln!("R372TY");
     }
@@ -4720,7 +4720,7 @@ fn field_borrow_of(ty: &syn::Type, uses_ty: &HashMap<String, String>) -> crate::
     };
     // §E1 REACH COUNTER, on the CHANGED branch only: the whole-type test said BORROWED and at least one
     // index's own walk says OWNED — exactly the declarations whose answer this change moves.
-    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok()
+    if candor_report::env::trace("CANDOR_ALIAS_DEBUG")
         && crate::lang::type_borrows(ty)
         && (fb.leaf == Some(false) || fb.elem == Some(false))
     {
@@ -5011,7 +5011,7 @@ pub(crate) fn collect_decls(
                 // initialiser was published as the write's path with no `incomplete`.
                 let value = match s.mutability {
                     syn::StaticMutability::Mut(_) => {
-                        if std::env::var_os("CANDOR_R810_DEBUG").is_some() && const_str_value(&s.expr).is_some() {
+                        if candor_report::env::trace("CANDOR_R810_DEBUG") && const_str_value(&s.expr).is_some() {
                             eprintln!("R810STATICMUT");
                         }
                         None
@@ -5144,7 +5144,7 @@ pub(crate) fn collect_decls(
         // SOUNDNESS R1495 — the facts `lang::dyn_alias_cell` is built from: an alias to a trait object files its leaves,
         // every OTHER type-namespace name files `""` (so the conflict rule withdraws a leaf that names anything else
         // anywhere in the crate), and the crate's own module names. See `lang::DYN_ALIASES`.
-        if std::env::var_os("CANDOR_R1495_OFF").is_none() {
+        if !candor_report::env::switch("CANDOR_R1495_OFF") {
             let other = |rets: &mut HashMap<String, Option<String>>, n: String| {
                 file_decl_fact(rets, format!("{}{n}", crate::lang::DYN_ALIAS_PREFIX), String::new())
             };
@@ -5311,7 +5311,7 @@ pub(crate) fn collect_decls(
                             // every `self.resource_span.in_scope(..)` read as Log — 452 phantom functions.)
                             if has_cfg(&f.attrs) {
                                 let twin = f.ident.as_ref().map(|i| i.to_string())
-                                    .filter(|n| cfg_twins.contains(n) && std::env::var_os("CANDOR_R1464_OFF").is_none());
+                                    .filter(|n| cfg_twins.contains(n) && !candor_report::env::switch("CANDOR_R1464_OFF"));
                                 match twin {
                                     Some(n) if cfg_twin_seen.insert(n.clone()) => {}
                                     _ => continue,
@@ -5430,7 +5430,7 @@ pub(crate) fn collect_decls(
                                     // while the collector's own `Expr::Field` arm feeds the HOF-argument
                                     // position. They must be counted separately or a zero on one is read
                                     // as a zero on both.
-                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                         eprintln!("R238DECL {}.{}", s.ident, name);
                                     }
                                     trait_fields
@@ -5461,7 +5461,7 @@ pub(crate) fn collect_decls(
                                 if !had_trait_leaves && !gen_probe.is_empty() {
                                     let at = gen_probe_positions(&f.ty, &gen_probe);
                                     if !at.is_empty() {
-                                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                             eprintln!("R476GEN {}.{}", s.ident, name); // §E1 HIT COUNTER
                                         }
                                         trait_fields
@@ -5488,7 +5488,7 @@ pub(crate) fn collect_decls(
                                 // PARAMETER while the element dispatches. See `elem_param_shadow`.
                                 if let Some(e) = elem_type(&f.ty, uses_ty) {
                                     if had_elem_leaves && elem_param_shadow(crate::lang::strip_wrapped(&e), &gen_probe) {
-                                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                             eprintln!("R482SHADOW {}.{} {e}", s.ident, name); // §E1
                                         }
                                     } else {
@@ -5512,7 +5512,7 @@ pub(crate) fn collect_decls(
                                 if !had_elem_leaves && !gen_probe.is_empty() {
                                     let at = gen_probe_elem_positions(&f.ty, &gen_probe, callable_aliases);
                                     if !at.is_empty() {
-                                        if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                        if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                             eprintln!("R478ELEM {}.{}", s.ident, name); // §E1 HIT COUNTER
                                         }
                                         field_elem_trait
@@ -5558,7 +5558,7 @@ pub(crate) fn collect_decls(
                             let leaves = trait_leaves(&f.ty, &struct_bounds);
                             let had_trait_leaves = !leaves.is_empty();
                             if had_trait_leaves {
-                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                     eprintln!("R479TUP {}.{}", s.ident, i); // §E1 HIT COUNTER
                                 }
                                 trait_fields
@@ -5590,7 +5590,7 @@ pub(crate) fn collect_decls(
                             if !had_trait_leaves
                                 && crate::lang::is_callable_type(&f.ty, &struct_bounds, callable_aliases)
                             {
-                                if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                     eprintln!("R238DECL {}.{}", s.ident, i); // §E1 HIT COUNTER
                                 }
                                 trait_fields
@@ -5604,7 +5604,7 @@ pub(crate) fn collect_decls(
                             if !had_trait_leaves && !gen_probe.is_empty() {
                                 let at = gen_probe_positions(&f.ty, &gen_probe);
                                 if !at.is_empty() {
-                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                         eprintln!("R479GEN {}.{}", s.ident, i); // §E1 HIT COUNTER
                                     }
                                     trait_fields
@@ -5624,7 +5624,7 @@ pub(crate) fn collect_decls(
                             // SOUNDNESS R482 — see the `Named` arm and `elem_param_shadow`.
                             if let Some(e) = elem_type(&f.ty, uses_ty) {
                                 if had_elem_leaves && elem_param_shadow(crate::lang::strip_wrapped(&e), &gen_probe) {
-                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                         eprintln!("R482SHADOW {}.{} {e}", s.ident, i); // §E1
                                     }
                                 } else {
@@ -5638,7 +5638,7 @@ pub(crate) fn collect_decls(
                             if !had_elem_leaves && !gen_probe.is_empty() {
                                 let at = gen_probe_elem_positions(&f.ty, &gen_probe, callable_aliases);
                                 if !at.is_empty() {
-                                    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+                                    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                         eprintln!("R478ELEM {}.{}", s.ident, i); // §E1 HIT COUNTER
                                     }
                                     field_elem_trait
@@ -5951,7 +5951,7 @@ pub(crate) fn collect_decls(
             // this crate-wide leaf set to a name no other body can reach.
             syn::Item::Macro(m) if m.ident.is_none() && (include_tests || !is_cfg_test(&m.attrs)) => {
                 if let Some(n) = crate::lang::link_macro_fn_name(&m.mac) {
-                    if std::env::var_os("CANDOR_VEINE_INSTR").is_some() {
+                    if candor_report::env::trace("CANDOR_VEINE_INSTR") {
                         eprintln!("VEINE_LINKITEM\t{n}"); // §E1 REACH PROBE
                     }
                     extern_fns.insert(n);
@@ -6248,7 +6248,7 @@ pub(crate) fn collect_decls(
                         // forms for it (`lang::nonpath_impl_recv_key`: `[u8]`, `[_]`, `(u8,u8)`), which a non-colliding
                         // such impl had no key for at all. See `CallCollector::nonpath_recv_calls`.
                         if let Some(k) = crate::lang::nonpath_impl_recv_key(im)
-                            .filter(|k| impl_key_ty.as_deref() != Some(k.as_str()) && std::env::var_os("CANDOR_R1494_OFF").is_none())
+                            .filter(|k| impl_key_ty.as_deref() != Some(k.as_str()) && !candor_report::env::switch("CANDOR_R1494_OFF"))
                         {
                             let g = crate::lang::generic_operator_uses(&m.sig, &m.block, &impl_generic_params, Some(&k));
                             file_decl_fact(rets, crate::model::impl_gen_op_key(&k, &m.sig.ident.to_string()), g.join(","));
@@ -6494,7 +6494,7 @@ fn join_impl_bound_pending(
             let displaced = param_named
                 .then(|| concrete.get_mut(ty_leaf).and_then(|f| f.remove(&field)))
                 .flatten();
-            if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() {
+            if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 // §E1 HIT COUNTER, on the CHANGED branch — and it prints what was DISPLACED, because
                 // that is the only thing this change can take away from a report.
                 eprintln!("{tag} {ty_leaf}.{field} {leaves:?} displaced={displaced:?}");
@@ -6651,7 +6651,7 @@ pub(crate) fn partial_move_leaves(
             }
         }
     }
-    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && !out.is_empty() {
+    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") && !out.is_empty() {
         eprintln!("R1116PARTIAL {} -> {:?}", sig.ident, out); // §E1 REACH COUNTER
     }
     out.sort();
@@ -6746,7 +6746,7 @@ pub(crate) fn dep_param_releases(
         .filter(|(n, _)| n.is_empty() || !mv.used.contains(n))
         .flat_map(|(_, x)| x)
         .collect();
-    if std::env::var("CANDOR_ALIAS_DEBUG").is_ok() && !out.is_empty() {
+    if candor_report::env::trace("CANDOR_ALIAS_DEBUG") && !out.is_empty() {
         eprintln!("R1118PARAM {} -> {:?}", sig.ident, out); // §E1 REACH COUNTER
     }
     out.sort();

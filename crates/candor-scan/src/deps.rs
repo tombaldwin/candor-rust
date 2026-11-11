@@ -444,6 +444,8 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
     // target, whereas the fallback is half 1's disclosure rather than silence.
     let mut ret_ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut union_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // ⟨0.42⟩ package -> the switches its chained report carries (SPEC §3.4 (d)).
+    let mut switched_pkgs: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = std::collections::BTreeMap::new();
     for f in &files {
         // ⟨0.27⟩ THE SAME RULE AS THE TOKEN ARM ABOVE, and it was missing here. SPEC §2 binds the
         // configured case with one sentence — a dep path that "does not exist OR CANNOT BE READ MUST
@@ -482,6 +484,17 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
         // decides it. A guard that cannot be detected needs a test; a guard that costs nothing needs
         // deleting (standing bar item 8c), and this one was the second.
         let incomplete = declares_itself_incomplete(&v);
+        // ⟨0.42⟩ SPEC §3.4 (d), SOUNDNESS R1634: a chained report that carries `switches` was produced by an ALTERED engine. ADVISORY ONLY — the
+        // consumer's own run is not switched and cannot judge a dependency's environment, so the exit is untouched; the package and the
+        // names go to stderr once per package (below) and to the verdict's `switchedDependencies`. Read LENIENTLY: only ever adds a line.
+        if let Some(sw) = v.get("switches").and_then(|x| x.as_array()) {
+            let names: Vec<String> = sw.iter().filter_map(|x| x.as_str()).filter(|s| !s.is_empty()).map(str::to_string).collect();
+            if !names.is_empty() {
+                let pkg = v.get("package").and_then(|x| x.as_str()).filter(|p| !p.is_empty()).map(str::to_string)
+                    .unwrap_or_else(|| f.display().to_string());
+                switched_pkgs.entry(pkg).or_default().extend(names);
+            }
+        }
         let Some(fns) = v.get("functions").and_then(|x| x.as_array()).or_else(|| v.as_array()) else { continue };
         // ⟨0.24⟩ …and neither does a report that JUDGED NOTHING (`analyzed.count: 0`) — the third answer
         // to "may this report's silence speak?", ranked BELOW the other two for the same reason
@@ -962,6 +975,18 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
             names.join(", ")
         );
     }
+    // ⟨0.42⟩ SPEC §3.4 (d), SOUNDNESS R1634: the switched-dependency advisory, once per package, on the channel a corrupt chained report
+    // already uses. ADVISORY ONLY: nothing here changes an exit code (the consumer's run is not switched).
+    for (pkg, names) in &switched_pkgs {
+        let names: Vec<String> = names.iter().cloned().collect();
+        eprintln!(
+            "candor-scan: chained dependency '{pkg}' was produced under a set result-moving switch ({}) — its report is a claim about an \
+             altered producer: an absent row there is NOT evidence of purity (SPEC §3.4 (d)). The gate's exit is unchanged; re-scan that \
+             dependency with the variable unset.",
+            names.join(", ")
+        );
+        candor_report::env::record_switched_dependency(pkg, &names);
+    }
     idx
 }
 
@@ -1409,9 +1434,9 @@ fn non_registry_manifest_deps(
 /// The cargo registry source roots (`~/.cargo/registry/src/<index-hash>/`), where unbuilt
 /// dependency sources live. CARGO_HOME is honoured.
 pub(crate) fn dirs_cargo_registry_src() -> Vec<std::path::PathBuf> {
-    let home = std::env::var("CARGO_HOME")
+    let home = candor_report::env::operator("CARGO_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| Path::new(&std::env::var("HOME").unwrap_or_default()).join(".cargo"));
+        .unwrap_or_else(|_| Path::new(&candor_report::env::operator("HOME").unwrap_or_default()).join(".cargo"));
     std::fs::read_dir(home.join("registry").join("src"))
         .into_iter()
         .flatten()

@@ -266,7 +266,12 @@ fn r1587_the_chained_arm_already_discloses_and_is_unchanged() {
         let r = v["functions"].as_array().unwrap().iter().find(|x| x["fn"] == f).unwrap_or_else(|| panic!("{f} ABSENT chained: {v:#}"));
         assert!(r["unknownWhy"].as_array().is_some_and(|w| w.iter().any(|x| x == "dispatch:untyped cross-package receiver")), "{r:#}");
     }
-    assert_eq!(on, run(true), "the chained report must be byte-identical with and without R1587");
+    // SPEC ⟨0.42⟩: the switched report NAMES the switch (`switches`), and that is the ONLY difference — the claim under test is that
+    // R1587 moves no row in the chained arm, so compare everything else.
+    let mut off: serde_json::Value = serde_json::from_slice(&run(true)).unwrap();
+    assert_eq!(off["switches"], serde_json::json!(["CANDOR_R1587_OFF"]), "the switched report names the switch it consulted");
+    off.as_object_mut().unwrap().remove("switches");
+    assert_eq!(v, off, "the chained report must be identical with and without R1587, but for the `switches` key");
     let _ = std::fs::remove_dir_all(&root);
 }
 
