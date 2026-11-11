@@ -4318,6 +4318,25 @@ impl<'a> CallCollector<'a> {
         // CONCRETE argument answers — an argument that is one of this scope's own type parameters (`impl<F: Read> Read for
         // NamedTempFile<F>`) is left to the walk below exactly as before — and only a std I/O handle, which no crate
         // `impl_fn_key` can name (the gate R452 put on every other corrected receiver is kept for those).
+        // SOUNDNESS R1648 — the same `self` receiver with a CONCRETE crate type as this impl's argument (`impl Read for
+        // W<MyR> { self.as_file_mut().read(b) }`, EXECUTED rustagent-r1648/fx/acc V8): the value is that type, answered
+        // under R452's gate (the crate declares `MyR::<outer>` exactly once), as the FIELD branch below answers it. A std
+        // I/O handle is R1643's (next block); a bounded parameter is `accessor_payload`'s dispatch.
+        if let Some(a) = self.self_accessor_arg(r, base_leaf, leaf) {
+            let full = crate::lang::expand(&a, &self.uses);
+            if std_io_handle(&full).is_none() && std_io_handle(&a).is_none() && !self.is_scoped_generic_name(&a)
+                && !self.generic_bounds.contains_key(a.as_str()) && !self.impl_generic_bounds.contains_key(a.as_str())
+                && !outer.is_empty() && !crate::lang::is_result_plumbing(outer)
+            {
+                let al = a.rsplit("::").next().unwrap_or(&a);
+                if self.returns.contains_key(&crate::model::impl_fn_key(al, outer)) {
+                    if candor_report::env::trace("CANDOR_R1648_INSTR") {
+                        eprintln!("R1648SELF\t{base_leaf}.{leaf}\t{a}\tconcrete.{outer}"); // §E1 REACH COUNTER
+                    }
+                    return Some(a);
+                }
+            }
+        }
         if !candor_report::env::switch("CANDOR_R1643_OFF") {
             if let syn::Expr::Path(p) = r {
                 if p.path.is_ident("self") {
@@ -9611,7 +9630,7 @@ impl<'a> CallCollector<'a> {
     fn scoped_generic_recv(&self, expr: &syn::Expr) -> Vec<String> {
         match self.field_payload(expr) {
             PayloadTy::Dispatch(b) => b,
-            _ => match self.accessor_payload(expr) {
+            _ => match self.accessor_payload(expr, None) {
                 PayloadTy::Dispatch(b) => b,
                 _ => Vec::new(),
             },
@@ -9643,13 +9662,44 @@ impl<'a> CallCollector<'a> {
     /// is that same payload question (`payload_decision`), asked of the accessor's value instead of the field: the owner's
     /// parameter is mapped by POSITION through the scrutinee's instantiation to this scope's bounds. A concrete argument is
     /// R979's and stays `Old`. Kill switch `CANDOR_R1631_OFF`.
-    fn accessor_payload(&self, expr: &syn::Expr) -> PayloadTy {
-        if candor_report::env::switch("CANDOR_R1631_OFF") || (self.generic_bounds.is_empty() && self.impl_generic_bounds.is_empty()) {
+    fn accessor_payload(&self, expr: &syn::Expr, member: Option<&str>) -> PayloadTy {
+        if self.generic_bounds.is_empty() && self.impl_generic_bounds.is_empty() {
+            return PayloadTy::Old;
+        }
+        // SOUNDNESS R1648 — the path spelling of the same accessor call, `Self::as_file_mut(self).read(buf)` (EXECUTED
+        // rustagent-r1648/fx/acc V9): its receiver is the first argument, its type `Self` or the type the path names.
+        if let syn::Expr::Call(c) = peel_recv(expr) {
+            if let (syn::Expr::Path(fp), Some(a0)) = (&*c.func, c.args.first()) {
+                let segs: Vec<String> = fp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                if fp.qself.is_none() && segs.len() == 2 {
+                    let ty = if segs[0] == "Self" { self.uses.get(crate::lang::SELF_KEY).cloned() } else { Some(segs[0].clone()) };
+                    if let Some(ty) = ty {
+                        let tl = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+                        if let Some(d) = self.self_accessor_payload(a0, &tl, &segs[1], member) {
+                            return d;
+                        }
+                    }
+                }
+            }
             return PayloadTy::Old;
         }
         let syn::Expr::MethodCall(m) = peel_recv(expr) else { return PayloadTy::Old };
         let Some(acc_ty) = self.resolve_recv_type(&m.receiver) else { return PayloadTy::Old };
         let acc_leaf = acc_ty.rsplit("::").next().unwrap_or(&acc_ty);
+        // SOUNDNESS R1648 — the accessor's receiver is `self` itself: `impl<F: Read> Read for NamedTempFile<F> {
+        // fn read(..) { self.as_file_mut().read(buf) } }` (tempfile, EXECUTED rustagent-r1648/fx/acc V1-V4, V7). The
+        // instantiation IS written — `self`'s type is this impl's self type — so the accessor's parameter maps by
+        // TYPE position (`impl_retgen_tpos_key`) to this impl's written argument (`decls::IMPL_TARGS_KEY`), and that
+        // argument's bounds in this scope decide, exactly as `payload_decision` decides a field's. Before this the walk
+        // typed the value as the receiver (R979's original mistake, reached through `self` rather than a field), formed
+        // `NamedTempFile::read` — the unit itself — and the read vanished. A concrete argument is
+        // `impl_generic_return`'s and stays `Old`. Kill switch `CANDOR_R1648_OFF`.
+        if let Some(d) = self.self_accessor_payload(&m.receiver, acc_leaf, &m.method.to_string(), member) {
+            return d;
+        }
+        if candor_report::env::switch("CANDOR_R1631_OFF") {
+            return PayloadTy::Old;
+        }
         let Some(pos) = self.returns.get(&crate::model::impl_retgen_key(acc_leaf, &m.method.to_string())).and_then(|p| p.parse::<usize>().ok()) else {
             return PayloadTy::Old;
         };
@@ -9698,6 +9748,102 @@ impl<'a> CallCollector<'a> {
             eprintln!("R1631ACC\t{owner_leaf}.{key}.{}\t{t}\t{d:?}", m.method); // §E1 REACH COUNTER
         }
         d
+    }
+
+    /// SOUNDNESS R1648 — the WRITTEN instantiation's TYPE argument at the position where `acc_leaf`'s accessor `method`
+    /// returns its impl's type parameter, for an accessor whose receiver is a PATH whose instantiation this scope writes
+    /// (`scrut_evidence`): `self` (this impl's written self type, `decls::IMPL_TARGS_KEY`), a parameter or an annotated
+    /// `let` (`p: &mut W<F>` — [[R1007]]'s shape). A FIELD receiver is R979's / R1631's and is not answered here. `None`
+    /// when the evidence names another type, the arity disagrees with the type's declared parameters (a same-leaf twin,
+    /// a macro-made impl), or the argument is unwritten; the caller then keeps its previous reading. Positions are TYPE
+    /// positions on both sides (`impl_retgen_tpos_key`), so a lifetime written in one impl and elided in the other
+    /// cannot shift them.
+    fn self_accessor_arg(&self, recv: &syn::Expr, acc_leaf: &str, method: &str) -> Option<String> {
+        if candor_report::env::switch("CANDOR_R1648_OFF") {
+            return None;
+        }
+        let syn::Expr::Path(p) = peel_value(recv) else { return None };
+        if p.qself.is_some() || p.path.get_ident().is_none() {
+            return None;
+        }
+        let (ev_leaf, targs) = self.scrut_evidence(recv)?;
+        if ev_leaf != acc_leaf {
+            return None;
+        }
+        let tpos: usize = self.returns.get(&crate::model::impl_retgen_tpos_key(acc_leaf, method))?.parse().ok()?;
+        let nparams = self.returns.get(&crate::model::type_params_key(acc_leaf))?.split(',').filter(|x| !x.is_empty()).count();
+        if nparams != targs.len() {
+            return None;
+        }
+        let t = targs.get(tpos)?;
+        (!matches!(t.as_str(), "_" | "")).then(|| t.clone())
+    }
+
+    /// SOUNDNESS R1648 — `self_accessor_arg`'s answer as a payload decision: an argument that is one of this scope's
+    /// BOUNDED type parameters dispatches over its bounds (`dispatch:Read.read`, what `self.file.read(buf)` over a field
+    /// typed `F` already reads); anything else is `None` (a concrete argument is typed by `impl_generic_return`; an
+    /// unbounded parameter has no method to call).
+    ///
+    /// `member` — the method called ON the accessor's value, where the caller knows it. A member no bound trait declares
+    /// (gif's `self.writer()?.write_le(..)`, a crate-local extension trait blanket-implemented `for W: Write`) is not
+    /// this dispatch's to answer: the dispatch arm would form nothing for it, where the previous reading reached the
+    /// blanket impl through the declared return. Measured on this lane's own first A/B (gif 0.13/0.14
+    /// `Encoder::write_trailer` / `into_inner` / `drop` went `Unknown` -> absent), so such a call keeps that reading.
+    fn self_accessor_payload(&self, recv: &syn::Expr, acc_leaf: &str, method: &str, member: Option<&str>) -> Option<PayloadTy> {
+        let t = self.self_accessor_arg(recv, acc_leaf, method)?;
+        if t.contains("::") || self.fields.contains_key(&t) {
+            return None;
+        }
+        let mut out: Vec<String> = Vec::new();
+        for l in self.generic_bounds.get(&t).into_iter().chain(self.impl_generic_bounds.get(&t)).flatten() {
+            if !out.contains(l) {
+                out.push(l.clone());
+            }
+        }
+        if out.is_empty() {
+            return None;
+        }
+        // A DEPENDENCY trait among the bounds (aws-smithy-http-client's `C: tower::Service<Uri> + Clone`). Where the
+        // member is known (a method call on the accessor's value) the dispatch arm answers it as it answers the FIELD
+        // spelling `self.c.call()` — `dispatch:Svc.call` with the `dispatchesOn` key (EXECUTED-shape fixture
+        // rustagent-r1648/fx/dep: `self.conn().call()` was ABSENT with no key and no `invisible`, the field spelling
+        // hedged, the parameter spelling keyed). Where it is not (a `let` binding of the value, the PARAMETER treatment:
+        // key, no local hedge) it is declined: measured on this lane's A/B, one unit traded its own `dispatch:` hedge
+        // for the key, a change of reading this row does not price.
+        let dep_bound = out.iter().any(|b| {
+            !self.local_traits.contains_key(b)
+                && !crate::std_bounds::is_std_trait_leaf(b)
+                && !matches!(b.as_str(), "Send" | "Sync" | "Unpin" | "Sized" | "Copy")
+        });
+        let Some(mem) = member else {
+            if dep_bound {
+                if candor_report::env::trace("CANDOR_R1648_INSTR") {
+                    eprintln!("R1648DEPBOUND\t{acc_leaf}.{method}\t{t}\t{}", out.join("+")); // §E1 REACH COUNTER (declined)
+                }
+                return None;
+            }
+            if candor_report::env::trace("CANDOR_R1648_INSTR") {
+                eprintln!("R1648SELF\t{acc_leaf}.{method}\t{t}\t{}", out.join("+")); // §E1 REACH COUNTER
+            }
+            return Some(PayloadTy::Dispatch(out));
+        };
+        // A dependency trait's member list is not known here, so with one among the bounds the member is asked of it.
+        let st = crate::std_bounds::table();
+        let declared = dep_bound
+            || out.iter().any(|b| {
+                self.trait_declares_method(b, mem, 0)
+                    || (!self.local_traits.contains_key(b) && st.traits_by_leaf(b).iter().any(|p| st.trait_method(p, mem).is_some()))
+            });
+        if !declared {
+            if candor_report::env::trace("CANDOR_R1648_INSTR") {
+                eprintln!("R1648UNDECL\t{acc_leaf}.{method}\t{t}\t.{mem}"); // §E1 REACH COUNTER (declined)
+            }
+            return None;
+        }
+        if candor_report::env::trace("CANDOR_R1648_INSTR") {
+            eprintln!("R1648SELF\t{acc_leaf}.{method}\t{t}\t{}", out.join("+")); // §E1 REACH COUNTER
+        }
+        Some(PayloadTy::Dispatch(out))
     }
 
     /// SOUNDNESS R1630 — `self.io.send(buf)` with `io: DontDrop<net::UdpSocket>` and `impl<T> Deref for DontDrop<T> {
@@ -10675,7 +10821,11 @@ impl<'a> CallCollector<'a> {
         let Some(first) = args.first() else { return };
         let before = self.unresolved_why.len();
         self.self_io_receiver_spelled(first, m, true);
-        if self.unresolved_why.len() != before || self.resolve_recv_type(first).is_some() {
+        // SOUNDNESS R1648 — `Read::read(self.as_file_mut(), buf)` (EXECUTED rustagent-r1648/fx/acc V6): the walk types an
+        // accessor that returns its impl's parameter as the RECEIVER's type (R979's reading), which is a type and so
+        // stopped this arm; the accessor's payload decision is what says the value is the bounded parameter.
+        let acc_dispatch = matches!(self.accessor_payload(first, Some(m)), PayloadTy::Dispatch(_));
+        if self.unresolved_why.len() != before || (self.resolve_recv_type(first).is_some() && !acc_dispatch) {
             return;
         }
         if self.resolve_recv_traits(first).iter().any(|t| t == tr) {
@@ -13056,7 +13206,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             PayloadTy::Hedge
         } else {
             match self.field_payload(&node.receiver) {
-                PayloadTy::Old => self.accessor_payload(&node.receiver), // SOUNDNESS R1631
+                PayloadTy::Old => self.accessor_payload(&node.receiver, Some(&leaf)), // SOUNDNESS R1631 / R1648
                 d => d,
             }
         };
@@ -13255,6 +13405,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             // only while its `BoxConn` alias mistyped the field as `Box`). Dispatch on those supertraits too, exactly as
             // if the receiver had been written as an object of each. `CANDOR_R1495_OFF=1`.
             let mut recv_trs = self.resolve_recv_traits(&node.receiver);
+            // SOUNDNESS R1648 — the payload decision above already holds the bounds for an accessor value whose bound is
+            // a DEPENDENCY trait (`self.conn().call()` over `C: dep::Svc`), which `resolve_recv_traits` (asked without
+            // the member, as a `let` binding asks) declines; dispatch on them here, as the field spelling does.
+            if recv_trs.is_empty() {
+                if let PayloadTy::Dispatch(b) = &payload {
+                    recv_trs = self.canon_local_trait_aliases(b.clone());
+                }
+            }
             if !candor_report::env::switch("CANDOR_R1495_OFF") {
                 let mut extra: Vec<String> = Vec::new();
                 for tr in &recv_trs {

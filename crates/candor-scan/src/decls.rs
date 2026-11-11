@@ -6222,6 +6222,18 @@ pub(crate) fn collect_decls(
                     },
                     _ => Vec::new(),
                 };
+                // SOUNDNESS R1648 — which of those arguments are TYPE arguments (not lifetimes, not consts), so the
+                // position can also be filed counting types only: an impl that elides a lifetime the accessor's impl
+                // writes (`impl<F: Read> Read for W<'_, F>` beside `impl<'a, F> W<'a, F>`) keeps the type positions.
+                let self_arg_is_type: Vec<bool> = match &*im.self_ty {
+                    syn::Type::Path(sp) => match sp.path.segments.last().map(|seg| &seg.arguments) {
+                        Some(syn::PathArguments::AngleBracketed(args)) => {
+                            args.args.iter().map(|a| matches!(a, syn::GenericArgument::Type(_))).collect()
+                        }
+                        _ => Vec::new(),
+                    },
+                    _ => Vec::new(),
+                };
                 for ii in &im.items {
                     if let syn::ImplItem::Fn(m) = ii {
                         if let (Some(ty), false) = (&impl_key_ty, self_arg_names.is_empty()) {
@@ -6231,6 +6243,13 @@ pub(crate) fn collect_decls(
                                 rets,
                                 crate::model::impl_retgen_key(tl, &m.sig.ident.to_string()),
                                 pos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()),
+                            );
+                            // SOUNDNESS R1648 — the same position among the TYPE arguments only (`model::impl_retgen_tpos_key`).
+                            let tpos = pos.map(|p| self_arg_is_type.iter().take(p).filter(|t| **t).count());
+                            file_decl_fact(
+                                rets,
+                                crate::model::impl_retgen_tpos_key(tl, &m.sig.ident.to_string()),
+                                tpos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()),
                             );
                         }
                         record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases,

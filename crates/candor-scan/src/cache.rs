@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev162 (rustagent-r1648): SOUNDNESS R1648 — Pass A files `impl_retgen_tpos_key` (an accessor's returned parameter
+    // counted over TYPE arguments only) and Pass B's cached `calls` change (`self.acc().m()` dispatches over the impl
+    // argument's bounds, or types a concrete crate argument). A rev161 entry has no fact and replays the silence warm.
     // rev161 (rustagent-r474): SOUNDNESS R1649 — Pass A's `nonpath_receivers` referent entries gain the impl's trait leaf
     // (a fourth field) and Pass B's typed calls read it. A rev160 entry has no trait and replays the wrong-impl edge warm.
     // rev160 (rustagent-r474): SOUNDNESS R474 — Pass A records a root `#[macro_use] extern crate log` in `macro_twins`
@@ -613,7 +616,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev161/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev162/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -664,6 +664,13 @@ pub(crate) fn impl_retgen_key(type_leaf: &str, fn_leaf: &str) -> String {
     format!("<implretgen>{type_leaf}\u{1f}{fn_leaf}")
 }
 
+/// SOUNDNESS R1648 — `impl_retgen_key`'s position counted over the impl's written TYPE arguments only (lifetimes and
+/// consts skipped), the positions `decls::IMPL_TARGS_KEY` and `model::type_params_key` use. Read against `self`'s written
+/// arguments in ANOTHER impl of the same type, which may write or elide its lifetimes differently.
+pub(crate) fn impl_retgen_tpos_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("<implretgent>{type_leaf}\u{1f}{fn_leaf}")
+}
+
 /// SOUNDNESS R979 — a struct field's declared type ARGUMENTS, positionally (`inner: PollState<Box<W>,
 /// u8>` -> `W\u{1}u8`; a lifetime is `'`, an untypable argument `_`), so an accessor whose return is
 /// the impl's type parameter can be typed at the call site. Angle-bracketed: no identifier reaches it.
