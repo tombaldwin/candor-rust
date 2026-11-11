@@ -789,6 +789,10 @@ pub(crate) struct FileDecls {
     /// qualified call falls back to when its 2-segment tail names no definition.
     #[serde(default)]
     pub(crate) reexports: Vec<Reexport>,
+    /// SOUNDNESS R1657 stage 2 (R1689) — this file's PRIVATE local named `use` bindings (`decls::collect_private_uses`),
+    /// read only by the re-export table. A rev173 entry has none (rev174).
+    #[serde(default)]
+    pub(crate) private_uses: Vec<Reexport>,
     /// R99 — MODULE-QUALIFIED name → EXTERNAL/aliased path, for the three shapes that give a std or
     /// dependency item a second crate-local spelling: a SUBMODULE `pub use` of an external item, a
     /// NOMINAL `type` alias, and a callable-typed `const`/`static` bound to a fn item. Keyed by the path a
@@ -978,6 +982,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     let mut reexports = Vec::new();
     let mut mod_aliases = HashMap::new();
     collect_reexports(items, modpath, &dir, include_tests, &uses, &mut reexports, &mut mod_aliases);
+    let mut private_uses = Vec::new();
+    crate::decls::collect_private_uses(items, modpath, &dir, include_tests, &mut private_uses); // SOUNDNESS R1657 s2 (R1689)
     crate::decls::collect_cfg_arm_aliases(items, modpath, &dir, include_tests, &mut mod_aliases); // SOUNDNESS R1682
     let mut use_bound = Vec::new();
     crate::decls::collect_use_bound(items, modpath, &dir, include_tests, &mut use_bound);
@@ -1121,6 +1127,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         // a `pub use self::platform::*` at the root is BOTH a root re-export and a module-alias edge, and
         // the two answer different questions — see `Reexport`).
         reexports,
+        private_uses,
         mod_aliases,
         use_bound,
         mod_places,
@@ -1227,6 +1234,8 @@ pub(crate) struct MergedDecls {
     /// Every file's SUBMODULE-level `pub use` re-export edges, concatenated in file walk order. Turned
     /// into the tail2-keyed alias index by `reexport_aliases`.
     pub(crate) reexports: Vec<Reexport>,
+    /// SOUNDNESS R1657 stage 2 (R1689) — every file's private local named `use` bindings, for the re-export table only.
+    pub(crate) private_uses: Vec<Reexport>,
     /// Every file's MODULE-QUALIFIED external aliases, unioned (R99 — see `FileDecls::mod_aliases`). A key
     /// carries its module path, so two files collide only where they declare the SAME name in the SAME
     /// module, which no crate that compiles does.
@@ -2205,6 +2214,7 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     // caller walks files in a fixed order and `reexport_aliases` folds them into sorted maps, so the
     // resulting index does not depend on this order.
     acc.reexports.extend(fd.reexports.iter().cloned());
+    acc.private_uses.extend(fd.private_uses.iter().cloned());
     acc.use_bound.extend(fd.use_bound.iter().cloned());
     for (placed, by) in &fd.mod_places {
         acc.mod_places.entry(placed.clone()).or_default().insert(by.clone());
@@ -2651,6 +2661,7 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     let mut rx: Vec<String> = m
         .reexports
         .iter()
+        .chain(m.private_uses.iter()) // R1657 s2: the private bindings steer the same resolution
         .map(|r| format!("{}<-{}::{} as {}{}", r.module, r.from.join(","), r.name, r.alias,
                          if r.cfg_gated { " #[cfg]" } else { "" }))
         .collect();

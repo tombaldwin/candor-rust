@@ -2239,6 +2239,57 @@ pub(crate) fn build_reexport_names(
     table
 }
 
+/// SOUNDNESS R1657 stage 2 (R1689) — the PRIVATE local named `use` bindings of every module in this file, recursing into
+/// inline modules, in the `Reexport` shape. A private `use crate::tu as sys;` in `plat` is visible to `plat`'s
+/// DESCENDANTS (`super::sys::fx()`, `crate::plat::sys::fx()` from `plat::child`), and those paths named nothing: ABSENT
+/// over an executed write on published 0.41.3 and on aacd3880. Fed ONLY to the re-export table (never to
+/// `reexport_aliases` or R959, which answer for what a module EXPORTS), and only where the head resolves locally.
+/// A path through such a key from a non-descendant does not compile, so the key cannot answer a call it should not.
+pub(crate) fn collect_private_uses(items: &[syn::Item], modpath: &str, dir: &Path, include_tests: bool, out: &mut Vec<Reexport>) {
+    if crate::lang::r1657s2_off() {
+        return;
+    }
+    let mods = mod_targets(items, modpath, dir, include_tests);
+    for it in items {
+        match it {
+            syn::Item::Use(u) => {
+                let private = match &u.vis {
+                    syn::Visibility::Inherited => true,
+                    syn::Visibility::Restricted(r) => r.path.is_ident("self"),
+                    _ => false,
+                };
+                if !private || (!include_tests && is_cfg_test(&u.attrs)) {
+                    continue;
+                }
+                let mut leaves = Vec::new();
+                use_leaves(&u.tree, Vec::new(), &mut leaves);
+                for (segs, name, alias) in leaves {
+                    if name == "*" {
+                        continue;
+                    }
+                    let mut from = resolve_use_base(&segs, modpath, &mods);
+                    if from.is_empty() && segs.is_empty() && mods.contains_key(&name) {
+                        from = vec![modpath.to_string()];
+                    }
+                    if !from.is_empty() {
+                        out.push(Reexport { module: modpath.to_string(), from, name, alias, cfg_gated: has_cfg(&u.attrs) });
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    let name = m.ident.to_string();
+                    collect_private_uses(inner, &qualify(modpath, &name), &dir.join(&name), include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn collect_reexports(
     items: &[syn::Item],
     modpath: &str,

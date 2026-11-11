@@ -126,6 +126,8 @@ pub mod m_uni {{ use crate::uni::sys; pub fn uni_zq() {{ sys::fx() }} }}\n\
 pub mod srv {{ pub mod builder {{ pub struct Builder; pub fn builder() -> Builder {{ Builder }} impl Builder {{ pub fn build(&self) {{ {W} }} }} }}\n\
   pub use builder::builder; pub use builder::Builder;\n\
   pub mod conn {{ pub fn twin_below_zq() {{ super::builder::builder().build() }} pub fn twin_value_zq() {{ crate::srv::builder().build() }} }} }}\n\
+pub mod pv {{ use crate::tu as sys; pub mod child {{ use super::sys; pub fn priv_super_zq() {{ sys::fx() }} pub fn priv_path_zq() {{ super::sys::fx() }} }}\n\
+  pub mod child2 {{ pub fn priv_crate_zq() {{ crate::pv::sys::fx() }} }} }}\n\
 pub mod cli {{ pub mod builder {{ pub struct Builder; pub fn builder() -> Builder {{ Builder }} impl Builder {{ pub fn build(&self) {{}} }} }}\n\
   pub use builder::builder; }}\n\
 fn main() {{}}\n"
@@ -149,6 +151,8 @@ fn r1657s2_reexported_names_resolve_on_every_reader() {
         "m_ty::ty_imported_zq",
         "m_owner::owner_zq",
         "m_uni::uni_zq",
+        "pv::child::priv_path_zq",
+        "pv::child2::priv_crate_zq",
         "srv::conn::twin_below_zq",
         "srv::conn::twin_value_zq",
     ];
@@ -161,6 +165,9 @@ fn r1657s2_reexported_names_resolve_on_every_reader() {
             assert!(!inferred(&off, f).contains(&"Fs".to_string()), "{f}: CANDOR_R1657S2_OFF must restore the old reading {off:#}");
         }
     }
+    // A PRIVATE binding read by a descendant through `use super::sys` already resolved (the descendant's own map); through
+    // a PATH (`super::sys::fx()`, `crate::pv::sys::fx()`) it named nothing before the table carried private bindings (R1689).
+    assert!(inferred(&off, "pv::child::priv_super_zq").contains(&"Fs".to_string()), "{off:#}");
     // h3's shape: `pub use builder::builder;` beside `mod builder;` — the fn re-export must not redirect a path written
     // BELOW the module (`super::builder::builder()`), which aacd3880 resolved and a first cut of the table broke.
     assert!(inferred(&off, "srv::conn::twin_below_zq").contains(&"Fs".to_string()), "the module path resolves without the table {off:#}");

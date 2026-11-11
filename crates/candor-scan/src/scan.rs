@@ -1854,7 +1854,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let t = if crate::lang::r1657s2_off() {
             HashMap::new()
         } else {
-            crate::decls::build_reexport_names(&merged.reexports, &merged.mod_aliases, &r1657s2_declared, &r1657s2_mods)
+            {
+                // Exports first, then the private bindings (a name both bind is a `#[cfg]` pair: the union).
+                let edges: Vec<crate::model::Reexport> = merged.reexports.iter().chain(merged.private_uses.iter()).cloned().collect();
+                crate::decls::build_reexport_names(&edges, &merged.mod_aliases, &r1657s2_declared, &r1657s2_mods)
+            }
         };
         let n = t.len();
         *crate::lang::reexport_names_cell().write().unwrap() = t;
