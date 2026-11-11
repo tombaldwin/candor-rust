@@ -7,6 +7,9 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CC="$ROOT/cargo-candor"
+# cargo-candor `stash()` mirrors whichever candor-scan/candor-query it ran (a debug build from target/) into
+# $CANDOR_CACHE/bin. Unset, that is ~/.candor/bin, which `candor` and lanes treat as the PUBLISHED engine.
+CANDOR_CACHE="$(mktemp -d)/cache"; export CANDOR_CACHE
 
 pass=0; fail=0
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
