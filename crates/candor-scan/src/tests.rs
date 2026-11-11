@@ -20850,14 +20850,22 @@ pub struct Inner<'x> { pub g: &'x crate::G }
             pub fn uniq(u: &crate::sys::Uniq) { u.only(); }\n");
         assert!(effs(fn_entry(&v, "direct_spawn")).contains(&"Exec".to_string()),
                 "CALIBRATION: a fixture whose control fails proves nothing:\n{v:#}");
-        assert_eq!(effs(fn_entry(&v, "amb")), vec!["Unknown".to_string()],
-                   "R452: a receiver-typed call onto a tail several local definitions claim must \
-                    DISCLOSE — one of the claimants really spawns, and this engine saw both:\n{v:#}");
-        let why: Vec<String> = fn_entry(&v, "amb")["unknownWhy"].as_array().into_iter().flatten()
-            .filter_map(|w| w.as_str().map(String::from)).collect();
-        assert!(why.iter().any(|w| w == "ambiguous:same-name local methods"),
-                "R452: the reason must say WHICH state this is — candor saw the definitions and \
-                 declined to choose, which is what `ambiguous:` means:\n{v:#}");
+        // SOUNDNESS R1682 — `sys::Sel` is a `#[cfg]` arm set, and a type written through it from another module now names
+        // EVERY arm (the ⟨0.38⟩ union for an undecidable `target_os`), so the spawning claimant is CHARGED rather than
+        // disclosed. R452's rule (never vanish, never pick ONE claimant) is what this keeps; with R1682 off the hedge returns.
+        if candor_report::env::switch("CANDOR_R1682_OFF") {
+            assert_eq!(effs(fn_entry(&v, "amb")), vec!["Unknown".to_string()],
+                       "R452: a receiver-typed call onto a tail several local definitions claim must \
+                        DISCLOSE — one of the claimants really spawns, and this engine saw both:\n{v:#}");
+            let why: Vec<String> = fn_entry(&v, "amb")["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|w| w.as_str().map(String::from)).collect();
+            assert!(why.iter().any(|w| w == "ambiguous:same-name local methods"),
+                    "R452: the reason must say WHICH state this is — candor saw the definitions and \
+                     declined to choose, which is what `ambiguous:` means:\n{v:#}");
+        } else {
+            assert!(effs(fn_entry(&v, "amb")).contains(&"Exec".to_string()),
+                    "R1682: the arm set reaches the spawning claimant:\n{v:#}");
+        }
         assert!(effs_opt(&v, "uniq").is_empty(),
                 "the over-disclosure control: a UNIQUELY claimed tail resolves and stays pure:\n{v:#}");
     }
@@ -29286,8 +29294,15 @@ fn veina_the_unanchorable_contest_discloses_only_where_it_could_matter() {
         pub fn k_e_reexport_arm(p: &str) { e_reexport_arm(p) }\n\
         pub fn p_reexport_pure(p: &str) { crate::pz::Db::open(p) }\n\
         pub fn e_already_has(p: &str) { let _ = std::fs::write(p, \"y\"); crate::zi::Database::from_env(p) }\n");
+    // SOUNDNESS R1682 — the arm set is now RESOLVED, not hedged: `zi::Database` is bound under two `#[cfg]` arms, and a path
+    // written through it from another module edges EVERY arm (the union SPEC's ⟨0.38⟩ clause asks for an undecidable
+    // `unix`), so the writing arm's `Fs` is charged where the residue used to disclose `Unknown`.
     for f in ["e_reexport_arm", "k_e_reexport_arm"] {
-        assert!(veina_row_effs(&v, f).contains(&"Unknown".to_string()), "`{f}` must disclose:\n{v:#}");
+        let e = veina_row_effs(&v, f);
+        assert!(e.contains(&"Fs".to_string()) || e.contains(&"Unknown".to_string()), "`{f}` must charge or disclose:\n{v:#}");
+        if !candor_report::env::switch("CANDOR_R1682_OFF") {
+            assert!(e.contains(&"Fs".to_string()), "R1682: `{f}` reaches the writing arm:\n{v:#}");
+        }
     }
     assert!(veina_row_effs(&v, "p_reexport_pure").is_empty(), "every claimant is pure — no hedge:\n{v:#}");
     assert_eq!(veina_row_effs(&v, "e_already_has"), vec!["Fs".to_string()],
