@@ -81,6 +81,31 @@
       ]
     },
     {
+      "fn": "Candor::record_switches",
+      "loc": "src/lib.rs:495:5: 495:30",
+      "inferred": [
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "ac58c7e256e85387eba4726d207ba6e8",
+      "calls": [
+        "Candor::record_violation"
+      ],
+      "invisible": [
+        "candor_report",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "record_unit_completed",
       "loc": "src/lib.rs:4920:1: 4920:47",
       "inferred": [

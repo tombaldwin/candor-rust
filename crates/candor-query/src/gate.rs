@@ -1107,6 +1107,20 @@ pub(crate) fn switches_at(prefix: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
+/// ⟨0.42⟩ SOUNDNESS R1653: the switches the LINT recorded in its machine sink (`CANDOR_VIOLATIONS`), one `SWITCHED <name,name>` line per
+/// unit that consulted any. Read LENIENTLY like [`switches_at`]: this only ever ADDS a refusal, and a sink that cannot be read is the
+/// wrapper's business (it is loud there). A name is an env-var identifier, so a malformed element is dropped, not guessed at.
+pub(crate) fn switches_in_violations(path: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("SWITCHED ") {
+            out.extend(rest.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string));
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// ⟨0.42⟩ SPEC §3.4 (c): the advisory verbs that answer `ok` (`unverified`, `fix-gate`, `whatif`) FOLLOW the gate. A verb that
 /// answered over a switched report would accept what the gate refuses, and an advisory verb may be less certain than the gate,
 /// never more (§3.3.1). They refuse with the same document and exit 2 whether or not `--strict` is given: the claim "this is not

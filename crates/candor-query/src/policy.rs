@@ -633,10 +633,22 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
     // cannot disagree with it. VERDICT-PRESERVING: ok/violations/exit are computed exactly as before,
     // and a clean policy (or no flag) leaves the document byte-identical.
     let mut policy_loc: Option<String> = None;
+    // ⟨0.42⟩ optional `--vio <file>` (SOUNDNESS R1653): the lint route's machine sink (`CANDOR_VIOLATIONS`). The lint records a
+    // `SWITCHED <name,name>` line there when its run consulted a result-moving switch; that is the only record a switch leaves on a
+    // route whose report is not written (`CANDOR_MIR`) or is not read by the gate (`guard`).
+    let mut vio_loc: Option<String> = None;
     let mut pos: Vec<&str> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--policy" {
+        if a == "--vio" {
+            match it.next() {
+                Some(l) if l == "-" || !l.starts_with('-') => vio_loc = Some(l.clone()),
+                _ => {
+                    eprintln!("candor-query: --vio requires a file argument");
+                    return 2;
+                }
+            }
+        } else if a == "--policy" {
             match it.next() {
                 Some(l) if l == "-" || !l.starts_with('-') => policy_loc = Some(l.clone()),
                 Some(l) => {
@@ -669,14 +681,20 @@ pub(crate) fn cmd_gate_verdict(args: &[String]) -> i32 {
         }
     }
     let (Some(parts), Some(out)) = (pos.first().copied(), pos.get(1).copied()) else {
-        eprintln!("usage: candor-query gate-verdict <parts-file> <out-file|-> [--report <locator>] [--policy <file>]");
+        eprintln!("usage: candor-query gate-verdict <parts-file> <out-file|-> [--report <locator>] [--policy <file>] [--vio <file>]");
         return 2;
     };
     // ⟨0.42⟩ SPEC §3.4 (c) (SOUNDNESS R1634): when the verdict is assembled over a NAMED report, a report that carries `switches` makes it
-    // unanswerable — the §3.1 refusal document at `out`, exit 2. Only a named `--report` can be judged here: the lint route's wrapper
-    // does not pass one today (see the CHANGELOG residual), and this verb reads no report otherwise.
-    if let Some(loc) = report_loc.as_deref() {
-        let names = candor_report::union_switches(&candor_report::env::consulted_switches(), &crate::gate::switches_at(loc));
+    // unanswerable — the §3.1 refusal document at `out`, exit 2. The lint route's wrapper passes no `--report`; it passes `--vio <sink>`
+    // (SOUNDNESS R1653), whose `SWITCHED` lines are the lint's own record of the switches it consulted. This verb reads nothing else.
+    {
+        let mut names = candor_report::env::consulted_switches();
+        if let Some(loc) = report_loc.as_deref() {
+            names = candor_report::union_switches(&names, &crate::gate::switches_at(loc));
+        }
+        if let Some(v) = vio_loc.as_deref() {
+            names = candor_report::union_switches(&names, &crate::gate::switches_in_violations(v));
+        }
         if !names.is_empty() {
             let why = candor_report::env::switch_refusal_reason(&names);
             eprintln!("candor-query gate-verdict: {why}");

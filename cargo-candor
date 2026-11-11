@@ -246,6 +246,22 @@ gate_exit2() {
   exit 2
 }
 
+# ⟨0.42⟩ SPEC §3.3 cause (e), SOUNDNESS R1653: a lint-route gate whose lint consulted a result-moving switch is UNANSWERABLE. The lint
+# records `SWITCHED <name,name>` in the machine sink ($1 = CANDOR_VIOLATIONS file) — the only record a switch leaves where the report is not
+# written (`CANDOR_MIR`) or the gate does not read one (`guard`). Exit 2 and the §3.1 refusal document, ahead of any violation (a violation
+# does not dominate), written by `query gate-verdict --vio` so the bytes are the scan route's. Returns when no switch was recorded.
+refuse_if_switched() {
+  grep -q '^SWITCHED ' "$1" 2>/dev/null || return 0
+  local out="-" tmpdoc=""
+  if [ "${gjson:-}" != "-" ]; then
+    if [ -n "${gate_target:-}" ]; then out="$gate_target"; else tmpdoc="$(mktemp)"; out="$tmpdoc"; fi
+  fi
+  query gate-verdict "${gate_target:-$1}.parts" "$out" --vio "$1" || true   # the reason is on stderr, the document at the sink
+  [ -n "$tmpdoc" ] && rm -f "$tmpdoc"
+  [ -n "${gate_target:-}" ] && rm -f "$gate_target.parts" "$gate_target.zm" 2>/dev/null
+  exit 2
+}
+
 # A CONFIG-LOAD refusal happens BEFORE the verb can arm its sink — the ⟨0.27⟩ "armed after config load"
 # window, measured here 2026-08-12: `CANDOR_CONFIG=/no/such cargo candor policy p --gate-json g.json`
 # exited 2 with a PREVIOUS run's green verdict still at g.json. Called from load_config's exit-2 paths
@@ -699,6 +715,7 @@ case "$cmd" in
       # complete — then the failure came after the analysis and the guard evaluates as normal. Anything
       # else could NOT run the guard over every unit, so it does not pass: exit 2.
       printf '%s\n' "$out" >&2
+      refuse_if_switched "$vio"
       fin_rc=0; analysis_finished_despite_exit "$done_f" || fin_rc=$?
       if [ "$fin_rc" -eq 0 ]; then
         echo "candor: note — dylint exited nonzero, but the crate builds cleanly without candor and every unit cargo builds was analysed to the end: rustc failed AFTER the analysis (e.g. a shutdown delayed-bug). The guard evaluates." >&2
@@ -713,6 +730,7 @@ case "$cmd" in
         gate_exit2 "a unit cargo builds was never analysed — the guard could not evaluate it"
       fi
     fi
+    refuse_if_switched "$vio"
     # A per-crate baseline gap (a NEW workspace member, a renamed crate — the prefix has files, but not
     # for this crate) is disclosed by the engine as a GUARD-UNAVAILABLE sentinel line: the guard could
     # not evaluate that crate, so it must NOT pass silently — exit 2 (not-evaluated), not 0 and not a
@@ -1070,9 +1088,12 @@ case "$cmd" in
     # Then ENFORCE with those siblings loaded read-only (CANDOR_REPORTS) — host allowlists and effect
     # boundaries now resolve across the crate graph, not just within the crate being checked.
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-    snap() { CANDOR_JSON="$tmp/r" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
+    # The snapshot's own machine sink (⟨0.42⟩ R1653): a switch that suppresses the report (`CANDOR_MIR`) leaves no report here, and would
+    # otherwise reach the "no reports" refusal below under the wrong name. Fresh per attempt (the lint appends).
+    snap() { : > "$tmp/snapvio"; CANDOR_JSON="$tmp/r" CANDOR_VIOLATIONS="$tmp/snapvio" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
     snap
-    report_exists "$tmp/r" || { rm -rf target/dylint 2>/dev/null || true; snap; }
+    refuse_if_switched "$tmp/snapvio"
+    report_exists "$tmp/r" || { rm -rf target/dylint 2>/dev/null || true; snap; refuse_if_switched "$tmp/snapvio"; }
     # No snapshot ⇒ the crate didn't build (or the engine broke): enforcing anyway would run with NO
     # sibling reports loaded, so a cross-crate `allow` host / boundary silently goes unenforced — and a
     # total build failure would fall through to "policy OK". Fail closed (exit 2, policy NOT evaluated).
@@ -1095,6 +1116,7 @@ case "$cmd" in
     if [ "$gjson" = "-" ]; then gate_target="$tmp/gate.json"; rm -f "$gate_target.parts" "$gate_target.zm"; fi
     rc=0
     out="$(env CANDOR_POLICY="$pol" CANDOR_REPORTS="$tmp/r" CANDOR_VIOLATIONS="$vio" CANDOR_GATE_JSON="$gate_target" cargo dylint --lib-path "$LIB" 2>&1)" || rc=$?
+    refuse_if_switched "$vio"
     printf '%s\n' "$out" | grep -aE '\[AS-EFF-006\]|\[AS-EFF-008\]|\[AS-EFF-009\]' >&2 || true
     # ⟨0.41⟩ `accept` lines are NOT evaluated on this route (the lint's own notice, src/lib.rs; the verdict's `ignored`
     # carries the machine half). The grep above shows violations only, so without this the console reads "blocked"

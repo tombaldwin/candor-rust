@@ -1344,6 +1344,36 @@ cout=$( cd "$M"; printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"tools/call","p
 want "MCP: tools/call candor_where returns the live result" "$cout" 'leaf'
 rm -rf "$(dirname "$M")"
 
+# ── R1653. A lint-route gate under a set result-moving switch REFUSES (SPEC ⟨0.42⟩ §3.3 cause (e)) ──
+# EXECUTED, not read: `CANDOR_MIR=1` makes the lint skip its report, so before this a `guard` over a real AS-EFF-005 gain exited 0 with
+# `ok: true`, and `policy` reached its "no reports" refusal under the wrong name; `CANDOR_PARANOID=1` is written to the lint's report but the
+# wrapper's verdict never read it, so a CLEAN policy exited 0 beside a verdict that said nothing. The record is the lint's `SWITCHED` line in
+# its machine sink. The unswitched twin of every cell is the control: it must still gate (exit 1 / exit 0), or the refusal is just a dead gate.
+echo "== lint-route gates refuse under a set switch (R1653) =="
+SW=$(mktemp -d)/sw; mkdir -p "$SW/src" "$SW/.candor"
+printf '[package]\nname="sw"\nversion="0.1.0"\nedition="2021"\n' > "$SW/Cargo.toml"
+printf 'pub fn leaf() -> String { String::new() }\npub fn top() -> usize { leaf().len() }\n' > "$SW/src/lib.rs"
+( cd "$SW"; "$ROOT/cargo-candor" snapshot .candor/baseline >/dev/null 2>&1 )
+printf 'pub fn leaf() -> String { std::fs::read_to_string("/etc/hosts").unwrap_or_default() }\npub fn top() -> usize { leaf().len() }\n' > "$SW/src/lib.rs"
+printf 'deny Fs top\n' > "$SW/.candor/bad.pol"; printf 'deny Net top\n' > "$SW/.candor/clean.pol"
+swcell() { # <label> <want rc> <want refused: 1|0> <want switch|-> <env assignment|NONE> <verb args...>
+  local label="$1" wrc="$2" wref="$3" wsw="$4" e="$5"; shift 5; local rc=0 doc="$SW/.candor/v.json"; rm -f "$doc"
+  if [ "$e" = NONE ]; then ( cd "$SW"; "$ROOT/cargo-candor" "$@" --gate-json "$doc" >/dev/null 2>&1 ) || rc=$?
+  else ( cd "$SW"; env "$e" "$ROOT/cargo-candor" "$@" --gate-json "$doc" >/dev/null 2>&1 ) || rc=$?; fi
+  expect_rc "$label: exit" "$rc" "$wrc"
+  local got; got=$(python3 -c "import json,sys; d=json.load(open('$doc')); print(d.get('refused') is True, ','.join(d.get('switches',[])), 'violations' in d)" 2>&1)
+  if [ "$wref" = 1 ]; then want "$label: refusal document names the switch" "$got" "True $wsw False"; else want "$label: not a refusal" "$got" "False  "; fi
+}
+swcell "guard, no switch (control: the gain is caught)"  1 0 - NONE guard .candor/baseline
+swcell "policy, no switch (control: the violation is caught)" 1 0 - NONE policy .candor/bad.pol
+swcell "policy clean, no switch (control: passes)"       0 0 - NONE policy .candor/clean.pol
+swcell "guard under CANDOR_MIR (report-suppressing)"     2 1 CANDOR_MIR CANDOR_MIR=1 guard .candor/baseline
+swcell "policy under CANDOR_MIR"                         2 1 CANDOR_MIR CANDOR_MIR=1 policy .candor/bad.pol
+swcell "guard under CANDOR_PARANOID (a violation does not dominate)" 2 1 CANDOR_PARANOID CANDOR_PARANOID=1 guard .candor/baseline
+swcell "policy under CANDOR_PARANOID (a violation does not dominate)" 2 1 CANDOR_PARANOID CANDOR_PARANOID=1 policy .candor/bad.pol
+swcell "CLEAN policy under CANDOR_PARANOID"              2 1 CANDOR_PARANOID CANDOR_PARANOID=1 policy .candor/clean.pol
+rm -rf "$(dirname "$SW")"
+
 rm -rf "$(dirname "$G")" "$(dirname "$X")" 2>/dev/null
 
 echo

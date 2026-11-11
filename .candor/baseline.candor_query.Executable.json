@@ -1249,6 +1249,28 @@
       ]
     },
     {
+      "fn": "gate::switches_in_violations",
+      "loc": "crates/candor-query/src/gate.rs:1113:1: 1113:64",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "0190e2d64f38bd4d6e3271174614cc82",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "gate::unanswerable_pairs",
       "loc": "crates/candor-query/src/gate.rs:904:1: 907:23",
       "inferred": [],

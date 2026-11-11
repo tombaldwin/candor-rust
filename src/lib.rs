@@ -488,6 +488,17 @@ impl Candor {
         self.record_violation_origin(code, func, effects, detail, "")
     }
 
+    /// ⟨0.42⟩ SPEC §3.3 cause (e) (SOUNDNESS R1653): tell the gate wrapper that this unit ran under a result-moving switch. The lint's gate
+    /// verdict is assembled by the wrapper, not here, and a switch that suppresses the report (`CANDOR_MIR`) leaves nothing to read, so the
+    /// record is a `SWITCHED <name,name>` line in the machine sink — the one channel every lint-route gate already consults. Like
+    /// GUARD-UNAVAILABLE it is a NOT-EVALUATED signal and never becomes a verdict record. A no-op when no switch was consulted.
+    fn record_switches(&self) {
+        let names = candor_report::env::consulted_switches();
+        if !names.is_empty() {
+            self.record_violation("SWITCHED", &names.join(","), &[], "");
+        }
+    }
+
     /// `record_violation` with the ⟨0.40⟩ AS-EFF-005 `origin` label on the verdict record.
     fn record_violation_origin(&self, code: &str, func: &str, effects: &[&str], detail: &str, origin: &str) {
         use std::io::Write;
@@ -4545,6 +4556,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // analysis and return. Non-production — it exists to gather evidence for a possible core rewrite.
         if candor_report::env::switch("CANDOR_MIR") {
             mir_spike::run(cx.tcx);
+            // This route writes NO report, so the switch would leave no record at all: the sentinel is the only thing a gate can read.
+            self.record_switches();
             return;
         }
         // Closure-flow resolution (receiving side), per call site — see resolve_callback_sites.
@@ -5207,6 +5220,8 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // ── the §3.3 gate verdict (CANDOR_GATE_JSON) — see write_gate_verdict ─────────────────
         let guard_unavailable = baseline.is_none() && candor_report::env::operator("CANDOR_BASELINE").is_ok();
         self.write_gate_verdict(guard_unavailable);
+
+        self.record_switches();
 
         // LAST, on the normal path only: this unit's report, violations and gate parts are on disk. A
         // panic anywhere above skips this line, so its absence is the "did not finish" signal.
