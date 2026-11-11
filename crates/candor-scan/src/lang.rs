@@ -6418,6 +6418,16 @@ pub(crate) fn r1682_off() -> bool {
     *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1682_OFF"))
 }
 
+/// Whether a `use` tree contains a glob leaf anywhere.
+fn use_tree_has_glob(t: &syn::UseTree) -> bool {
+    match t {
+        syn::UseTree::Path(p) => use_tree_has_glob(&p.tree),
+        syn::UseTree::Group(g) => g.items.iter().any(use_tree_has_glob),
+        syn::UseTree::Glob(_) => true,
+        _ => false,
+    }
+}
+
 /// SOUNDNESS R1682 — the `use` items written inside an item-position `cfg_if!` (bare or `cfg_if::cfg_if!`), every arm,
 /// nested `cfg_if!` arms included, each given a synthetic `#[cfg(..)]` so it is read as one arm of a cfg-gated set. An
 /// arm body the `CfgIfArms` grammar does not accept contributes nothing (today's reading).
@@ -6435,8 +6445,15 @@ pub(crate) fn cfg_if_use_items(items: &[syn::Item]) -> Vec<syn::ItemUse> {
                 let inner: Vec<syn::Item> =
                     b.stmts.iter().filter_map(|st| if let syn::Stmt::Item(i) = st { Some(i.clone()) } else { None }).collect();
                 for i in &inner {
-                    if let syn::Item::Use(u) = i {
-                        let mut u = u.clone();
+                    // A GLOB arm (`pub use vxworks::*;`, libc's platform `cfg_if!`) is not a name binding and is left out: a
+                    // glob in a `use` map is read as an EXTERNAL attribution unless it is written crate-rooted, and lifting it
+                    // attributed libc's `crate::pread` to `vxworks::pread` on every platform (first-cut A/B: emscripten
+                    // `lfs64::pread64` lost its `native:extern fn` disclosure for a wrong edge).
+                    if let syn::Item::Use(u) = i.clone() {
+                        if use_tree_has_glob(&u.tree) {
+                            continue;
+                        }
+                        let mut u = u;
                         u.attrs.push(syn::parse_quote!(#[cfg(candor_cfg_if_arm)]));
                         out.push(u);
                     }
