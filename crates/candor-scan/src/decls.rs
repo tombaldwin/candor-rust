@@ -245,6 +245,22 @@ pub(crate) fn scan_items(
                         info.derive_synth = crate::model::is_derive_synth(&im.attrs);
                         info.mbe_prim_op = mbe_prim.is_some(); // R1157
                         info.mbe_op = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_OP_ATTR)); // R1180
+                        // SOUNDNESS R1537 (c) — which kind of block declared the unit, for the co-path split in `scan.rs`.
+                        if mbe_prim.is_none() && tyname.is_some() {
+                            match &im.trait_ {
+                                Some((None, tp, _)) => {
+                                    if let Some(l) = tp.segments.last() {
+                                        info.impl_kind = 2;
+                                        info.impl_trait = l.ident.to_string();
+                                    }
+                                }
+                                Some(_) => {}
+                                None => {
+                                    info.impl_kind = 1;
+                                    info.impl_flags = crate::model::inherent_impl_flags(im, &m.vis);
+                                }
+                            }
+                        }
                         out.push(info);
                     }
                 }
@@ -3901,6 +3917,9 @@ pub(crate) fn fninfo(
         untyped_methods: c.untyped_methods.into_iter().collect(),
         self_disp: c.self_disp,
         inst_of: None,
+        impl_kind: 0,
+        impl_trait: String::new(),
+        impl_flags: 0,
     }
 }
 

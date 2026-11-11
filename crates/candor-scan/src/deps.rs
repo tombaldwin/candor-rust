@@ -857,6 +857,19 @@ pub(crate) fn load_dep_reports(spec: Option<&str>) -> DepIndex {
                 push_key(format!("{krate}#{t2}"), &mut keys);
             }
             push_key(format!("{krate}#{qual}"), &mut keys);
+            // SOUNDNESS R1537 (c) — SPEC §2 ⟨0.42⟩ CO-PATH UNITS: a member `m::S::act(Tr)` is ALSO keyed by its BARE path's three
+            // shapes, the only names a consumer can spell (`x.act()`, `S::act(&x)`), and two members under one bare key are
+            // unioned by the loop below — a bare-path call joins the union of the members, never one picked by order and
+            // never a miss read as purity. `CANDOR_R1537C_OFF=1` disables it with the producer half.
+            let bare = crate::model::copath_bare(qual).filter(|_| !candor_report::env::switch("CANDOR_R1537C_OFF"));
+            if let Some(b) = bare {
+                push_key(format!("{krate}#{}", b.rsplit("::").next().unwrap_or(b)), &mut keys);
+                if let Some(t2) = tail2(b) {
+                    push_key(format!("{krate}#{t2}"), &mut keys);
+                }
+                push_key(format!("{krate}#{b}"), &mut keys);
+            }
+            let qual = bare.unwrap_or(qual);
             // SOUNDNESS R1164 — a macro-made primitive operator unit (`m::u64::<mbe>::bitand`, R1157) is also keyed by its
             // module-free `<prim>::<mbe>::<method>`, which a consumer's `OP_RHS_MARKER` asks: its tail2 (`<mbe>::bitand`) names
             // every primitive at once, and its full qual carries a module the consumer cannot know. The `<mbe>` segment

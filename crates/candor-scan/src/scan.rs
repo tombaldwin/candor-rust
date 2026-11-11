@@ -3340,6 +3340,48 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         m
     };
     let unit_quals: HashSet<String> = fns.iter().map(|f| f.qual.clone()).collect();
+    // SOUNDNESS R1537 (c) — CO-PATH UNITS (SPEC §2 ⟨0.42⟩): AN INHERENT METHOD AND A TRAIT'S IMPLEMENTATION OF ONE NAME ON ONE
+    // TYPE ARE TWO UNITS. Both are keyed `Ty::m` (`lang::impl_type_name`), so they shared one qual and were ONE merged unit: its
+    // row (printed twice, at the inherent's span) carried the union, every caller of either was charged both bodies (R1420 (c),
+    // a fabrication EXECUTED on published 0.40.16), and the report spelled no unit a consumer could tell apart. Each member is
+    // renamed here to the bare qual plus a disambiguator that ENDS the name — `Ty::m(Ty)` for the inherent, `Ty::m(Tr)` for
+    // the trait's — so each has its own effects, row, hash and sidecar key.
+    //
+    // THE BARE QUAL STAYS AS AN INTERNAL UNION NODE, NEVER PUBLISHED: every index built above still names it, and every route
+    // that forms an edge to it without proving which member it reaches keeps doing so, so that edge joins the UNION of the
+    // members (calls `bare -> {inherent, trait}` below) — exactly what the merged unit gave, so no route can lose an effect it
+    // reached before. Only a site that PROVES its member (`copath_member`) edges that member alone. The published report spells
+    // an edge to the bare node as the edge to every member (`pub_calls`), and a chained consumer joins the bare path to the
+    // union of the members (`deps.rs`).
+    //
+    // Narrow by construction: every body under the qual is a hand-written impl member (`FnInfo::impl_kind`), at least one
+    // inherent and at least one of exactly ONE trait. Two traits (R1342), a module fn or a macro-made unit under the same
+    // qual, a trait leaf equal to the type's, are left merged as before. Within a side, several bodies (cfg arms, generic
+    // twins) stay one unit, as they were. `CANDOR_R1537C_OFF=1` disables it; `CANDOR_R1537C_INSTR` prints each split and pick.
+    //
+    // THE RENAME HAPPENS HERE, right after the last TARGET index (`unit_quals`; `by_tail2`/`by_leaf` above) is built from the
+    // bare quals and before the first CALLER-keyed structure (`direct_dispatchers`, the R1095 `untyped_contested` sites, the
+    // call loop): a caller-keyed fact recorded under the bare qual would land on the unpublished union node and leave the
+    // member whose body raised it reading pure (measured on the first corpus A/B: addr2line `FrameIter::next`'s inherent
+    // body lost its `dispatch:untyped receiver` hedge when the rename sat just before the call loop).
+    let r1537c_instr = candor_report::env::trace("CANDOR_R1537C_INSTR");
+    let copath: HashMap<String, CoPathC> = if candor_report::env::switch("CANDOR_R1537C_OFF") {
+        HashMap::new()
+    } else {
+        copath_sets(&fns, &unit_quals)
+    };
+    if !copath.is_empty() {
+        for f in fns.iter_mut() {
+            if let Some(cp) = copath.get(f.qual.as_str()) {
+                f.qual = if f.impl_kind == 1 { cp.inh.clone() } else { cp.tr.clone() };
+            }
+        }
+        if r1537c_instr {
+            for (q, cp) in &copath {
+                eprintln!("R1537CSPLIT\t{q}\t{}\t{}", cp.inh, cp.tr); // §E1 REACH COUNTER
+            }
+        }
+    }
     // VEIN C — a LOCAL type's impls of a DEPENDENCY's trait, `type leaf -> [(trait leaf, expanded trait
     // path)]`, read off R652's `!` key (the path each `impl` block wrote). Consulted only where a typed
     // method call on that type resolved to nothing local; see the inherited-dependency-default arm.
@@ -5344,7 +5386,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     }
                     for t in targets {
                         if t != &f.qual && withdrawn.as_ref() != Some(t) {
-                            calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                            // SOUNDNESS R1537 (c) — a co-path set's member, where this call site proves which one runs.
+                            let t = match copath.get(t.as_str()).and_then(|cp| copath_member(cp, c, &f.qual)) {
+                                Some(m) => {
+                                    if r1537c_instr {
+                                        eprintln!("R1537CPICK\t{}\t{}\t{m}", f.qual, c.path); // §E1 REACH COUNTER
+                                    }
+                                    m
+                                }
+                                None => {
+                                    if r1537c_instr && copath.contains_key(t.as_str()) {
+                                        eprintln!("R1537CUNION\t{}\t{}\t{t}\t{:?}", f.qual, c.path, c.cside); // §E1 REACH COUNTER
+                                    }
+                                    t
+                                }
+                            };
+                            if t != &f.qual {
+                                calls.entry(f.qual.clone()).or_default().insert(t.clone());
+                            }
                         }
                     }
                 } else if let Some(t) = c
@@ -7793,7 +7852,36 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
-    let all: Vec<String> = fns.iter().map(|f| f.qual.clone()).collect();
+    // SOUNDNESS R1537 (c) — the bare qual of each split set is the UNION of its members: an internal node every unproven edge
+    // still reaches (`copath`, above), never published.
+    let mut all: Vec<String> = fns.iter().map(|f| f.qual.clone()).collect();
+    for (bare, cp) in &copath {
+        calls.entry(bare.clone()).or_default().extend([cp.inh.clone(), cp.tr.clone()]);
+        all.push(bare.clone());
+    }
+    // SOUNDNESS R1537 (c) — A MEMBER THAT CALLS ITS OWN NAME REACHES ITS SIBLING. The commonest shape of a co-path set is one
+    // member DELEGATING to the other: `pub fn sqrt(&self) -> Self { Roots::sqrt(self) }` (num-bigint-dig), `impl Loader for
+    // Font { fn full_name(&self) -> String { self.full_name() } }` (font-kit). While merged, that call was the unit's own
+    // self-edge and the body it reached was the unit itself, so no route ever had to resolve it — and several do not:
+    // a foreign trait's UFCS path forms no edge to the local impl, a same-leaf twin type refuses `self`'s typing. Split, those
+    // members read PURE over the sibling body they run (MEASURED on the first corpus A/B: num-bigint-dig `BigUint::sqrt`
+    // lost its `Unknown`, font-kit `Loader::full_name` its `Log`). So a member whose body holds ANY call of the set's name
+    // edges every sibling — the merge's answer, kept for exactly the bodies that can delegate. Over-charge where the call
+    // was really recursion or another type's method; never a drop.
+    if !copath.is_empty() {
+        let leaf_of = |q: &str| q.rsplit("::").next().unwrap_or(q).to_string();
+        for f in &fns {
+            let Some((bare, cp)) = crate::model::copath_bare(&f.qual).and_then(|b| copath.get_key_value(b)) else { continue };
+            let m = leaf_of(bare);
+            if f.calls.iter().any(|c| !c.is_macro && c.leaf == m) {
+                let sib = if f.qual == cp.inh { &cp.tr } else { &cp.inh };
+                if r1537c_instr {
+                    eprintln!("R1537CSIB\t{}\t{sib}", f.qual); // §E1 REACH COUNTER
+                }
+                calls.entry(f.qual.clone()).or_default().insert(sib.clone());
+            }
+        }
+    }
     let mut inferred = propagate(&direct, &calls, &all);
     // ── §4 HONESTY — VEIN A: THE CONTEST NO WRITTEN PATH SETTLES, DISCLOSED WHERE IT COULD MATTER ──────
     // After anchoring every written path to its module (`lang::expand`), a non-method path call whose
@@ -8601,7 +8689,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // nothing: the instance keeps a SUBSET of its default's edges (`calls_i` is filtered from `def.calls`) and its name only
     // extends the default's last segment, so every effect rule that fires on the instance also fires on the default (executed:
     // soundness/ fixtures `r1650_*`). The debug assertion below states that subset so a change that breaks it fails loudly.
-    let all_pub: Vec<String> = all.iter().filter(|q| !inst_name.contains_key(q.as_str())).cloned().collect();
+    // SOUNDNESS R1537 (c) — nor is a co-path set's bare union node: its members are.
+    let all_pub: Vec<String> =
+        all.iter().filter(|q| !inst_name.contains_key(q.as_str()) && !copath.contains_key(q.as_str())).cloned().collect();
     debug_assert!(
         fns.iter().filter_map(|f| f.inst_of.as_deref().map(|d| (f.qual.as_str(), d))).all(|(i, d)| {
             let (a, b) = (inferred.get(i), inferred.get(d));
@@ -8610,16 +8700,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         "R1650: a default-instance unit performs an effect its default does not — dropping it from the gate would under-report"
     );
     let pub_calls = |q: &str| -> Vec<String> {
+        // SOUNDNESS R1537 (c) — an edge to a co-path set's bare union node is published as an edge to EVERY member.
         let mut v: Vec<String> = calls
             .get(q)
-            .map(|cs| cs.iter().map(|c| inst_name.get(c.as_str()).map_or(c.clone(), |d| d.to_string())).collect())
+            .map(|cs| {
+                cs.iter()
+                    .flat_map(|c| match copath.get(c.as_str()) {
+                        Some(cp) => vec![cp.inh.clone(), cp.tr.clone()],
+                        None => vec![inst_name.get(c.as_str()).map_or(c.clone(), |d| d.to_string())],
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         v.sort();
         v.dedup();
         v
     };
     for q in &all {
-        if inst_name.contains_key(q.as_str()) {
+        if inst_name.contains_key(q.as_str()) || copath.contains_key(q.as_str()) {
             continue;
         }
         // SPEC §2.2: the sidecar records EVERY analyzed function — including a LEAF with no local
@@ -9745,7 +9843,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // same-engine re-scan agreement. Recorded toward the --gate-json verdict too (analyzed:{count}).
     let analyzed = {
         // SOUNDNESS R1420(a) — a default's instance is not a unit (`analyzed.count == |callgraph nodes|`).
-        let mut sorted: Vec<String> = all.iter().filter(|q| !inst_name.contains_key(q.as_str())).cloned().collect();
+        let mut sorted: Vec<String> =
+            all.iter().filter(|q| !inst_name.contains_key(q.as_str()) && !copath.contains_key(q.as_str())).cloned().collect();
         sorted.sort();
         candor_report::Analyzed { count: sorted.len(), digest: candor_report::fnv1a_hex(&sorted) }
     };
@@ -11063,6 +11162,103 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
 /// a legitimate tree nests this deep, but because a manifest's own `exclude`/glob resolving back onto an
 /// ancestor is an authoring mistake this function must not spin on; past the cap `m` is scanned as a
 /// single leaf crate with a loud warning rather than silently dropped.
+/// SOUNDNESS R1537 (c) — one inherent/trait co-path set: the two member quals, the trait's leaf, each side's receiver rank (0
+/// where the side's bodies disagree or record none), the inherent side's `impl_flags` (ANDed over its bodies) and the module
+/// its impl block sits in (for a private method's visibility).
+pub(crate) struct CoPathC {
+    pub(crate) inh: String,
+    pub(crate) tr: String,
+    pub(crate) tr_leaf: String,
+    pub(crate) inh_rank: u8,
+    pub(crate) tr_rank: u8,
+    pub(crate) inh_flags: u8,
+    pub(crate) module: String,
+}
+
+/// SOUNDNESS R1537 (c) — the inherent/trait co-path sets among `fns` (see the call site in `scan_one`). The member names are the
+/// bare qual plus `(<self type leaf>)` and `(<trait leaf>)`; a set whose two names would coincide, or would collide with a
+/// unit that already exists, is left merged.
+pub(crate) fn copath_sets(fns: &[FnInfo], unit_quals: &HashSet<String>) -> HashMap<String, CoPathC> {
+    let mut by_q: HashMap<&str, Vec<&FnInfo>> = HashMap::new();
+    for f in fns {
+        by_q.entry(f.qual.as_str()).or_default().push(f);
+    }
+    let mut out = HashMap::new();
+    for (q, fs) in by_q {
+        if fs.len() < 2
+            || fs.iter().any(|f| {
+                !matches!(f.impl_kind, 1 | 2)
+                    || f.extern_decl
+                    || f.reexport_alias
+                    || f.derive_synth
+                    || f.mbe_prim_op
+                    || f.mbe_op
+                    || f.inst_of.is_some()
+            })
+        {
+            continue;
+        }
+        let inh: Vec<&&FnInfo> = fs.iter().filter(|f| f.impl_kind == 1).collect();
+        let trs: Vec<&&FnInfo> = fs.iter().filter(|f| f.impl_kind == 2).collect();
+        let leaves: Vec<&str> = trs.iter().map(|f| f.impl_trait.as_str()).collect::<BTreeSet<_>>().into_iter().collect();
+        let (Some(ty_leaf), [tr_leaf]) = (q.rsplit("::").nth(1), leaves.as_slice()) else {
+            continue;
+        };
+        if inh.is_empty() || tr_leaf.is_empty() || *tr_leaf == ty_leaf || q.ends_with(')') {
+            continue;
+        }
+        let (mi, mt) = (format!("{q}({ty_leaf})"), format!("{q}({tr_leaf})"));
+        if unit_quals.contains(&mi) || unit_quals.contains(&mt) {
+            continue;
+        }
+        let rank = |v: &[&&FnInfo]| -> u8 {
+            let r = v[0].recv_rank;
+            if v.iter().all(|f| f.recv_rank == r) { r } else { 0 }
+        };
+        let module = q.rsplitn(3, "::").nth(2).unwrap_or("").to_string();
+        out.insert(
+            q.to_string(),
+            CoPathC {
+                inh: mi,
+                tr: mt,
+                tr_leaf: tr_leaf.to_string(),
+                inh_rank: rank(&inh),
+                tr_rank: rank(&trs),
+                inh_flags: inh.iter().fold(u8::MAX, |a, f| a & f.impl_flags),
+                module,
+            },
+        );
+    }
+    out
+}
+
+/// SOUNDNESS R1537 (c) — the member of `cp` that call `c` in `caller` provably reaches, or `None` (the union):
+///  · an edge to a NAMED trait's implementation (`Call::cside` `Some(tr)`): the trait member, when it is this set's trait;
+///  · a written associated path naming no trait (`Some("")`): the inherent member, when it applies to every instance and the
+///    caller can see it — path resolution takes the type's inherent item before any trait's;
+///  · a method-call expression on a receiver typed as the set's type (`dot && typed`): the inherent member when Rust's probe
+///    reaches it no later than the trait's (`model::inherent_probe_wins`) and it applies and is visible — within one probe
+///    step the inherent method is preferred, and a trait not in scope is no candidate at all.
+///
+/// Everything else — an unknown receiver form with differing ranks, a conditional or invisible inherent method, a trait
+/// that may win at an earlier step — is the union, which over-approximates and never drops a member.
+pub(crate) fn copath_member<'a>(cp: &'a CoPathC, c: &Call, caller: &str) -> Option<&'a String> {
+    let inherent_ok = || {
+        cp.inh_flags & crate::model::IMPL_UNCOND != 0
+            && (cp.inh_flags & crate::model::IMPL_PUB != 0
+                || cp.module.is_empty()
+                || caller.starts_with(&format!("{}::", cp.module)))
+    };
+    match c.cside.as_deref() {
+        Some("") => inherent_ok().then_some(&cp.inh),
+        Some(tr) => (tr == cp.tr_leaf).then_some(&cp.tr),
+        None if c.dot && c.typed && c.method && !c.is_macro => {
+            (crate::model::inherent_probe_wins(cp.inh_rank, cp.tr_rank, c.recv_form) && inherent_ok()).then_some(&cp.inh)
+        }
+        None => None,
+    }
+}
+
 fn expand_nested_workspace_member(m: String, depth: u32, out: &mut Vec<String>) {
     let mp = Path::new(&m);
     if !has_workspace_table(mp) {

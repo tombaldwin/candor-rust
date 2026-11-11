@@ -111,6 +111,14 @@ pub(crate) struct Call {
     /// chained consumer reads exactly what it read before — and only `scan::r1578_type` reads this. `None` everywhere else.
     #[serde(rename = "pv", default, skip_serializing_if = "Option::is_none")]
     pub(crate) prov: Option<String>,
+    /// SOUNDNESS R1537 (c) — which MEMBER of a co-path set this edge provably names, where the site says so by itself:
+    /// `Some("")` a written associated path that names no trait (`S::act(&s)`, `<S>::act(&s)`, `Self::act(self)`), which
+    /// Rust's path resolution answers with an applicable, visible INHERENT item before any trait's; `Some(tr)` an edge to
+    /// trait `tr`'s implementation (`<S as Tr>::act(s)`, `Tr::act(&s)` with a named implementor, a trait dispatch over an
+    /// implementor). `None` everywhere else, which joins the co-path set's UNION. Consulted only where the edge's target IS
+    /// a co-path set (`scan.rs`, `copath_member`); no other route reads it. Cached (`cache_schema` rev170).
+    #[serde(rename = "cs", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cside: Option<String>,
 }
 
 /// SOUNDNESS R1207/R1208 — the autoref/autoderef steps Rust's method probe tries for a receiver of `form` (1 a value,
@@ -149,6 +157,29 @@ pub(crate) fn trait_may_win(inh: u8, tr: u8, self_form: u8, form: u8) -> bool {
             let pat: Vec<u8> = layer(tr).into_iter().chain(match sf { 1 => Some(2), 2 => Some(3), _ => None }).collect();
             steps.iter().position(|s| s.starts_with(&pat)).is_some_and(|t_at| t_at < i_at)
         })
+    })
+}
+
+/// SOUNDNESS R1537 (c) — does Rust's method probe reach an INHERENT method of rank `inh` no later than a trait method of rank
+/// `tr` implemented for the SAME type (not a blanket impl), for a receiver of `form` (0 = not known: every form must agree)?
+/// Each matches exactly one step, the one whose layers are its own receiver layer over the type; within one step the inherent
+/// method is preferred, so a tie is the inherent's. A rank of 0 (not recorded) proves nothing.
+pub(crate) fn inherent_probe_wins(inh: u8, tr: u8, form: u8) -> bool {
+    if !(1..=3).contains(&inh) || !(1..=3).contains(&tr) {
+        return false;
+    }
+    let layers = |r: u8| -> &'static [u8] {
+        match r {
+            2 => &[2],
+            3 => &[3],
+            _ => &[],
+        }
+    };
+    let forms: &[u8] = if (1..=3).contains(&form) { std::slice::from_ref(&form) } else { &[1, 2, 3] };
+    forms.iter().all(|&f| {
+        let steps = probe_steps(f);
+        let at = |r: u8| steps.iter().position(|s| *s == layers(r));
+        matches!((at(inh), at(tr)), (Some(i), Some(t)) if i <= t)
     })
 }
 
@@ -325,6 +356,105 @@ pub(crate) struct FnInfo {
     /// published `calls`/sidecar spell the edge as the default it instantiates.
     #[serde(skip)]
     pub(crate) inst_of: Option<String>,
+    /// SOUNDNESS R1537 (c) — which kind of HAND-WRITTEN `impl` block declared this unit (`decls::scan_items`): 0 none (a free
+    /// fn, a trait default, a macro-made unit), 1 an INHERENT `impl Ty`, 2 a TRAIT `impl Tr for Ty`. An inherent method and a
+    /// trait implementation of one name on one type share one qual (`Ty::m`); SPEC ⟨0.42⟩ CO-PATH UNITS makes them two units,
+    /// and this is what tells them apart. Cached (`cache_schema` rev170).
+    #[serde(rename = "ik", default, skip_serializing_if = "crate::model::is_zero_u8")]
+    pub(crate) impl_kind: u8,
+    /// SOUNDNESS R1537 (c) — for `impl_kind` 2, the implemented trait's LEAF as written (`Tr` for `impl tm::Tr<A> for S`).
+    #[serde(rename = "it", default, skip_serializing_if = "String::is_empty")]
+    pub(crate) impl_trait: String,
+    /// SOUNDNESS R1537 (c) — for `impl_kind` 1, `IMPL_UNCOND`: the inherent block applies to EVERY instance of its self type
+    /// (no `where`, every self-type argument a bare unbounded parameter of the impl or a lifetime), so a call on that type
+    /// can always reach it; `IMPL_PUB`: the method is visible crate-wide (`pub`, `pub(crate)`, `pub(in crate)`). Rust's
+    /// method probe skips an inherent method the call site cannot see and an impl that does not apply, and then the
+    /// trait's member runs — neither may be read as "the inherent method wins".
+    #[serde(rename = "if", default, skip_serializing_if = "crate::model::is_zero_u8")]
+    pub(crate) impl_flags: u8,
+}
+
+/// SOUNDNESS R1537 (c) — SPEC §2 ⟨0.42⟩: the BARE path of a co-path unit's `fn`, i.e. the name with its disambiguator removed —
+/// a balanced parenthesised group that ENDS the name and opens directly after the last segment's name. `None` when the name
+/// carries none. A group that BEGINS a segment of its own (the tuple self type in `row::(T1,T2)::from_row_opt`) is a path
+/// segment, not a disambiguator, and so is a name with nothing before the group.
+pub(crate) fn copath_bare(name: &str) -> Option<&str> {
+    if !name.ends_with(')') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (j, ch) in name.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    let head = &name[..j];
+                    return (!head.is_empty() && !head.ends_with(':') && !head.ends_with('.')).then_some(head);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// SOUNDNESS R1537 (c) — `FnInfo::impl_flags` bits.
+pub(crate) const IMPL_UNCOND: u8 = 1;
+pub(crate) const IMPL_PUB: u8 = 2;
+
+/// SOUNDNESS R1537 (c) — `FnInfo::impl_flags` for a method `vis` of the inherent block `im`. `IMPL_UNCOND` only where nothing
+/// can make the block inapplicable to an instance of its self type: no `where` clause, and every self-type argument a lifetime
+/// or a bare type/const parameter of the impl with no bound of its own (`impl<T> S<T>`, `impl S`). `impl S<u8>` or
+/// `impl<T: Clone> S<T>` does not apply to every `S`, and on an instance it does not apply to the trait's member runs.
+pub(crate) fn inherent_impl_flags(im: &syn::ItemImpl, vis: &syn::Visibility) -> u8 {
+    let mut f = 0;
+    let crate_wide = match vis {
+        syn::Visibility::Public(_) => true,
+        syn::Visibility::Restricted(r) => r.path.is_ident("crate"), // `pub(crate)` and `pub(in crate)`
+        syn::Visibility::Inherited => false,
+    };
+    if crate_wide {
+        f |= IMPL_PUB;
+    }
+    let free_param = |id: &syn::Ident| {
+        im.generics.params.iter().any(|p| match p {
+            syn::GenericParam::Type(t) => t.ident == *id && t.bounds.is_empty(),
+            syn::GenericParam::Const(c) => c.ident == *id,
+            syn::GenericParam::Lifetime(_) => false,
+        })
+    };
+    let uncond = im.generics.where_clause.as_ref().is_none_or(|w| w.predicates.is_empty())
+        && match &*im.self_ty {
+            syn::Type::Path(tp) if tp.qself.is_none() => tp.path.segments.iter().all(|seg| match &seg.arguments {
+                syn::PathArguments::None => true,
+                syn::PathArguments::AngleBracketed(ab) => {
+                    let mut seen: Vec<String> = Vec::new();
+                    ab.args.iter().all(|a| match a {
+                        syn::GenericArgument::Lifetime(_) => true,
+                        syn::GenericArgument::Type(syn::Type::Path(t)) if t.qself.is_none() => {
+                            // a parameter used twice (`impl<T> S<T, T>`) does not cover `S<A, B>`
+                            t.path.get_ident().is_some_and(|i| {
+                                let k = i.to_string();
+                                let fresh = !seen.contains(&k);
+                                seen.push(k);
+                                fresh && free_param(i)
+                            })
+                        }
+                        syn::GenericArgument::Const(syn::Expr::Path(e)) if e.qself.is_none() => {
+                            e.path.get_ident().is_some_and(free_param)
+                        }
+                        _ => false,
+                    })
+                }
+                syn::PathArguments::Parenthesized(_) => false,
+            }),
+            _ => false,
+        };
+    if uncond {
+        f |= IMPL_UNCOND;
+    }
+    f
 }
 
 /// `struct-name-leaf -> { field -> expanded-type-path }`, e.g. `App -> { http: reqwest::Client }`.
