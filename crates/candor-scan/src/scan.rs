@@ -1262,7 +1262,7 @@ pub(crate) fn r1578_resolve(
                 wraps[0] = 'O';
             }
             // SOUNDNESS R1627 — a step that returned `&mut Self` / `&Self` hands the next method a reference receiver
-            m if m.starts_with("m:") && !is_async && (wraps.is_empty() || (matches!(wraps.as_slice(), ['M' | 'S']) && !candor_report::env::switch("CANDOR_R1627_OFF"))) => {
+            m if m.starts_with("m:") && !is_async && (wraps.is_empty() || (matches!(wraps.as_slice(), ['M' | 'S']) && !candor_report::env::switch("CANDOR_R1627_OFF") && !candor_report::env::switch("CANDOR_R1627_REF_OFF"))) => {
                 let RetTy::Dep(q) = &ty else { return None };
                 match wraps.first() {
                     Some('M') => form = 'm',
@@ -1273,7 +1273,7 @@ pub(crate) fn r1578_resolve(
                 // (`ExponentialBackoffBuilder::new().build()`); where the consumer provably has no trait in scope that
                 // declares the method, the inherent one is the one that runs whatever the form
                 let mut r = sigs.ret_of(dir, cr, cr_real, q, Some((&m[2..], form)));
-                if r.is_none() && sigs.probe_clear(dir, &m[2..], deps, renames).is_ok() {
+                if r.is_none() && !candor_report::env::switch("CANDOR_R1627_PROBE_OFF") && sigs.probe_clear(dir, &m[2..], deps, renames).is_ok() {
                     r = sigs.ret_of(dir, cr, cr_real, q, Some((&m[2..], 'a')));
                 }
                 let r = r?;
@@ -1286,7 +1286,7 @@ pub(crate) fn r1578_resolve(
         return None;
     }
     match ty {
-        RetTy::Dep(q) if wraps.is_empty() || (matches!(wraps.as_slice(), ['M' | 'S']) && !candor_report::env::switch("CANDOR_R1627_OFF")) => {
+        RetTy::Dep(q) if wraps.is_empty() || (matches!(wraps.as_slice(), ['M' | 'S']) && !candor_report::env::switch("CANDOR_R1627_OFF") && !candor_report::env::switch("CANDOR_R1627_REF_OFF")) => {
             Some(R1578::Typed { cr: cr.to_string(), method, ty: q })
         }
         _ => Some(R1578::Std),

@@ -810,12 +810,13 @@ fn ret_path(output: &syn::ReturnType, generics: &HashSet<String>, self_ty: Optio
             syn::Type::Paren(p) => t = &p.elem,
             syn::Type::Group(g) => t = &g.elem,
             // SOUNDNESS R1627 — a builder step returns `&mut Self` / `&Self`: the OUTERMOST layer only, over a plain nominal (`M` / `S`)
-            syn::Type::Reference(r) if wraps.is_empty() && !candor_report::env::switch("CANDOR_R1627_OFF") => {
-                wraps.push(if r.mutability.is_some() { 'M' } else { 'S' });
-                t = &r.elem;
-                if matches!(t, syn::Type::Path(p) if p.path.segments.last().is_some_and(|l| l.ident == "Result" || l.ident == "Option")) {
+            syn::Type::Reference(r) if wraps.is_empty() && !candor_report::env::switch("CANDOR_R1627_OFF") && !candor_report::env::switch("CANDOR_R1627_REF_OFF") => {
+                // only `Self` (the builder idiom): any other referent is a different change (reach measured, R1691)
+                if !matches!(&*r.elem, syn::Type::Path(p) if p.qself.is_none() && p.path.is_ident("Self")) {
                     return None;
                 }
+                wraps.push(if r.mutability.is_some() { 'M' } else { 'S' });
+                t = &r.elem;
             }
             syn::Type::Path(p) if p.qself.is_none() && p.path.leading_colon.is_none() => {
                 let last = p.path.segments.last()?;

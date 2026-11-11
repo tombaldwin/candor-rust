@@ -5014,7 +5014,7 @@ impl<'a> CallCollector<'a> {
                     if !full.contains("::") || full.starts_with("::") {
                         // SOUNDNESS R1627 — a call of the crate's OWN fn (`mkb().build()`) whose declared return types the chain's
                         // base: the value is a `T:` base of unknown form (the declared return may be a reference)
-                        if candor_report::env::switch("CANDOR_R1627_OFF") || steps.is_empty() {
+                        if candor_report::env::switch("CANDOR_R1627_OFF") || candor_report::env::switch("CANDOR_R1627_LOCAL_OFF") || steps.is_empty() {
                             return None;
                         }
                         let t = self.type_of(cur)?;
@@ -5054,7 +5054,7 @@ impl<'a> CallCollector<'a> {
     /// value (the caller's order) and the chain has at least one method step (`r1578_prov` is `None` for any shape it does not
     /// know).
     fn r1627_chain_prov(&self, expr: &syn::Expr) -> Option<String> {
-        if candor_report::env::switch("CANDOR_R1627_OFF") {
+        if candor_report::env::switch("CANDOR_R1627_OFF") || candor_report::env::switch("CANDOR_R1627_LET_OFF") {
             return None;
         }
         let pv = self.r1578_prov(expr)?;
@@ -5067,7 +5067,7 @@ impl<'a> CallCollector<'a> {
     /// root: the chain's method steps (so the R1617 marker is filed, re-typing the value from the lock-pinned source or, chained,
     /// from the dependency's report), over the binding's recorded provenance. `None` for any other receiver.
     fn r1627_let_guess(&self, recv: &syn::Expr, ty: &str) -> Option<(Vec<String>, String)> {
-        if candor_report::env::switch("CANDOR_R1627_OFF") {
+        if candor_report::env::switch("CANDOR_R1627_OFF") || candor_report::env::switch("CANDOR_R1627_LET_OFF") {
             return None;
         }
         let syn::Expr::Path(p) = peel_recv(recv) else { return None };
