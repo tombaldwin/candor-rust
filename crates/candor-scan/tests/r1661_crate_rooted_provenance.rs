@@ -71,7 +71,9 @@ fn r1661_the_crate_qualified_spelling_keeps_the_untyped_receiver_floor() {
     // The kill switch restores the silence on the qualified spelling only, and a gate under it is unanswerable.
     let (_, off) = scan(&d, None, true);
     assert!(row(&off, "n::m2_qual_zq").is_none(), "CANDOR_R1661_OFF restores the ABSENT row {off:#}");
-    assert_eq!(inferred(&off, "m::m2_bare_zq"), ["Unknown"], "the bare spelling never formed the marker");
+    // SOUNDNESS R1657 — with origin qualification the bare spelling is `crate::m::S` too, so under CANDOR_R1661_OFF it forms
+    // the same inert marker and is ABSENT; R1661 is what keeps both spellings disclosed.
+    assert!(row(&off, "m::m2_bare_zq").is_none(), "R1657 anchors the bare spelling onto the R1661 path {off:#}");
     let (refused, _) = scan(&d, Some("deny Unknown n::m2_qual_zq\n"), true);
     assert_eq!(refused, 2);
     let _ = std::fs::remove_dir_all(&d);
