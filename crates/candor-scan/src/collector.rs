@@ -872,7 +872,17 @@ fn tuple_variant_path(pat: &syn::Pat) -> Option<String> {
         syn::Pat::Paren(p) => tuple_variant_path(&p.pat),
         syn::Pat::TupleStruct(ts) if ts.qself.is_none() && ts.elems.len() == 1 && ts.path.segments.len() >= 2 => {
             let n = ts.path.segments.len();
-            Some(ts.path.segments.iter().take(n - 1).map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"))
+            let mut out = String::new();
+            for (i, seg) in ts.path.segments.iter().enumerate() {
+                if i + 1 == n {
+                    break;
+                }
+                if i > 0 {
+                    out.push_str("::");
+                }
+                out.push_str(&seg.ident.to_string());
+            }
+            Some(out)
         }
         _ => None,
     }
@@ -11681,7 +11691,7 @@ impl<'a> CallCollector<'a> {
         // UsesTypeParams>::uses_type_params`) and read pure once origin qualification resolved that wrong edge. Left
         // untyped, exactly as a dependency payload is.
         if !candor_report::env::switch("CANDOR_R1667_OFF") && !candor_report::env::switch("CANDOR_R1657_OFF") {
-            if let Some(written) = tuple_variant_path(pat).filter(|p| p.contains("::")) {
+            if let Some(written) = tuple_variant_path(pat) {
                 let full = self.expand_scoped(&written);
                 if !full.starts_with("crate::") && self.is_dependency_type(&full) {
                     if candor_report::env::trace("CANDOR_R1657_INSTR") {
