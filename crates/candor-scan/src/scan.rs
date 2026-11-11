@@ -1895,7 +1895,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         expanded = decls_per_file
             .iter()
             .map(|(rel, _, fd)| {
-                alias_expand_decls(fd, &module_path(Path::new(rel)), &merged.mod_aliases)
+                alias_expand_decls(fd, &module_path(Path::new(rel)), &merged.mod_aliases, &r1657s2_deps)
             })
             .collect();
         if expanded.iter().any(Option::is_some) {

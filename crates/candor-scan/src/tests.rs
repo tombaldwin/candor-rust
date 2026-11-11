@@ -23048,7 +23048,7 @@ pub fn go() {{ imp::doit(); }}
         crate::decls::record_alias(&mut aliases, "facade::Cmd".into(), "std::fs::File".into());
         crate::decls::record_alias(&mut aliases, "single::Cmd".into(), "std::process::Command".into());
 
-        let out = alias_expand_decls(&fd, "", &aliases).expect(
+        let out = alias_expand_decls(&fd, "", &aliases, &Default::default()).expect(
             "the SINGLE-arm field must move — without this the assertion below could hold because \
              nothing expands at all",
         );
@@ -23070,7 +23070,7 @@ pub fn go() {{ imp::doit(); }}
         let mut fd2 = FileDecls::default();
         fd2.field_elem.entry("Holder".into()).or_default().insert(
             "v".into(), format!("facade::Cmd{}V", crate::lang::WRAPPED_CONTAINER_MARK));
-        if let Some(o2) = alias_expand_decls(&fd2, "", &aliases) {
+        if let Some(o2) = alias_expand_decls(&fd2, "", &aliases, &Default::default()) {
             assert!(!o2.field_elem["Holder"]["v"].contains('\u{1}'), "a LAYERED entry keeps the refusal");
         }
     }

@@ -2215,6 +2215,19 @@ pub(crate) fn build_reexport_names(
             record_alias(&mut raw, k.clone(), format!("crate::{k}"));
         }
     }
+    // Modules that GLOB-import (`use x::*` / `pub use x::*`, any visibility): a name such a module re-binds may sit behind
+    // the glob, which this table does not enumerate. An arm that ends in one of them at a name the crate does not declare
+    // as a type or module is NOT a determined definition (sea-orm: `select.rs` imports `super::consolidate_query_result_
+    // quad_star`, which `executor` has only through `use consolidate::*`; the first cut answered
+    // `crate::executor::consolidate_query_result_quad_star`, named no unit, and lost an edge the leaf index had). Such a
+    // key is REFUSED — no answer, so the routes before this table answer exactly as they did.
+    let glob_mods: std::collections::HashSet<&str> =
+        edges.iter().filter(|e| e.name == "*").map(|e| e.module.as_str()).collect();
+    let undetermined = |arm: &str| -> bool {
+        let Some(q) = arm.strip_prefix("crate::") else { return false };
+        let m = q.rsplit_once("::").map_or("", |(m, _)| m);
+        glob_mods.contains(m) && !declared.contains(q) && !local_mods.contains(q)
+    };
     let mut table: HashMap<String, String> = HashMap::new();
     for k in &keys {
         let mut out: Vec<String> = Vec::new();
@@ -2228,6 +2241,12 @@ pub(crate) fn build_reexport_names(
         arms.sort_unstable();
         arms.dedup();
         if arms.is_empty() || arms.iter().all(|a| *a == own) {
+            continue;
+        }
+        if arms.iter().any(|a| undetermined(a)) {
+            if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+                eprintln!("R1657S2GLOBREFUSE\t{k}\t{}", arms.join("|")); // §E1 REACH COUNTER
+            }
             continue;
         }
         if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
@@ -2300,7 +2319,7 @@ fn collect_private_uses_in(
                 let mut leaves = Vec::new();
                 use_leaves(&u.tree, Vec::new(), &mut leaves);
                 for (segs, name, alias) in leaves {
-                    if name == "*" || externs.contains(&name) {
+                    if externs.contains(&name) {
                         continue;
                     }
                     let mut from = resolve_use_base(&segs, modpath, &mods);

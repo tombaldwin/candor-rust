@@ -1570,6 +1570,7 @@ pub(crate) fn alias_expand_decls(
     fd: &FileDecls,
     modpath: &str,
     aliases: &HashMap<String, String>,
+    deps: &std::collections::HashSet<String>,
 ) -> Option<FileDecls> {
     let mut uses: HashMap<String, String> = HashMap::new();
     crate::lang::seed_mod_aliases(aliases, modpath, &mut uses);
@@ -1649,7 +1650,13 @@ pub(crate) fn alias_expand_decls(
         if let Some(e) = try_one(p) {
             return Some(e);
         }
-        if p.contains("::") {
+        // SOUNDNESS R1657 stage 2 — the `crate::` retry is a guess that a stripped path was crate-rooted, and the
+        // re-export table now answers for PRIVATE bindings too: notify's `kqueue.rs` (module `kqueue`, dependency `kqueue`)
+        // types a field `kqueue::Watcher` — the DEPENDENCY's — and `use super::Watcher;` in that module made the retry
+        // rewrite it to the crate's own `Watcher` trait, dropping `invisible:[kqueue]` from every caller. A head that names
+        // a manifest dependency is not retried.
+        let dep_head = !crate::lang::r1657s2_off() && deps.contains(p.split("::").next().unwrap_or(""));
+        if p.contains("::") && !dep_head {
             if let Some(e) = try_one(&format!("crate::{p}")).filter(|e| e != p) {
                 return Some(e);
             }
