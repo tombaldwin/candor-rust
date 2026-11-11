@@ -267,3 +267,41 @@ pub fn hop2res_zq() -> Result<(), String> { let j = pdjs2::js::new(); let s = j.
     let _ = std::fs::remove_dir_all(&pd);
     let _ = std::fs::remove_dir_all(&cons);
 }
+
+/// Two shapes the corpus release bar found, both EXECUTED (lane scratch `rustagent-stage2/fx/ffi`, the binary calls libc):
+///   * a cfg `#[path]` arm set re-exporting a FOREIGN DECLARATION (generator's `pub use self::asm::swap_registers`): the
+///     table names each arm's declaration exactly; declarations are not in the tail2 index, so the first cut formed no
+///     edge and the caller lost its `native:extern fn` (Unknown -> ABSENT). `arm_extern_zq` must keep its Unknown.
+///   * R1690 — a call through a GLOB re-export of a module whose items an unexpanded macro hides (objc2's
+///     `ffi::objc_autoreleaseReturnValue`, declared inside `extern_c_unwind!`, reached through `pub use self::rc::*`):
+///     ABSENT on published 0.41.3 and aacd3880, now disclosed `macro:`. Here the macro is a dependency's (unreadable).
+#[test]
+fn r1690_foreign_declarations_behind_reexports_stay_disclosed() {
+    let mac = fixture("macdep", "macdep", &[("lib.rs", "#[macro_export]\nmacro_rules! ext { ($($t:tt)*) => { extern \"C\" { $($t)* } } }\n")], "");
+    let src = "mod ffi { mod rc; pub use self::rc::*; }\n\
+mod detail { #[cfg_attr(unix, path = \"a.rs\")] #[cfg_attr(windows, path = \"b.rs\")] mod asm; pub use self::asm::labs; }\n\
+pub mod user { pub fn glob_macro_zq() -> i32 { use crate::ffi; unsafe { ffi::my_abs_r1690(-3) } }\n\
+  pub fn arm_extern_zq() -> i64 { use crate::detail::labs; unsafe { labs(-4) } } }\n\
+fn main() { println!(\"{} {}\", user::glob_macro_zq(), user::arm_extern_zq()); }\n";
+    let ext = "extern \"C\" { pub fn labs(x: i64) -> i64; }\n";
+    let d = fixture(
+        "ffi",
+        "ffis2",
+        &[
+            ("main.rs", src),
+            ("ffi/rc.rs", "macdep::ext! { #[link_name = \"abs\"] pub fn my_abs_r1690(x: i32) -> i32; }\n"),
+            ("detail/a.rs", ext),
+            ("detail/b.rs", ext),
+        ],
+        &format!("macdep = {{ path = \"{}\" }}\n", mac.display()),
+    );
+    let (_, on) = scan(&d, None, false, None);
+    assert_eq!(inferred(&on, "user::arm_extern_zq"), ["Unknown"], "{on:#}");
+    assert_eq!(inferred(&on, "user::glob_macro_zq"), ["Unknown"], "{on:#}");
+    let w = row(&on, "user::glob_macro_zq").and_then(|r| r["unknownWhy"].as_array()).cloned().unwrap_or_default();
+    assert!(w.iter().any(|x| x.as_str() == Some("macro:module items hidden by an unexpanded macro")), "{on:#}");
+    let (_, off) = scan(&d, None, true, None);
+    assert!(row(&off, "user::glob_macro_zq").is_none(), "pre-stage-2: ABSENT over a foreign call {off:#}");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&mac);
+}

@@ -3531,6 +3531,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut by_reexport_refused: HashMap<String, &'static str> = HashMap::new();
     let by_reexport =
         reexport_aliases(&merged.reexports, &fns, &merged.macro_modules, &mut by_reexport_refused);
+    // SOUNDNESS R1690 (R1657 stage 2) — the modules that GLOB re-export (`pub use self::rc::*;`) a module whose items sit
+    // inside an unexpanded item-position macro, transitively. They can name ANY of those hidden items: objc2's
+    // `ffi::objc_autoreleaseReturnValue` is declared inside `extern_c_unwind! { .. }` in `ffi/rc.rs` and reached as
+    // `ffi::..` through `pub use self::rc::*`, so the call named no unit and its caller read PURE on every arm (published
+    // 0.41.3 included): `Retained::autorelease_return_option`, `retain`, `drop`. The stage-2 table EXPOSED it — a wrong-
+    // reason `ambiguous:` hedge on `define_class::Retained::autorelease_return` resolved to that pure-reading callee. Asked
+    // only by R128's macro-opacity hedge below (never by `reexport_aliases`). `CANDOR_R1657S2_OFF` empties it.
+    let r1690_glob_macro: HashSet<String> = {
+        let mut m: HashSet<String> = HashSet::new();
+        if !crate::lang::r1657s2_off() {
+            loop {
+                let before = m.len();
+                for e in merged.reexports.iter().filter(|e| e.name == "*") {
+                    if e.from.iter().any(|f| merged.macro_modules.contains(f) || m.contains(f)) {
+                        m.insert(e.module.clone());
+                    }
+                }
+                if m.len() == before {
+                    break;
+                }
+            }
+        }
+        m
+    };
 
     // Inverse of trait_impls (impl-TYPE leaf → the trait leaves it impls), for the trait-DEFAULT-method
     // caller fallback below: a call `t.m()` on a concrete type T that does NOT declare `m` but impls a
@@ -4380,6 +4404,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         resolve_target(alt, &c.leaf, c.method, &by_tail2, &by_leaf_call)
                             .or_else(|| reexport_target(alt, c.method, &by_tail2, &by_reexport))
                             .cloned()
+                            // SOUNDNESS R1657 stage 2 — an arm the re-export table names EXACTLY that is a foreign DECLARATION
+                            // unit (generator's `pub use self::asm::swap_registers` over nine `#[path]` arms, each an
+                            // `extern "C" { fn swap_registers(..) }`): declarations are kept out of `by_tail2`, so before the
+                            // table the call reached them only through `reexport_target`, and the first cut left it with no
+                            // edge and no `native:extern fn` (RegContext::swap, Unknown -> ABSENT). Exact qual only.
+                            .or_else(|| {
+                                let q = alt.strip_prefix("crate::")?;
+                                (!c.method && !crate::lang::r1657s2_off() && decl_quals.contains(q)).then(|| vec![q.to_string()])
+                            })
                             .or_else(|| {
                                 let t = crate::collector::arm_exact_target(alt, &by_tail2)?;
                                 // §E1 REACH COUNTER, on the CHANGED branch.
@@ -7645,7 +7678,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
                 && !by_leaf.get(&c.leaf).is_some_and(|v| v.iter().any(|q| q == rel))
                 && !local_types.contains(&c.leaf)
-                && macro_hidden_owner(&c.path, 1, &merged.macro_modules);
+                && (macro_hidden_owner(&c.path, 1, &merged.macro_modules) || {
+                    let hit = macro_hidden_owner(&c.path, 1, &r1690_glob_macro);
+                    if hit && candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+                        eprintln!("R1690GLOBMACRO\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER, ADDED branch only
+                    }
+                    hit
+                });
             if r128_fired {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 // KIND: `macro:` — SOUNDNESS R270, and the comment this replaces conceded the point
