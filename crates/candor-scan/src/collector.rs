@@ -9630,6 +9630,30 @@ impl<'a> CallCollector<'a> {
     /// Does local trait `tr` declare `leaf`, or INHERIT it from a (transitive, local) supertrait?
     /// (`trait Sub: Super` — a `Super` method is callable on a `Sub` receiver.) Bounded depth guards a
     /// cyclic/deep hierarchy; an external supertrait resolves to nothing (documented miss).
+    /// SOUNDNESS R1685 — `leaf` is a member of local trait `tr` that the trait's own item list does not show, because an
+    /// item-position MACRO declares it (time 0.3.53–0.3.55 `trait ComponentProvider { unimplemented_methods! { ..
+    /// ("time") period => Period; .. } }`), proven by a local `impl <tr> for <T>` block declaring it: rustc rejects an impl
+    /// method its trait lacks (E0407), so R598's `impl_members` entry is the evidence. Without it the PATH spelling
+    /// `ComponentProvider::period(time, &mut ())` — and `Tr::m(&t, ..)` over a TYPED `t` — reached no dispatch decision and
+    /// formed no edge and no hedge on every arm (EXECUTED fixture `f2`: `deny Fs` 0 over a file write). Asked by the PATH
+    /// routes only (`route_trait_member_path`, `dispatch_trait_member` with `assoc`). Kill switch `CANDOR_R1685_OFF`.
+    fn r1685_impl_declared(&self, tr: &str, leaf: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1685_OFF") {
+            return false;
+        }
+        let (pre, suf) = (format!("{tr}\u{1f}"), format!("\u{1f}{leaf}"));
+        let hit = self.impl_members.iter().any(|k| {
+            k.len() > pre.len() + suf.len()
+                && k.starts_with(&pre)
+                && k.ends_with(&suf)
+                && !k[pre.len()..k.len() - suf.len()].contains('\u{1f}')
+        });
+        if hit && candor_report::env::trace("CANDOR_R1685_INSTR") {
+            eprintln!("R1685MEMBER\t{tr}::{leaf}"); // §E1 REACH COUNTER
+        }
+        hit
+    }
+
     fn trait_declares_method(&self, tr: &str, leaf: &str, depth: usize) -> bool {
         if depth > 16 {
             return false;
@@ -10759,7 +10783,7 @@ impl<'a> CallCollector<'a> {
         // The leaf must be a method the trait declares OR INHERITS from a (local) SUPERTRAIT — a `Super`
         // method is callable on a `Sub`-bound/`dyn Sub` receiver (or passed as `Sub::base_method`), and
         // the sub's impls (which provide the super method) resolve it via `trait_impls[tr]` below.
-        if !(self.trait_declares_method(tr, leaf, 0) || (assoc && lt.assoc.contains(leaf))) {
+        if !(self.trait_declares_method(tr, leaf, 0) || (assoc && lt.assoc.contains(leaf)) || (assoc && self.r1685_impl_declared(tr, leaf))) {
             // SOUNDNESS R1347 (sea-query half, rustagent-0415) — …UNLESS a STD supertrait declares it. `pub trait
             // SqlWriter: Write + ..` (`std::fmt::Write`) and `fn prepare_column_type(.., sql: &mut impl SqlWriter) {
             // write!(sql, ..) }`: the member that runs is the IMPLEMENTOR's `fmt::Write::write_str`, and a `pub` trait's
@@ -11363,7 +11387,7 @@ impl<'a> CallCollector<'a> {
                 continue;
             }
             let Some(lt) = self.local_traits.get(&tr) else { continue };
-            let is_method = self.trait_declares_method(&tr, leaf, 0);
+            let is_method = self.trait_declares_method(&tr, leaf, 0) || self.r1685_impl_declared(&tr, leaf);
             let is_assoc = lt.assoc.contains(leaf);
             if !is_method && !is_assoc {
                 continue; // not this trait's member — a blanket/unrelated name, left as it was
