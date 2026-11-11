@@ -3133,6 +3133,46 @@ pub(crate) fn fninfo(
             }
         }
     }
+    // SOUNDNESS R1657 stage 1b — `self` typed by the impl's WRITTEN self type, qualified at its origin, where that is proven:
+    // a bare name this module declares (`lang::anchor_origin`, through `type_path`, with its cfg-only and generic-shadow
+    // refusals) or a path a `use`/written path roots at the crate (`use crate::a::H; impl Tr for H`). `self_ty` is the
+    // impl's unit KEY (the bare leaf), and typing the VALUE by it left every value derived from `self` — `let st = *self;`,
+    // `self.as_ref().get_ref()`, a closure capture — owned by a leaf that same-leaf twins share, so a field read through it
+    // was refused (R1652's rustls `client::tls13::ExpectFinished::handle`, tokio-sync `oneshot::Receiver::poll`). Only the
+    // VALUE moves: the unit key, `Self`, `self_leaf` and the drop/return readers keep `self_ty`. Untouched: a `self` an
+    // earlier rule retyped (R1169, R1641), a trait default body (`impl_self` None), a self type that is an impl type
+    // parameter, an alias, a cfg-arm `use` (`ALIAS_ALT_SEP`) or any written type whose leaf is not the unit key's
+    // (`impl Tr for Box<X>` keys `Box`). Kill switch `CANDOR_R1657B_OFF` (and `CANDOR_R1657_OFF`, which stops the anchor).
+    if !candor_report::env::switch("CANDOR_R1657B_OFF") {
+        if let (Some(k), Some(st)) = (self_ty, impl_self) {
+            let generic = impl_generics.is_some_and(|g| g.type_params().any(|t| t.ident == k))
+                || sig.generics.type_params().any(|t| t.ident == k);
+            // A self type whose written head a `#[cfg]`-duplicated `use` binds (`#[cfg(unix)] use crate::a::H;
+            // #[cfg(not(unix))] use crate::b::H; impl Tr for H`) is one arm per configuration, and `uses` holds whichever
+            // was written LAST: typing `self` by it read the non-unix arm's pure field on a unix build and the unit went
+            // ABSENT over a write (EXECUTED, lane fixture `g1`). Such a `self` keeps its bare leaf, whose field reads refuse
+            // and disclose as before (R369 unions a parameter's arms; a twin owner gets no union field read, so the bare
+            // leaf's refusal is the answer).
+            let multi_arm = match st {
+                syn::Type::Path(tp) if tp.qself.is_none() => tp
+                    .path
+                    .segments
+                    .first()
+                    .is_some_and(|h| use_alts.get(&h.ident.to_string()).is_some_and(|a| a.len() >= 2)),
+                _ => true,
+            };
+            if !generic && !multi_arm && !k.contains("::") && vars.get("self").map(String::as_str) == Some(k) {
+                if let Some(w) = crate::lang::type_path(st, sig_uses) {
+                    if crate::collector::exact_anchored_ty(&w).is_some() && w.rsplit("::").next() == Some(k) {
+                        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                            eprintln!("R1657SELF\t{qual}\t{w}"); // §E1 REACH COUNTER, on the ADDED branch only
+                        }
+                        vars.insert("self".to_string(), w);
+                    }
+                }
+            }
+        }
+    }
     // SOUNDNESS (v052 audit, `fxglob`) — a parameter typed by a name only a GLOB import can supply (`use cdep3::*;
     // fn g(t: &Tool) { t.run() }`) was typed by the bare `Tool`, which names no local type, so `t.run()` and `a % b`
     // formed no edge and no disclosure: ABSENT unchained (no `invisible`) and chained alike, while the explicit

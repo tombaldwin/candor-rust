@@ -5448,6 +5448,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // that names exactly one claimant — those become an EDGE here rather than the hedge
                     // below, which is the better answer for every one of them.
                     resolved_local = true;
+                    // SOUNDNESS R1657 stage 1b × R1537 (c) — a co-path claimant here is proved to one member by the same rule
+                    // `resolve_target`'s branch applies. Once `self` carries its origin-qualified type, a twin's `self.m()`
+                    // reaches this branch instead of being refused, and without the rule the trait member delegating to the
+                    // inherent one (`impl Ld for Font { fn name(&self) { self.name() } }`) edged the union, itself included.
+                    let t = match copath.get(t.as_str()).and_then(|cp| copath_member(cp, c, &f.qual)) {
+                        Some(m) if !candor_report::env::switch("CANDOR_R1657B_OFF") => m,
+                        _ => t,
+                    };
                     if t != &f.qual {
                         calls.entry(f.qual.clone()).or_default().insert(t.clone());
                     }

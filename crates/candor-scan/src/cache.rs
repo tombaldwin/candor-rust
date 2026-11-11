@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev172 (rustagent-stage1b): SOUNDNESS R1657 stage 1b — Pass B types `self` by the impl's origin-qualified self type
+    // (`crate::<mod>::<Name>`), so the cached `calls` of every `self.m()` / `self.f.m()` and the refused field picks change. A
+    // rev170/rev171 entry replays the bare-leaf `self` warm (rev171 is held by the R1673 lane). Mandatory.
     // rev170 (rustagent-r1537c): SOUNDNESS R1537 (c) — Pass B's cached `FnInfo` gains `impl_kind`/`impl_trait`/`impl_flags` (which
     // kind of impl block declared the unit) and `Call` gains `cside` (the co-path member a site proves). A rev169 entry carries
     // neither, so a warm scan would leave every inherent/trait pair merged (and a renamed member's callers unproven). Mandatory.
@@ -631,7 +634,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev170/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev172/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
