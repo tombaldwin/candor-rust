@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev169 (rustagent-stage1a): SOUNDNESS R1652/R1657 — a bare nominal type name a module declares is qualified at its
+    // origin (`lang::anchor_origin`: Pass A `fields`/`rets`, Pass B `vars`), and an ambiguous same-leaf field pick is refused
+    // and disclosed (cached `calls`, `unresolved_why`). A rev162 entry carries the bare leaves and replays the pick warm.
     // rev168 (rustagent-floors): SOUNDNESS R1665 — Pass B's cached `FnInfo::untyped_methods` gains `WRAP_PREFIX` entries (a method called on a
     // dependency wrapper field whose written argument is a crate-local type declaring it). A rev167 entry replays the silence warm. Mandatory.
     // rev167 (rustagent-floors): SOUNDNESS R1663 — Pass B's cached `FnInfo::untyped_methods` gains `HOP_GUESS_PREFIX` entries (a guessed chain
@@ -625,7 +628,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev168/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev169/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1629,7 +1632,25 @@ pub(crate) fn alias_expand_decls(
         }
         None
     };
+    // SOUNDNESS R1652/R1657 — a value qualified AT ITS ORIGIN in this very file (`crate::<modpath>::<Name>`, one segment
+    // past the module: `lang::anchor_origin`) names this module's own declaration, which no alias can redirect (E0255).
+    // Re-expanding it through a ROOT alias of the module's head (core2's `#[cfg(std)] pub use std::io as io;` beside its
+    // own `mod io`) sent `crate::io::buffered::BufWriter` to `std::io::buffered::BufWriter`: the field's edge vanished
+    // (EXECUTED, fixture `rootio`: `deny Fs lw_flush` 1 -> 0 on the first cut).
+    let own_prefix = if modpath.is_empty() { "crate::".to_string() } else { format!("crate::{modpath}::") };
+    // …but a name an ALIAS is declared under at exactly that path (`pub type Array = Vec<Json>;`, written `self::Array`)
+    // is an alias, not a nominal declaration, and its own re-expansion stands (rustc-serialize's `Json::Array(self::Array)`
+    // payload lost its `Vec` typing on the second cut, and `Json::encode` its edges).
+    let own_origin = |p: &str| {
+        !candor_report::env::switch("CANDOR_R1657_OFF")
+            && p.strip_prefix(&own_prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains("::") && !rest.contains(crate::decls::ALIAS_ALT_SEP))
+            && !uses.contains_key(p)
+            && !p.strip_prefix("crate::").is_some_and(|q| uses.contains_key(q))
+    };
     let re = |p: &str| -> Option<String> {
+        if own_origin(crate::lang::strip_wrapped(p)) {
+            return None;
+        }
         // R893 / R1023 — a LAYERED element keeps its layers through the re-expansion of its leaf.
         if crate::lang::is_wrapped(p) {
             return re_plain(crate::lang::strip_wrapped(p), false).map(|e| crate::lang::rewrap(p, &e));
@@ -1925,6 +1946,16 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
                     // (cfg arms of one polyfill); withdrawing the leaf cost R165's construct marker and the
                     // `OwnedFd::drop` edge in four rustix versions. Every reader of `rets` keys on the
                     // type's LEAF (`local_type_leaf`, `local_types`), so agreeing on it is agreeing.
+                    // SOUNDNESS R1652/R1657 — the same agreement, spelled as the BARE leaf (`decls::rets_leaf_join`): keeping
+                    // `prev` (the rule below) handed a reader that proves an owner from an anchored path the FIRST file's twin.
+                    Some(Some(prev))
+                        if crate::model::split_amb_ret_key(leaf).is_none()
+                            && !candor_report::env::switch("CANDOR_R1657_OFF")
+                            && crate::decls::rets_leaf_join(prev, tp).is_some() =>
+                    {
+                        let j = crate::decls::rets_leaf_join(prev, tp);
+                        dst.insert(leaf.clone(), j);
+                    }
                     Some(Some(prev))
                         if prev != tp
                             && record_amb
@@ -2111,6 +2142,14 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
                 acc.static_types.insert(k.clone(), v.clone());
             }
             Some(prev) if prev == v => {}
+            // SOUNDNESS R1652/R1657 — the same leaf join as the within-file rule (`decls::rets_leaf_join`).
+            Some(Some(prev))
+                if !candor_report::env::switch("CANDOR_R1657_OFF")
+                    && v.as_deref().is_some_and(|t| crate::decls::rets_leaf_join(prev, t).is_some()) =>
+            {
+                let j = v.as_deref().and_then(|t| crate::decls::rets_leaf_join(prev, t));
+                acc.static_types.insert(k.clone(), j);
+            }
             Some(_) => {
                 acc.static_types.insert(k.clone(), None);
             }

@@ -670,6 +670,13 @@ pub(crate) fn withdrawn_retgen_key(type_leaf: &str, fn_leaf: &str) -> String {
     format!("<implretgenw>{type_leaf}\u{1f}{fn_leaf}")
 }
 
+/// SOUNDNESS R1660 — a MARKER filed (by `scan.rs`) for every `impl_ret_key` the decl index WITHDREW because same-leaf twins
+/// declare different returns, so the chain walk can tell "this step's declared return is unknown" from "this step declares
+/// nothing". Value `"1"`; no fact reads it as data.
+pub(crate) fn withdrawn_impl_ret_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("<implretw>{type_leaf}\u{1f}{fn_leaf}")
+}
+
 /// SOUNDNESS R1648 — `impl_retgen_key`'s position counted over the impl's written TYPE arguments only (lifetimes and
 /// consts skipped), the positions `decls::IMPL_TARGS_KEY` and `model::type_params_key` use. Read against `self`'s written
 /// arguments in ANOTHER impl of the same type, which may write or elide its lifetimes differently.

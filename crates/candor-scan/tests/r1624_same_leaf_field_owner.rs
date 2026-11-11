@@ -34,6 +34,11 @@ fn fixture(tag: &str, deps: &str, lock: Option<&str>, files: &[(&str, &str)]) ->
 }
 
 fn scan(dir: &Path, policy: Option<&str>, off: bool) -> (i32, serde_json::Value) {
+    scan_sw(dir, policy, off, false)
+}
+
+/// `scan`, with SOUNDNESS R1657's switch too (`CANDOR_R1657_OFF` restores the ambiguous-leaf pick R1657 retired).
+fn scan_sw(dir: &Path, policy: Option<&str>, off: bool, off1657: bool) -> (i32, serde_json::Value) {
     let mut cmd = Command::new(bin());
     cmd.arg(dir.to_string_lossy().as_ref()).arg("--json");
     if let Some(p) = policy {
@@ -41,15 +46,18 @@ fn scan(dir: &Path, policy: Option<&str>, off: bool) -> (i32, serde_json::Value)
         std::fs::write(&pf, p).unwrap();
         cmd.arg("--policy").arg(&pf);
     }
-    cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env_remove("CANDOR_R1624_OFF");
+    cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env_remove("CANDOR_R1624_OFF").env_remove("CANDOR_R1657_OFF");
     if off {
         cmd.env("CANDOR_R1624_OFF", "1");
+    }
+    if off1657 {
+        cmd.env("CANDOR_R1657_OFF", "1");
     }
     let out = cmd.output().expect("run candor-scan");
     let code = out.status.code().unwrap_or(-1);
     // SPEC ⟨0.42⟩ §3.3 (e): a POLICY run under a set result-moving switch REFUSES (exit 2) after writing its report, so the
     // switched arm of a gate is the one place exit 2 is the answer. A scan with no policy asks nothing and is not refused.
-    let refused_by_switch = off && policy.is_some() && code == 2;
+    let refused_by_switch = (off || off1657) && policy.is_some() && code == 2;
     assert!(code == 0 || code == 1 || refused_by_switch, "scan failed ({code}): {}", String::from_utf8_lossy(&out.stderr));
     (code, serde_json::from_slice(&out.stdout).expect("report json"))
 }
@@ -230,8 +238,13 @@ fn r1624_gate_flips_on_the_executed_write_and_the_kill_switch_restores_the_silen
     // …and the fabrication: the pure twin was charged its sibling's Env.
     let (on, _) = scan(&d, Some("deny Env e::K::e_self_zq\n"), false);
     assert_eq!(on, 0, "e_self: deny Env with the fix");
+    // SOUNDNESS R1657 — with R1624's owner proof off, the owner is UNPROVEN, and R1657 retired the leaf pick an unproven owner
+    // used to take: the fabrication does not come back, the refusal is disclosed instead. Both switches restore the pick.
     let (_, rep_off) = scan(&d, None, true);
-    assert!(inferred(&rep_off, "e::K::e_self_zq").contains(&"Env".to_string()), "e_self: CANDOR_R1624_OFF restores the sibling's Env");
+    assert!(!inferred(&rep_off, "e::K::e_self_zq").contains(&"Env".to_string()), "e_self: R1624_OFF alone no longer picks the sibling");
+    assert!(inferred(&rep_off, "e::K::e_self_zq").contains(&"Unknown".to_string()), "e_self: the refused pick is disclosed {rep_off:#}");
+    let (_, rep_both) = scan_sw(&d, None, true, true);
+    assert!(inferred(&rep_both, "e::K::e_self_zq").contains(&"Env".to_string()), "e_self: both switches restore the sibling's Env");
     let (refused, _) = scan(&d, Some("deny Env e::K::e_self_zq\n"), true);
     assert_eq!(refused, 2, "e_self: the switched gate refuses");
     let _ = std::fs::remove_dir_all(&d);

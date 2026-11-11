@@ -858,6 +858,39 @@ pub(crate) fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
 thread_local! {
     /// R1608 — set while `r1608_stopped` asks for the root reading the walk would replace.
     static R1608_SUPPRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// SOUNDNESS R1652/R1657 — the field-type questions this body's receiver typers REFUSED (an ambiguous same-leaf
+    /// owner whose path is not proven), as their `ambiguous:` reasons. `decls::fninfo` drains it into the body's
+    /// `unresolved_why` after the walk (`r1657_take`), so the refusal ends in a disclosure, never a dropped edge.
+    static R1657_REFUSED: std::cell::RefCell<std::collections::BTreeSet<String>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+/// SOUNDNESS R1667 — the ENUM part of a single-payload tuple-variant pattern's written path (`syn::Data` in
+/// `syn::Data::Struct(v)`), or `None` for a one-segment path or another pattern shape.
+fn tuple_variant_path(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Reference(r) => tuple_variant_path(&r.pat),
+        syn::Pat::Paren(p) => tuple_variant_path(&p.pat),
+        syn::Pat::TupleStruct(ts) if ts.qself.is_none() && ts.elems.len() == 1 && ts.path.segments.len() >= 2 => {
+            let n = ts.path.segments.len();
+            let mut out = String::new();
+            for (i, seg) in ts.path.segments.iter().enumerate() {
+                if i + 1 == n {
+                    break;
+                }
+                if i > 0 {
+                    out.push_str("::");
+                }
+                out.push_str(&seg.ident.to_string());
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1652/R1657 — take (and clear) the refusals recorded since the last call (see `R1657_REFUSED`).
+pub(crate) fn r1657_take() -> std::collections::BTreeSet<String> {
+    R1657_REFUSED.with(|r| std::mem::take(&mut *r.borrow_mut()))
 }
 
 /// The methods that return a DIFFERENT type from their receiver, so a chain must NOT be walked through
@@ -1446,9 +1479,16 @@ impl<'a> CallCollector<'a> {
         // `Backend::new().go()` charged the inactive arm (executed: `['Env']` over a body that writes,
         // `deny Fs` 0). The parameter route has unioned the arms since R369; this is the same rule.
         let head = ctor_written_head(expr);
-        let res = match head {
-            Some(h) => self.union_over_arms(&h, ty, |u| ctor_type(expr, u, self.returns)),
+        let res = match &head {
+            Some(h) => self.union_over_arms(h, ty, |u| ctor_type(expr, u, self.returns)),
             None => ty,
+        };
+        // SOUNDNESS R1652/R1657 — a construction WRITTEN with a bare name this module declares (`Holder { .. }`,
+        // `Holder::new()`, `Holder(..)`) is of that declaration: qualified at its origin, as a written type is in
+        // `lang::type_path_b`. Only where the answer IS the written head; an answer read from another fact keeps its spelling.
+        let res = match (head.as_deref() == Some(res.as_str())).then(|| crate::lang::anchor_origin(&res, &self.uses)).flatten() {
+            Some(q) => q,
+            None => res,
         };
         // SOUNDNESS R1608 — the root reading above survived every refusal; a local chain replaces it with what its steps
         // declare. Asked LAST, so every refusal above (a const-shadowed caps leaf, a generic turbofish, …) still answers
@@ -3271,6 +3311,18 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1660 — `init` is a method call whose receiver types to `T` and `T`'s own `m` has a WITHDRAWN declared
+    /// return (`model::withdrawn_impl_ret_key`). Off with `CANDOR_R1660_OFF`.
+    fn r1660_withdrawn_step(&self, init: &syn::Expr) -> bool {
+        if candor_report::env::switch("CANDOR_R1660_OFF") {
+            return false;
+        }
+        let syn::Expr::MethodCall(m) = peel_recv(init) else { return false };
+        let Some(t) = self.resolve_recv_type(&m.receiver) else { return false };
+        let leaf = t.rsplit("::").next().unwrap_or(&t);
+        self.returns.contains_key(&crate::model::withdrawn_impl_ret_key(leaf, &m.method.to_string()))
+    }
+
     fn note_untyped_method(&mut self, node: &syn::ExprMethodCall, leaf: &str,
         start: (usize, usize, bool, usize, usize)) {
         let (c0, w0, u0, d0, f0) = start;
@@ -4773,6 +4825,9 @@ impl<'a> CallCollector<'a> {
                     return None; // R862 — a dependency's field is not this crate's leaf-keyed `fields`
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                if self.r1667_foreign_field(&f.base, &base, &key) {
+                    return None;
+                }
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
             syn::Expr::Call(_) if pinned_arg(expr).is_some() => self.type_of(pinned_arg(expr)?), // R980
@@ -5232,6 +5287,61 @@ impl<'a> CallCollector<'a> {
                 None
             }
         }
+    }
+
+    /// SOUNDNESS R1667 — the leaf-keyed field entry is ANOTHER twin's: the owner's path is proven (`owner_qual`), its own
+    /// declaration has no indexed entry for `key` (a `#[cfg]`-gated field is not indexed), and a same-leaf twin's is. The
+    /// field is then not "ambiguous" (only one twin's value is on record), so the R1624 / R1657 rules never ran and the
+    /// unique-leaf fallback answered with the twin's type: regex-automata's `dfa::regex::Builder { #[cfg(feature =
+    /// "dfa-build")] dfa: dense::Builder }` typed `self.dfa` as `hybrid::regex::Builder`'s `hybrid::dfa::Builder`, formed
+    /// `hybrid::dfa::Builder::configure` on every arm and never `dfa::dense::Builder::configure` (EXECUTED, lane fixture
+    /// `r1667`: the dense arm writes, the caller was ABSENT; the swapped fixture charged the pure caller). Refused and
+    /// disclosed, never re-picked. Kill switch `CANDOR_R1667_OFF`.
+    fn r1667_foreign_field(&self, base_expr: &syn::Expr, base: &str, key: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1667_OFF") || candor_report::env::switch("CANDOR_R1657_OFF") {
+            return false;
+        }
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        if !self.assign_drop.twin_leaves.is_some_and(|t| t.contains(leaf)) {
+            return false;
+        }
+        let Some((qi, q)) = self.owner_qual(base_expr, base) else { return false };
+        if qi.fields.get(&q).is_some_and(|m| m.contains_key(key)) || !self.fields.get(leaf).is_some_and(|m| m.contains_key(key)) {
+            return false;
+        }
+        // The owner declares it as a trait-object field (`qual_trait_field_in` answers its dispatch): the twin's concrete
+        // entry is still not its type, but nothing is unknown here, so nothing is disclosed.
+        if qi.trait_fields.get(&q).is_some_and(|m| m.contains_key(key)) {
+            return true;
+        }
+        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+            eprintln!("R1667FOREIGN\t{q}\t{key}"); // §E1 REACH
+        }
+        let why = format!("ambiguous:same-name types `{leaf}` declare field `{key}` differently").replace('.', "_");
+        R1657_REFUSED.with(|r| {
+            r.borrow_mut().insert(why);
+        });
+        true
+    }
+
+    /// SOUNDNESS R1652/R1657 — record a refused ambiguous-leaf field pick as an `ambiguous:` reason for this body.
+    fn r1657_refuse(&self, base: &str, key: &str, elem: bool) {
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+            eprintln!("R1657REFUSE\t{}\t{base}\t{key}\t{}", if elem { "elem" } else { "field" }, self.modpath); // §E1 REACH
+        }
+        let why = format!("ambiguous:same-name types `{leaf}` declare field `{key}` differently").replace('.', "_");
+        R1657_REFUSED.with(|r| {
+            r.borrow_mut().insert(why);
+        });
+    }
+
+    /// SOUNDNESS R1652/R1657 — whether the same-leaf twins' `field_elem` entries for `leaf.key` DIFFER (scan.rs files the
+    /// `\u{1c}elem` marker: differing values, or one twin with an entry and another without). Twins in ONE file (`leaf.*`)
+    /// are not compared there, so they read as differing.
+    fn r1657_elem_disagrees(&self, leaf: &str, key: &str) -> bool {
+        self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}{key}\u{1c}elem"))
+            || self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}*"))
     }
 
     fn field_ambiguous(&self, base: &str, member: &syn::Member) -> bool {
@@ -5849,6 +5959,17 @@ impl<'a> CallCollector<'a> {
                         let kind = if is_self { "self" } else if base.starts_with("crate::") { "anchored" } else { "other" };
                         eprintln!("R1624PICK\t{kind}\t{base}\t{}", self.modpath); // §E1 — the residual leaf pick
                     }
+                    // SOUNDNESS R1652/R1657 — THE AMBIGUOUS-LEAF PICK IS RETIRED. Same-leaf twins declare this field with
+                    // types of different leaves, and the owner's own path is not proven (`owner_qual`), so the leaf-keyed
+                    // entry is whichever twin merged LAST: executed, it typed `h.inner` as the other module's field and the
+                    // caller read ABSENT over a write (`deny Fs` 0) or charged a pure caller (1). Refused, as `type_of`
+                    // already refuses, and the refusal is disclosed (`r1657_refuse`). A UNIQUE leaf keeps its entry below.
+                    // A PROVEN owner whose own declaration does not answer here (`qual_field_in` None: a tombstoned or
+                    // trait-object field) keeps R1624's reading; only an unproven owner is refused.
+                    if self.owner_qual(&f.base, &base).is_none() && !candor_report::env::switch("CANDOR_R1657_OFF") {
+                        self.r1657_refuse(&base, &key, false);
+                        return None;
+                    }
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 // SOUNDNESS R897 — the `fields` entry of an UNBOUNDED generic field is the struct
@@ -5860,6 +5981,9 @@ impl<'a> CallCollector<'a> {
                 }
                 if let Some(Some(t)) = r1624 {
                     return Some(t);
+                }
+                if self.r1667_foreign_field(&f.base, &base, &key) {
+                    return None;
                 }
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
@@ -6356,6 +6480,26 @@ impl<'a> CallCollector<'a> {
                     return Some(l);
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                // SOUNDNESS R1652/R1657 — the element half of the retired ambiguous-leaf pick (see the receiver arm). Only
+                // where the twins disagree on THIS index's entry: `field_ambiguous` is keyed per field, not per index, so
+                // a field whose element agrees across twins keeps its entry.
+                if self.field_ambiguous(&base, &f.member)
+                    && self.r1657_elem_disagrees(base_leaf, &key)
+                    && !candor_report::env::switch("CANDOR_R1657_OFF")
+                {
+                    match self.owner_qual(&f.base, &base) {
+                        // A proven owner that DECLARES this field and filed no element for it: it has none.
+                        Some((qi, q)) if qi.fields.get(&q).is_some_and(|m| m.contains_key(&key)) && !qi.field_elem.get(&q).is_some_and(|m| m.contains_key(&key)) => return None,
+                        Some(_) => {}
+                        None => {
+                            self.r1657_refuse(&base, &key, true);
+                            return None;
+                        }
+                    }
+                }
+                if self.r1667_foreign_field(&f.base, &base, &key) {
+                    return None;
+                }
                 self.field_elem.get(base_leaf)?.get(&key).cloned()
             }
             // An element-PRESERVING iterator adapter (`xs.iter()`, `xs.into_iter()`, `&xs.iter_mut()`,
@@ -10030,6 +10174,16 @@ impl<'a> CallCollector<'a> {
         if self.returns.get(&crate::model::type_params_key(owner_leaf)).is_some_and(|ps| ps.split(',').any(|p| p == arg)) {
             return None;
         }
+        // SOUNDNESS R1652/R1657 — …and by the owner's OWN parameter list where its path is proven: `owner_field_args` reads
+        // the proven owner's qualified arguments, so the parameter test must not fall back to the leaf-keyed fact, which a
+        // same-leaf twin in another file WITHDRAWS. Measured: regex-automata's `Lazy::get(this) { this.0.get() }` (`Lazy<T,
+        // F>(lazy::Lazy<T, F>)`, beside `hybrid::dfa::Lazy<'i, 'c>`) read the argument `T` as a type, formed `T::get` and
+        // went pure over an `Unknown`-only callee once origin qualification proved `this`'s owner.
+        if !candor_report::env::switch("CANDOR_R1657_OFF")
+            && self.owner_qual(&fe.base, &owner).is_some_and(|(qi, q)| qi.params.get(&q).is_some_and(|ps| ps.iter().any(|p| p == arg)))
+        {
+            return None;
+        }
         if candor_report::env::trace("CANDOR_R1630_INSTR") {
             // The owner's module-qualified path where R1624 proves it (else its leaf), so an independent checker can find
             // the declaration the argument was read from.
@@ -11585,6 +11739,43 @@ impl<'a> CallCollector<'a> {
     }
     fn enum_variant_binding(&mut self, pat: &syn::Pat) -> Option<(String, Vec<String>, Option<String>)> {
         let (name, leaf) = tuple_variant_binding(pat)?;
+        // SOUNDNESS R1667 — a pattern that WRITES a dependency's enum (`syn::Data::Struct(ref v)`) is not a variant of this
+        // crate's same-leaf enum (`ast::data::Data::Struct(Fields<..>)`): the `Enum\u{1e}Variant` and bare-variant indexes are
+        // keyed by LEAF and name only local enums. darling_core's `impl UsesTypeParams for syn::Data` typed `v` as darling's
+        // own `ast::data::Fields`, formed `Fields::uses_type_params` (rustc's MIR calls `<DataStruct as
+        // UsesTypeParams>::uses_type_params`) and read pure once origin qualification resolved that wrong edge. Left
+        // untyped, exactly as a dependency payload is.
+        if !candor_report::env::switch("CANDOR_R1667_OFF") && !candor_report::env::switch("CANDOR_R1657_OFF") {
+            // Only a WRITTEN qualified enum path (`syn::Data`): a one-segment one (`TokenTree::Group(g)` after `use
+            // proc_macro2::TokenTree`) keeps the dependency typing the routes below give it (syn's `tt.rs`, measured: dropping
+            // it removed 100+ `invisible: [proc_macro2]` rows).
+            if let Some(written) = tuple_variant_path(pat).filter(|w| w.contains("::")) {
+                let full = self.expand_scoped(&written);
+                if !full.starts_with("crate::") && self.is_dependency_type(&full) {
+                    if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                        eprintln!("R1667DEPENUM\t{full}\t{leaf}"); // §E1 REACH
+                    }
+                    return Some((name, Vec::new(), None));
+                }
+            }
+            // SOUNDNESS R1667 (third spelling) — the ONE-segment form, `use dep::Data; Data::Struct(v)`, beside a crate-local
+            // `enum Data { Struct(..) }` in another module: the `Enum\u{1e}Variant` index is keyed by the written LEAF, so the
+            // local enum's payload typed `v` on every arm. EXECUTED (lane fixtures `depenum1a`/`depenum1b`): charged the local
+            // `Fields::uses`' `Fs` over a pure dependency impl, and ABSENT over an effectful one. Left untyped ONLY where that
+            // local key exists and the written name resolves to a dependency, so a dependency enum no local enum shadows
+            // (syn's `TokenTree::Group(g)`) keeps the typing the routes below give it.
+            if let Some(en) = tuple_variant_path(pat).filter(|w| !w.contains("::")) {
+                if self.enum_variants.contains_key(&format!("{en}\u{1e}{leaf}")) {
+                    let full = self.expand_scoped(&en);
+                    if !full.starts_with("crate::") && full.contains("::") && self.is_dependency_type(&full) {
+                        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                            eprintln!("R1667DEPENUM1\t{full}\t{leaf}"); // §E1 REACH
+                        }
+                        return Some((name, Vec::new(), None));
+                    }
+                }
+            }
+        }
         let leaves = self.enum_variant_traits.get(&leaf).cloned().unwrap_or_default();
         // VEIN A — a pattern that NAMES its enum is typed by that enum's own variant first (see the
         // `Enum\u{1e}Variant` key in `decls::collect_decls`); the leaf key is the fallback, unchanged.
@@ -13539,8 +13730,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if !candor_report::env::switch("CANDOR_R1663_OFF") && !crate::std_methods::is_std_method_name(&leaf) {
                     if let Some((steps, base)) = &strict {
                         let bl = base.rsplit("::").next().unwrap_or(base);
+                        // SOUNDNESS R1660 — …or the step's declared return was WITHDRAWN (same-leaf twins declare different returns:
+                        // lettre's `conn.unpark().abort()`, sync `-> SmtpConnection` beside async `-> AsyncSmtpConnection`). The walk's
+                        // receiver-type assumption is then no more backed than for a declared other type, and the typed tail
+                        // (`ParkedConnection::abort`) names no unit. Reached once R1657 typed `conn` to its own module's twin: the
+                        // `ambiguous:` hedge that covered the whole site before was the only disclosure. EXECUTED (lane fixture
+                        // `reexret`). Kill switch `CANDOR_R1660_OFF`.
+                        let r1660 = !candor_report::env::switch("CANDOR_R1660_OFF");
                         let moved = steps.iter().find(|st| {
                             self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| r != base && r.rsplit("::").next() != Some(bl))
+                                || (r1660 && self.returns.contains_key(&crate::model::withdrawn_impl_ret_key(bl, st)))
                         });
                         if *base == ty && moved.is_some() {
                             if candor_report::env::trace("CANDOR_R1663_INSTR") {
@@ -16132,6 +16331,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     self.std_made_vars.insert(id.ident.to_string());
                                 }
                                 self.vars.insert(id.ident.to_string(), "String".to_string());
+                            } else if self.with_pre_bindings(&pre_bindings, |s| s.r1660_withdrawn_step(&init.expr)) {
+                                // SOUNDNESS R1660 — the bound spelling: `let mut conn = conn.unpark(); conn.abort();` (lettre's
+                                // `impl Drop for Pool`). The init does not type because `unpark`'s declared return is WITHDRAWN
+                                // (same-leaf twins disagree), and a binding left in place from before this statement — here the
+                                // loop variable's `ParkedConnection` — then typed `conn.abort()` to a method that type does not
+                                // have: no unit, no disclosure. Cleared, so the call is an untyped receiver the R1095 judge
+                                // answers. Only on that withdrawn-return evidence: an init that is merely unanswerable keeps
+                                // today's behaviour (the R536 measurement below is why a blanket clear is wrong).
+                                self.vars.remove(&id.ident.to_string());
                             }
                         }
                         }

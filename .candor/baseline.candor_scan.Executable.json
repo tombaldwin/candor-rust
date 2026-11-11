@@ -4814,11 +4814,13 @@
       "fn": "collector::CallCollector::<'a>::enum_variant_binding",
       "loc": "crates/candor-scan/src/collector.rs:10841:5: 10841:104",
       "inferred": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "declared": [],
       "undeclared": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "overdeclared": [],
       "hash": "7f07d505992c79d6c35711feca64ea89",
@@ -4834,11 +4836,13 @@
       "fn": "collector::CallCollector::<'a>::enum_variant_binding_s",
       "loc": "crates/candor-scan/src/collector.rs:10811:5: 10811:133",
       "inferred": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "declared": [],
       "undeclared": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "overdeclared": [],
       "hash": "7f07d505992c79d6a215d3f09e1aeff5",

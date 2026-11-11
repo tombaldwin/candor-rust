@@ -2027,6 +2027,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if let Some(rest) = k.strip_prefix("<implretgen>") {
                 returns.insert(format!("<implretgenw>{rest}"), "1".to_string());
             }
+            // SOUNDNESS R1660 — and a withdrawn impl-qualified RETURN (`<implret>`), read by R1663's guessed-hop floor.
+            if let Some(rest) = k.strip_prefix(crate::model::RET_IMPL) {
+                if let Some((tl, fl)) = rest.split_once('\u{1f}') {
+                    returns.insert(crate::model::withdrawn_impl_ret_key(tl, fl), "1".to_string());
+                }
+            }
         }
     }
     // SOUNDNESS R1025 (its receiver half) — an `impl` written ON a type alias (`impl LcPtr<EVP_PKEY> { fn
@@ -2541,6 +2547,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let vals: BTreeSet<&str> = vs.iter().map(|x| x.split('\u{1f}').nth(1).unwrap_or("")).collect();
                 if files.len() >= 2 && vals.len() >= 2 {
                     out.insert(format!("{leaf}\u{1f}{k}"));
+                    // SOUNDNESS R1652/R1657 — whether the twins disagree on this field's ELEMENT entry specifically
+                    // (`CallCollector::r1657_elem_disagrees`): differing values, or one twin with an entry and one without.
+                    {
+                        let with: Vec<&str> = fis.iter().filter_map(|&fi| fd_of(fi).field_elem.get(leaf.as_str()).and_then(|m| m.get(k)).map(String::as_str)).collect();
+                        let declaring = fis.iter().filter(|&&fi| {
+                            let fd = fd_of(fi);
+                            fd.fields.get(leaf.as_str()).is_some_and(|m| m.contains_key(k))
+                                || fd.field_elem.get(leaf.as_str()).is_some_and(|m| m.contains_key(k))
+                        }).count();
+                        let distinct: BTreeSet<&str> = with.iter().copied().collect();
+                        if distinct.len() >= 2 || (!with.is_empty() && with.len() < declaring) {
+                            out.insert(format!("{leaf}\u{1f}{k}\u{1c}elem"));
+                        }
+                    }
                     twin_field_tys.extend(vals.iter().map(|v| v.to_string()));
                     // VEIN A — when every twin's type for this field is CRATE-ANCHORED and shares one LEAF
                     // (`crate::deflate::window::Window` / `crate::inflate::window::Window`), record that
