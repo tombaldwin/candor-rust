@@ -157,3 +157,30 @@ fn r1682_the_kill_switches_restore_the_last_written_arm_reading() {
         assert!(silent.contains(&&f), "with the switches set `{f}` reads the old (silent) answer; silent set: {silent:?}");
     }
 }
+
+/// R1682's first cut, caught by its own corpus A/B (mio 0.6.23 `net::tcp::TcpListener::accept_std`, `Unknown` on 81f7200d,
+/// ABSENT on the first cut over `sys::unix::tcp::TcpListener::accept`'s `Net`): an ITEM arm set (`#[cfg(unix)] pub use
+/// self::unix::Lis;`) whose definition sits one module deeper (`unix/mod.rs`: `pub use self::tcp::Lis;`). The arm names
+/// `sys::unix::Lis::accept`, no unit has that qual and the tail is many-way, so the arm branch formed no edge and — because it
+/// `continue`s — left no trace. The claimants under the arm's own module are its definitions. EXECUTED (lane scratch
+/// `rustagent-r1682/f5`: the unix `accept` wrote its file).
+#[test]
+fn r1682_an_item_arm_defined_below_its_re_exporting_module_reaches_the_definition() {
+    let lis = |body: &str| format!("pub struct Lis;\nimpl Lis {{ pub fn accept(&self) {{ {body} }} }}\n");
+    let files: Vec<(&str, String)> = vec![
+        ("lib.rs", "mod sys;\npub struct Listener { sys: sys::Lis }\nimpl Listener { pub fn r1682_accept_std(&self) { self.sys.accept() } }\n".to_string()),
+        ("sys/mod.rs", "#[cfg(unix)] pub use self::unix::Lis;\n#[cfg(windows)] pub use self::windows::Lis;\n#[cfg(unix)] pub mod unix;\n#[cfg(windows)] pub mod windows;\n".to_string()),
+        ("sys/unix/mod.rs", "mod tcp;\npub use self::tcp::Lis;\n".to_string()),
+        ("sys/unix/tcp.rs", lis("std::fs::write(std::env::temp_dir().join(\"r1682\"), b\"x\").unwrap();")),
+        ("sys/windows/mod.rs", "mod tcp;\npub use self::tcp::Lis;\n".to_string()),
+        ("sys/windows/tcp.rs", lis("")),
+    ];
+    let d = fixture("deep", &files);
+    let (_, v) = scan(&d, None, &[]);
+    assert!(inferred(&v, "Listener::r1682_accept_std").contains(&"Fs".to_string()), "{:?}", inferred(&v, "Listener::r1682_accept_std"));
+    let (code, _) = scan(&d, Some("deny Fs Listener::r1682_accept_std\n"), &[]);
+    assert_eq!(code, 1);
+    // With the switch the pre-R1682 reading returns: the ordinary route's disclosure, never silence.
+    let (_, off) = scan(&d, None, &["CANDOR_R1682_OFF"]);
+    assert_eq!(inferred(&off, "Listener::r1682_accept_std"), vec!["Unknown".to_string()]);
+}

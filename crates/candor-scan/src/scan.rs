@@ -4313,6 +4313,50 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 }
                                 Some(vec![t.clone()])
                             });
+                    // SOUNDNESS R1682 — a LOCAL arm none of the three routes placed. R1682 makes a `#[cfg]` arm set reach
+                    // other modules, and its arms name the item where the arm's `use` names it — `sys::unix::TcpListener`
+                    // for mio's `#[cfg(unix)] pub use self::unix::{TcpListener, ..}` — while the definition sits one module
+                    // deeper (`sys::unix::tcp::TcpListener`, re-exported by `unix/mod.rs`). The tail is many-way, the exact
+                    // qual names no unit, and this branch `continue`s: the call had NO trace, where before R1682 it reached
+                    // the ordinary route's `ambiguous:same-name local methods` (measured, mio 0.6.23
+                    // `TcpListener::accept_std`: `Unknown` on 81f7200d, `[]` on the first cut over `sys::unix`'s `accept`).
+                    // So (1) the claimants of the tail that live UNDER the arm's own module are its definitions — the
+                    // module re-exports them — and are edged, all of them (the union); (2) a local arm with claimants and
+                    // none under its module is disclosed exactly as the ordinary route discloses it. An arm whose tail has
+                    // no claimant at all names nothing local and adds nothing, as before.
+                    let targets = targets.or_else(|| {
+                        if crate::lang::r1682_off() {
+                            return None;
+                        }
+                        let t2 = tail2(alt)?;
+                        let cl = by_tail2.get(&t2)?;
+                        let local = alt.strip_prefix("crate::").unwrap_or(alt);
+                        let n = local.split("::").count();
+                        if n < 3 {
+                            return None;
+                        }
+                        let module = local.split("::").take(n - 2).collect::<Vec<_>>().join("::");
+                        let under: Vec<String> =
+                            cl.iter().filter(|q| q.starts_with(&format!("{module}::")) && *q != &f.qual).cloned().collect();
+                        if under.is_empty() {
+                            let head = local.split("::").next().unwrap_or("");
+                            let local_head = !deps.contains(head)
+                                && !deps_idx.crates.contains(dep_renames.get(head).map(String::as_str).unwrap_or(head))
+                                && !matches!(head, "std" | "core" | "alloc");
+                            if local_head && cl.iter().any(|q| q != &f.qual) {
+                                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local methods".to_string());
+                                if candor_report::env::trace("CANDOR_R1682_INSTR") {
+                                    eprintln!("R1682ARMHEDGE\t{}\t{alt}", f.qual); // §E1 REACH COUNTER
+                                }
+                            }
+                            return None;
+                        }
+                        if candor_report::env::trace("CANDOR_R1682_INSTR") {
+                            eprintln!("R1682ARMSUB\t{}\t{alt}\t{}", f.qual, under.join("|")); // §E1 REACH COUNTER
+                        }
+                        Some(under)
+                    });
                     if let Some(targets) = targets {
                         for t in &targets {
                             if t != &f.qual {
