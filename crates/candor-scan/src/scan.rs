@@ -9441,7 +9441,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // a duplicate (§4 ⟨0.40⟩ union clause, rule 1).
                     let don_adds = entries.iter().find(|e| e.hash == hash)
                         .is_some_and(|real| don_u.iter().any(|k| !real.dispatches_on.contains(k)));
-                    if !eff_adds && !blind_adds && !don_adds {
+                    // SOUNDNESS R1666 — …and every REASON CLASS. `Unknown` on the real row covers any EFFECT, but not a class
+                    // gate: a union that carries `Unknown[unresolved]` beside a real row whose own reasons are all
+                    // `dispatch` was suppressed as a duplicate, so `deny Unknown[unresolved]` went 1 -> 0 on the unit the day
+                    // the real row gained an `Unknown` of its own (EXECUTED on object-0.24.0 `Object::symbol_map`, whose union
+                    // row carries a `macro:` reason the R1666 floor's new `dispatch` reasons do not). Exact set arithmetic on
+                    // the published `unknownWhy` fields. Kill switch `CANDOR_R1666B_OFF`.
+                    let class_adds = !candor_report::env::switch("CANDOR_R1666B_OFF")
+                        && inf_u.contains("Unknown")
+                        && entries.iter().find(|e| e.hash == hash).is_some_and(|real| {
+                            let real_cls: BTreeSet<&str> =
+                                real.unknown_why.iter().map(|w| candor_classify::policy::ReasonClass::classify(w).token()).collect();
+                            why_u.iter().any(|w| !real_cls.contains(candor_classify::policy::ReasonClass::classify(w).token()))
+                        });
+                    if class_adds && !eff_adds && !blind_adds && !don_adds && candor_report::env::trace("CANDOR_R1666B_INSTR") {
+                        eprintln!("R1666BCLASS\t{hash}"); // §E1 REACH COUNTER: a union row emitted ONLY for its reason classes
+                    }
+                    if !eff_adds && !blind_adds && !don_adds && !class_adds {
                         // The real entry at this hash already carries every EFFECT **and** every
                         // UNCOVERED PACKAGE the union knows, so a second row would be a duplicate
                         // carrying nothing. 233 of the 244 measured suppressions are this case.
