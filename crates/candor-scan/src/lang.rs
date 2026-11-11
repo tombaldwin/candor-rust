@@ -2500,12 +2500,21 @@ pub(crate) fn bound_return_type(
             Some(bound) => {
                 let rest = &segs[1..];
                 let joined = if rest.is_empty() { bound.clone() } else { format!("{bound}::{}", rest.join("::")) };
+                // SOUNDNESS R1579 (R1657 stage 2) — NOT ALWAYS ABSOLUTE: `pub use context::Context;` in a NON-root module
+                // binds a Rust 2018 uniform path relative to THAT module when its head is the module's own child, so it is
+                // qualified by the module path exactly as `self::` is. Read as crate-rooted it named `context::Context`,
+                // no type of the crate, and the chained consumer's join was refused (async-nats `jetstream::new`).
+                let local_rel = !r1657s2_off()
+                    && !joined.starts_with("crate::")
+                    && !joined.starts_with("self::")
+                    && joined.contains("::")
+                    && module_declares(uses, joined.split("::").next().unwrap_or("")) == Some(true);
                 let stripped = joined
                     .strip_prefix("crate::")
                     .or_else(|| joined.strip_prefix("self::"))
                     .unwrap_or(&joined)
                     .to_string();
-                (stripped, false)
+                (stripped, local_rel)
             }
             // No `use` binding: the name is MODULE-RELATIVE. `Client` inside `mod mock` is
             // `mock::Client`, never some other module's `Client`.
@@ -2707,7 +2716,7 @@ fn expand_with(path: &str, uses: &HashMap<String, String>, anchor: bool, follow:
         // instead resolved at COLLECT time (its `use crate::name` re-bind, `collect_use`/`rebound`); the
         // only glob path handled HERE is a `crate::`-ROOTED call (below), which is definitively crate-local
         // and so safe to attribute to a re-export glob (iso_C: `crate::net::connect_tcp`).
-        if follow && segs.len() >= 2 {
+        if follow && (segs.len() >= 2 || (segs.len() == 1 && !crate::lang::r1657s2_off())) {
             if let Some(r) = local_glob_alias(&segs, uses) {
                 return r;
             }
@@ -2844,6 +2853,10 @@ fn r751_literal(segs: &[&str], absolutised: bool) -> String {
 /// first, so a nested `outer::inner::Command` is preferred over any shorter key that happens to exist.
 /// Two segments minimum: a one-segment lookup is `expand`'s existing `use`-map route and must keep its
 /// own precedence rules.
+///
+/// SOUNDNESS R1657 stage 2 — a ROOTED prefix this file's map does not bind is then asked of the crate-wide RE-EXPORT
+/// TABLE (`reexport_lookup`) at the SAME length before any shorter prefix: `crate::plat::sys::fx` names `crate::tu::fx`
+/// when `plat` says `pub use crate::tu as sys`. The `use` map keeps precedence at every length.
 fn qualified_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) -> Option<String> {
     for n in (2..=segs.len()).rev() {
         let joined = segs[..n].join("::");
@@ -2851,8 +2864,56 @@ fn qualified_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) 
         if let Some(full) = uses.get(&key) {
             return Some(alias_join(full, &segs[n..]));
         }
+        if rooted {
+            if let Some(full) = reexport_lookup(&segs[..n].join("::")) {
+                if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+                    eprintln!("R1657S2PATH\t{}\t{}", segs.join("::"), full.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+                }
+                return Some(alias_join(&full, &segs[n..]));
+            }
+        }
     }
     module_glob_alias(segs, rooted, uses)
+}
+
+/// SOUNDNESS R1657 stage 2 — THE CRATE-WIDE RE-EXPORT TABLE: a module-qualified name a LOCAL named `use` re-exports
+/// (`pub`, `pub(crate)`, `pub(super)`, `pub(in ..)`; renamed or not; every `#[cfg]` arm) -> the definition(s) it denotes,
+/// `ALIAS_ALT_SEP`-joined, crate-rooted, with every chain through another re-export or a `mod_aliases` entry followed
+/// to its end (`decls::build_reexport_names`). Keys carry no `crate::` prefix, as `mod_aliases` keys do not.
+///
+/// THE DEFECT IT CLOSES (R1642, R1664, R1684 residuals, the R1657 class-A residue). A local named re-export reached
+/// exactly two readers — `reexport_target`'s tail2 index for a FREE-fn call, and R959's synthetic unit — both through
+/// `Reexport`. Every reader that asks `expand` (a type, a module path, a ctor path, a field or return type, a glob
+/// candidate) saw the RE-EXPORT spelling, which names no definition: `use crate::plat::sys; sys::fx()` over
+/// `pub mod plat { pub use crate::tu as sys; }` was ABSENT; a value typed `crate::cht::RenamedTbl` named no unit.
+///
+/// WHY A TABLE ASKED AFTER THE `use` MAP AND NOT SEEDED INTO IT. The answer is crate-wide, and `seed_mod_aliases`
+/// copies every entry into EVERY file's map (a generated crate carries thousands of named re-exports, times hundreds
+/// of files). Asked lazily, the `use` map's own bindings keep precedence and the cost is one lookup on a miss.
+///
+/// EMPTY DURING PASS A, so a cached Pass A fact cannot depend on it (the R1495 boundary); installed after the merge,
+/// before `alias_expand_decls` and Pass B. `CANDOR_R1657S2_OFF=1` leaves it empty.
+pub(crate) type ReexportNames = HashMap<String, String>;
+
+pub(crate) static REEXPORT_NAMES: std::sync::OnceLock<std::sync::RwLock<ReexportNames>> = std::sync::OnceLock::new();
+
+pub(crate) fn reexport_names_cell() -> &'static std::sync::RwLock<ReexportNames> {
+    REEXPORT_NAMES.get_or_init(|| std::sync::RwLock::new(Default::default()))
+}
+
+/// SOUNDNESS R1657 stage 2 — the kill switch for the re-export table (and every reader of it).
+pub(crate) fn r1657s2_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1657S2_OFF"))
+}
+
+/// SOUNDNESS R1657 stage 2 — the table's answer for a module-qualified name (no `crate::` prefix), if it has one.
+pub(crate) fn reexport_lookup(key: &str) -> Option<String> {
+    let cell = reexport_names_cell().read().ok()?;
+    if cell.is_empty() {
+        return None;
+    }
+    cell.get(key).cloned()
 }
 
 /// R99 (SHAPE 1) — resolve `glb::write` through a SUBMODULE's external GLOB re-export
@@ -2908,7 +2969,7 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
         return None;
     }
     let globs = uses.get(ALLGLOB_KEY)?;
-    let mut hits: Vec<&String> = Vec::new();
+    let mut hits: Vec<String> = Vec::new();
     for g in globs.split('\u{1}').filter(|g| !g.is_empty()) {
         let gs: Vec<&str> = g.split("::").collect();
         let module: String = match gs[0] {
@@ -2924,7 +2985,15 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
             _ => continue,
         };
         let key = if module.is_empty() { format!("crate::{head}") } else { format!("crate::{module}::{head}") };
-        if let Some(v) = uses.get(&key).filter(|v| !v.is_empty()) {
+        // A ONE-segment name (`use crate::plat::*; gx()`) is answered by the re-export table only: a bare name a glob
+        // module merely DECLARES stays the leaf index's (`by_leaf`), as before.
+        if let Some(v) = uses.get(&key).filter(|v| !v.is_empty() && segs.len() >= 2) {
+            if !hits.iter().any(|h| h == v) {
+                hits.push(v.clone());
+            }
+        } else if let Some(v) = reexport_lookup(&key["crate::".len()..]).filter(|v| !v.is_empty()) {
+            // SOUNDNESS R1657 stage 2 — a name the glob's module re-exports by a LOCAL named `use` (`pub mod plat
+            // { pub use crate::tu as sys; }`, `use crate::plat::*; sys::fx()`): the R1684 residual.
             if !hits.contains(&v) {
                 hits.push(v);
             }
@@ -2945,7 +3014,7 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
     if hits[0].split(crate::decls::ALIAS_ALT_SEP).any(external) {
         return None;
     }
-    let r = alias_join(hits[0], &segs[1..]);
+    let r = alias_join(&hits[0], &segs[1..]);
     if candor_report::env::trace("CANDOR_R1684_INSTR") {
         eprintln!("R1684GLOB\t{}\t{}", segs.join("::"), r.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH COUNTER
     }

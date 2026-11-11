@@ -1323,7 +1323,15 @@ fn build_type_surface(
     let mut near_misses = 0usize;
     let mut collided: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in fns {
-        let Some(tp) = &f.ret_bound_type else { continue };
+        let Some(tp0) = &f.ret_bound_type else { continue };
+        // SOUNDNESS R1579 (R1657 stage 2) — a return written at a RE-EXPORT spelling (`-> crate::nats::Context` over
+        // `pub use context::Context`) names the definition the re-export table names, when it names exactly one.
+        let tp_norm: Option<String> = (!nonpure.contains(tp0.as_str()))
+            .then(|| crate::lang::reexport_lookup(tp0))
+            .flatten()
+            .filter(|v| !v.contains(crate::decls::ALIAS_ALT_SEP))
+            .and_then(|v| v.strip_prefix("crate::").map(str::to_string));
+        let tp = tp_norm.as_ref().unwrap_or(tp0);
         // EXACT match on the full qual, and that is the whole disambiguation. Both sides are now
         // module-qualified in this crate's own namespace — `ret_bound_type` resolves a bare name
         // against its DECLARING module — so `mock::Client` and `sync::Client` are different strings
@@ -1384,6 +1392,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     set_cfg_features(parse_features(&cargo_toml));
     // SOUNDNESS R1495 — empty for Pass A (a cached Pass A fact cannot depend on it); installed before Pass B.
     *crate::lang::dyn_alias_cell().write().unwrap() = Default::default();
+    // SOUNDNESS R1657 stage 2 — likewise empty for Pass A; installed after the merge (`decls::build_reexport_names`).
+    *crate::lang::reexport_names_cell().write().unwrap() = Default::default();
 
     // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below). The walk +
     // path-shape filters run SEQUENTIALLY (cheap directory traversal, and the filter set is the report's
@@ -1805,6 +1815,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     if r1483 {
         chase_alias_chains_n(&mut merged.mod_aliases, &nominal_quals);
     }
+    // SOUNDNESS R1657 stage 2 — the crate-wide RE-EXPORT TABLE (`lang::reexport_lookup`): every local named re-export,
+    // chased to the definition(s) it denotes. Installed BEFORE `alias_expand_decls`, which re-expands field / return /
+    // payload types through `expand` and so normalises a type written at its re-export spelling.
+    let r1657s2_declared: HashSet<String> = if crate::lang::r1657s2_off() {
+        HashSet::new()
+    } else {
+        decls_per_file
+            .iter()
+            .flat_map(|(_, _, fd)| fd.ts.types.iter().map(|(q, _, _)| q.clone()))
+            .chain(merged.rets.keys().filter_map(|k| k.strip_prefix(crate::lang::LOCAL_MOD_PREFIX)).map(str::to_string))
+            .collect()
+    };
+    let install_reexport_names = |merged: &MergedDecls| {
+        let t = if crate::lang::r1657s2_off() {
+            HashMap::new()
+        } else {
+            crate::decls::build_reexport_names(&merged.reexports, &merged.mod_aliases, &r1657s2_declared)
+        };
+        let n = t.len();
+        *crate::lang::reexport_names_cell().write().unwrap() = t;
+        n
+    };
+    let r1657s2_names = install_reexport_names(&merged);
     // R99 (SHAPE 2) — SECOND MERGE, over decls whose type paths have been re-expanded against the
     // crate-wide alias map that only exists once the first merge is done. Pass A walks each file in
     // isolation, so a field/return/variant type spelled through a module alias (`c: facade::Command`)
@@ -1821,7 +1854,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // (one alias per module, two different pointees) read as agreeing and the leaf-keyed index kept the
     // last file's pointee for both.
     let mut expanded: Vec<Option<FileDecls>> = Vec::new();
-    if !merged.mod_aliases.is_empty() {
+    if !merged.mod_aliases.is_empty() || r1657s2_names > 0 {
         expanded = decls_per_file
             .iter()
             .map(|(rel, _, fd)| {
@@ -1837,6 +1870,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if r1483 {
                 chase_alias_chains_n(&mut merged.mod_aliases, &nominal_quals); // R1483 — the re-merge rebuilt the map from the files
             }
+            install_reexport_names(&merged); // R1657 stage 2 — the re-merge rebuilt `mod_aliases`
         }
     }
     // SOUNDNESS R1056 — the slice / array / tuple receiver tails Pass B may type a receiver into. See
@@ -3615,8 +3649,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if real.contains_key(aq.as_str()) || !seen.insert(aq.clone()) {
                 continue;
             }
-            let targets: Vec<&FnInfo> =
+            let mut targets: Vec<&FnInfo> =
                 r.from.iter().filter_map(|m| real.get(crate::decls::qualify(m, &r.name).as_str()).copied()).collect();
+            // SOUNDNESS R1642 (R1657 stage 2) — a rename of a RE-EXPORT (`pub use io::w as root_w;` where `io::w` is
+            // itself `pub use rw::w`) names no unit at `io::w`; the re-export table names the definition it denotes.
+            if targets.is_empty() {
+                if let Some(arms) = crate::lang::reexport_lookup(&aq) {
+                    targets = arms
+                        .split(crate::decls::ALIAS_ALT_SEP)
+                        .filter_map(|a| a.strip_prefix("crate::"))
+                        .filter_map(|q| real.get(q).copied())
+                        .collect();
+                    if !targets.is_empty() && candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+                        eprintln!("R1657S2R959\t{aq}\t{arms}", arms = arms.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+                    }
+                }
+            }
             let Some(first) = targets.first() else { continue };
             let mut u = (*first).clone();
             u.qual = aq;

@@ -2116,6 +2116,114 @@ pub(crate) fn collect_cfg_arm_aliases(
     }
 }
 
+/// SOUNDNESS R1657 stage 2 — build the crate-wide RE-EXPORT TABLE `lang::REEXPORT_NAMES` (see `lang::reexport_lookup`)
+/// from the merged `Reexport` edges: every LOCAL NAMED edge (`pub use a::b::X [as Y]`, any non-private visibility,
+/// every `#[cfg]` arm) files `<module>::<alias> -> crate::<from>::<name>` for each `from` module, and every arm is then
+/// CHASED: the longest prefix of an arm that is itself a table key (or, two segments or more, a `mod_aliases` key) is
+/// replaced by what that key denotes, so `pub use io::w as root_w` over `pub use rw::w` names `crate::io::rw::w`, and
+/// `pub(crate) use crate::a::sys` over a `#[cfg]` arm set names every arm.
+///
+/// WHAT IT REFUSES, each in the direction of "no answer here", never a guess:
+///   * a GLOB edge (`*`): its names are not known at the edge; `collect_module_glob`/`reexport_aliases` own them;
+///   * a key `mod_aliases` already answers (R99 external re-exports, R438 mixed sets, R1682 cfg arm sets, aliases):
+///     that answer is already in every file's map and keeps its precedence;
+///   * a CYCLE (`pub use b::x` in `a`, `pub use a::x` in `b` — E0432 in rustc): the arm is kept as written.
+///
+/// A key the module ALSO declares (a `#[cfg]` twin of an item and a re-export under one name) keeps the declaration
+/// as an arm beside the re-export — the union, as R1489 does for a nominal/alias twin.
+pub(crate) fn build_reexport_names(
+    edges: &[Reexport],
+    mod_aliases: &HashMap<String, String>,
+    declared: &std::collections::HashSet<String>,
+) -> HashMap<String, String> {
+    fn chaseable(k: &str) -> bool {
+        !k.starts_with(REDIRECT_MOD_MARK) && !k.ends_with(MOD_GLOB_KEY) && !k.contains(ITEM_SENTINEL)
+    }
+    fn chase(
+        arm: &str,
+        own: &str,
+        raw: &HashMap<String, String>,
+        mod_aliases: &HashMap<String, String>,
+        stack: &mut Vec<String>,
+        out: &mut Vec<String>,
+    ) {
+        let Some(rest) = arm.strip_prefix("crate::") else {
+            out.push(arm.to_string());
+            return;
+        };
+        if stack.len() >= 64 {
+            out.push(arm.to_string());
+            return;
+        }
+        let segs: Vec<&str> = rest.split("::").collect();
+        for n in (1..=segs.len()).rev() {
+            let key = segs[..n].join("::");
+            if key == own {
+                continue; // the declaration arm of a twin names itself: terminal
+            }
+            let hit = raw.get(&key).or_else(|| if n >= 2 && chaseable(&key) { mod_aliases.get(&key) } else { None });
+            let Some(v) = hit else { continue };
+            if stack.contains(&key) {
+                out.push(arm.to_string()); // a cycle: kept as written
+                return;
+            }
+            stack.push(key.clone());
+            for a in v.split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+                let mut sub = Vec::new();
+                chase(a, &key, raw, mod_aliases, stack, &mut sub);
+                out.extend(sub.into_iter().map(|r| crate::lang::alias_join(&r, &segs[n..])));
+            }
+            stack.pop();
+            return;
+        }
+        out.push(arm.to_string());
+    }
+    let mut raw: HashMap<String, String> = HashMap::new();
+    for e in edges {
+        if e.name == "*" || e.alias == "*" {
+            continue;
+        }
+        let key = qualify(&e.module, &e.alias);
+        if mod_aliases.contains_key(&key) {
+            continue;
+        }
+        for m in &e.from {
+            let t = qualify(m, &e.name);
+            if t != key {
+                record_alias(&mut raw, key.clone(), format!("crate::{t}"));
+            }
+        }
+    }
+    let mut keys: Vec<String> = raw.keys().cloned().collect();
+    keys.sort_unstable();
+    for k in &keys {
+        if declared.contains(k) {
+            record_alias(&mut raw, k.clone(), format!("crate::{k}"));
+        }
+    }
+    let mut table: HashMap<String, String> = HashMap::new();
+    for k in &keys {
+        let mut out: Vec<String> = Vec::new();
+        for a in raw[k].split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+            let mut stack = vec![k.clone()];
+            chase(a, k, &raw, mod_aliases, &mut stack, &mut out);
+        }
+        let own = format!("crate::{k}");
+        let mut arms: Vec<String> =
+            out.iter().flat_map(|o| o.split(ALIAS_ALT_SEP)).filter(|a| !a.is_empty()).map(str::to_string).collect();
+        arms.sort_unstable();
+        arms.dedup();
+        if arms.is_empty() || arms.iter().all(|a| *a == own) {
+            continue;
+        }
+        if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+            eprintln!("R1657S2NAME\t{k}\t{}", arms.join("|")); // §E1 REACH COUNTER
+        }
+        table.insert(k.clone(), arms.join(&ALIAS_ALT_SEP.to_string()));
+    }
+    table
+}
+
 pub(crate) fn collect_reexports(
     items: &[syn::Item],
     modpath: &str,
@@ -2162,7 +2270,12 @@ pub(crate) fn collect_reexports(
                 let mut leaves = Vec::new();
                 use_leaves(&u.tree, Vec::new(), &mut leaves);
                 for (segs, name, alias) in leaves {
-                    let from = resolve_use_base(&segs, modpath, &mods);
+                    let mut from = resolve_use_base(&segs, modpath, &mods);
+                    // SOUNDNESS R1657 stage 2 — `pub use tu as sys;` (Rust 2018 uniform path, one segment) names this
+                    // module's own `mod tu`: an edge FROM this module, so the re-export table can follow it.
+                    if from.is_empty() && segs.is_empty() && name != "*" && mods.contains_key(&name) && !crate::lang::r1657s2_off() {
+                        from = vec![modpath.to_string()];
+                    }
                     if from.is_empty() {
                         // R99 (1): the head names no local `mod` and is not `crate`/`self`/`super`, so this
                         // re-exports an EXTERNAL/std item. A GLOB (`pub use std::process::*`) names no
