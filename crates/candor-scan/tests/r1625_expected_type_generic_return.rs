@@ -197,9 +197,7 @@ fn r1625_c_the_same_rule_for_try_into_default_and_collect() {
 
 #[test]
 fn r1625_d_a_context_that_is_an_argument_is_still_a_residual() {
-    // R1626 (filed): a return-position `into` is not read either
-    let d0 = fixture("into", "", LOCAL);
-    assert!(inf(&scan(&d0, None), "i_r_ret").is_empty(), "i_r_ret: if this starts charging, R1626 is closed");
+    // return-position `into` is R1626 (closed in `r1626_return_position_into.rs`), not a residual
     // PINNED RESIDUAL, not a claim of soundness: `take_l(s.parse().unwrap())` is typed by the CALLEE's parameter.
     let d = fixture("arg", "", LOCAL);
     let on = scan(&d, None);
