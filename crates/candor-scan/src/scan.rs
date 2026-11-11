@@ -7062,6 +7062,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             }
                             untyped_contested.push((f.qual.clone(), c.leaf.clone(), cands.clone(), true));
                         }
+                        // …and where a step's DECLARED return is another type (R1663's `HOP_GUESS_PREFIX`: arc-swap 1.x
+                        // `self.load().serialize(s)` with `load -> Guard<T, S>`, `Guard: Deref<Target = T>`, `T: Serialize`), the
+                        // callee is that type's (or its deref target's) member, which may be the CALLER's type parameter: the judge
+                        // above finds no crate-local candidate with an effect and would leave the site silent. Disclosed here.
+                        if f.untyped_methods.iter().any(|m| m.strip_prefix(crate::lazy::HOP_GUESS_PREFIX) == Some(t2.as_str())) {
+                            if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                                eprintln!("R1657SELFHOPMOVED\t{}\t{t2}", f.qual); // §E1 REACH COUNTER
+                            }
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(format!(
+                                "dispatch:untyped receiver of `{}` (a chained step is declared to return another type)",
+                                c.leaf
+                            ));
+                        }
                     }
                 }
             }

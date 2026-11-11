@@ -270,3 +270,22 @@ fn r1657b_a_self_projection_keeps_the_element_parameters_bound_dispatch() {
     assert!(inferred(&v, "drive").contains(&"Fs".to_string()), "the bound dispatch charges the write:\n{v:#}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn r1657b_a_moved_hop_settled_on_the_caller_discloses_even_with_no_effectful_candidate() {
+    // arc-swap 1.x `serde::ArcSwapAny::serialize`'s shape: `self.load().show()` with `load -> Guard<'_, T>`,
+    // `Guard: Deref<Target = T>`, `T: Show`. The walk typed the tail on `Swap` (the caller); the crate's only `show` with an
+    // effect would be the CONSUMER's type parameter's, so the untyped-receiver judge had no candidate and the unit read ABSENT
+    // (published 0.41.3 and f6c278e8 both read `drive` ABSENT over a write when the effectful impl is local: fixture `a1`,
+    // executed). Here the local impl is pure, as in arc-swap; the site still discloses.
+    let d = fixture(
+        "movedhop",
+        &[(
+            "main.rs",
+            "pub trait Show { fn show(&self); }\npub struct Quiet;\nimpl Show for Quiet { fn show(&self) {} }\npub struct Guard<'a, T> { pub t: &'a T }\nimpl<'a, T> std::ops::Deref for Guard<'a, T> { type Target = T; fn deref(&self) -> &T { self.t } }\npub struct Swap<T> { pub t: T }\nimpl<T> Swap<T> { pub fn load(&self) -> Guard<'_, T> { Guard { t: &self.t } } }\nimpl<T: Show> Show for Swap<T> { fn show(&self) { self.load().show() } }\nfn main() {}\n",
+        )],
+    );
+    let (_, v) = scan(&d, None, false);
+    assert_eq!(inferred(&v, "Swap::show"), vec!["Unknown"], "disclosed, never absent:\n{v:#}");
+    let _ = std::fs::remove_dir_all(&d);
+}
