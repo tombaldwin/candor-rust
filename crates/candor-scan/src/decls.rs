@@ -2139,6 +2139,10 @@ pub(crate) fn collect_cfg_arm_aliases(
 /// E0255 rule (one type-namespace binding per name) guarantees.
 pub(crate) const REEXPORT_VALUE_ONLY: char = '\u{7}';
 
+/// SOUNDNESS R1657 stage 2b — the `alias` of a marker edge naming an item a glob-bearing module DECLARES (see
+/// `collect_private_uses_in`). No real `use` alias can contain a control character.
+pub(crate) const EXT_GLOB_DECL_MARK: &str = "\u{1}declared";
+
 pub(crate) fn build_reexport_names(
     edges: &[Reexport],
     mod_aliases: &HashMap<String, String>,
@@ -2193,7 +2197,7 @@ pub(crate) fn build_reexport_names(
     }
     let mut raw: HashMap<String, String> = HashMap::new();
     for e in edges {
-        if e.name == "*" || e.alias == "*" {
+        if e.name == "*" || e.alias == "*" || e.from.is_empty() {
             continue;
         }
         let key = qualify(&e.module, &e.alias);
@@ -2221,12 +2225,32 @@ pub(crate) fn build_reexport_names(
     // quad_star`, which `executor` has only through `use consolidate::*`; the first cut answered
     // `crate::executor::consolidate_query_result_quad_star`, named no unit, and lost an edge the leaf index had). Such a
     // key is REFUSED — no answer, so the routes before this table answer exactly as they did.
-    let glob_mods: std::collections::HashSet<&str> =
-        edges.iter().filter(|e| e.name == "*").map(|e| e.module.as_str()).collect();
+    // SOUNDNESS R1657 stage 2b — a glob with no `from` (external, or a local base this scan could not place) counts too:
+    // `pub use toml_datetime::*;` at the root binds `Datetime` behind a glob this table cannot enumerate.
+    // `CANDOR_R1657S2B_OFF=1` ignores those markers (the stage-2 reading).
+    let glob_mods: std::collections::HashSet<&str> = edges
+        .iter()
+        .filter(|e| e.name == "*" && !(e.from.is_empty() && crate::lang::r1657s2b_off()))
+        .map(|e| e.module.as_str())
+        .collect();
+    let off = crate::lang::r1657s2b_off();
+    // Edges whose `from` is empty are markers: `*` (an unplaced glob) or a declared-name record. A marker `*` is already
+    // in `glob_mods` above; the declared names answer for a glob-bearing module that is not a PLACED-glob module.
+    let placed_glob_mods: std::collections::HashSet<&str> =
+        edges.iter().filter(|e| e.name == "*" && !e.from.is_empty()).map(|e| e.module.as_str()).collect();
+    let ext_declared: std::collections::HashSet<String> = if off {
+        std::collections::HashSet::new()
+    } else {
+        edges.iter().filter(|e| e.alias == EXT_GLOB_DECL_MARK).map(|e| qualify(&e.module, &e.name)).collect()
+    };
     let undetermined = |arm: &str| -> bool {
         let Some(q) = arm.strip_prefix("crate::") else { return false };
         let m = q.rsplit_once("::").map_or("", |(m, _)| m);
-        glob_mods.contains(m) && !declared.contains(q) && !local_mods.contains(q)
+        if !glob_mods.contains(m) || declared.contains(q) || local_mods.contains(q) {
+            return false;
+        }
+        // A module whose ONLY globs are unplaced (external) answers for the names it declares itself.
+        !(ext_declared.contains(q) && !placed_glob_mods.contains(m))
     };
     let mut table: HashMap<String, String> = HashMap::new();
     for k in &keys {
@@ -2305,6 +2329,7 @@ fn collect_private_uses_in(
     out: &mut Vec<Reexport>,
 ) {
     let mods = mod_targets(items, modpath, dir, include_tests);
+    let mut unplaced_glob = false;
     for it in items {
         match it {
             syn::Item::Use(u) => {
@@ -2313,11 +2338,32 @@ fn collect_private_uses_in(
                     syn::Visibility::Restricted(r) => r.path.is_ident("self"),
                     _ => false,
                 };
-                if !private || (!include_tests && is_cfg_test(&u.attrs)) {
+                if !include_tests && is_cfg_test(&u.attrs) {
                     continue;
                 }
                 let mut leaves = Vec::new();
                 use_leaves(&u.tree, Vec::new(), &mut leaves);
+                // SOUNDNESS R1657 stage 2b — a GLOB (`use dep::*`, `pub use dep::*`, `use std::io::*`, or a local glob whose
+                // base this scan cannot place) that names NO local module has names this table does not enumerate. Recorded,
+                // whatever its visibility, as a `*` edge with no `from`: `build_reexport_names` reads it as "this module may
+                // bind a name behind a glob" and refuses an arm that ENDS there at a name the crate does not declare
+                // (`toml_edit`: `visit::Datetime -> crate::Datetime`, though `crate::Datetime` is `pub use toml_datetime::*`'s).
+                // Pass A fact: cached (rev177).
+                for (segs, name, _) in &leaves {
+                    if name == "*" && resolve_use_base(segs, modpath, &mods).is_empty() {
+                        unplaced_glob = true;
+                        out.push(Reexport {
+                            module: modpath.to_string(),
+                            from: Vec::new(),
+                            name: "*".to_string(),
+                            alias: "*".to_string(),
+                            cfg_gated: has_cfg(&u.attrs),
+                        });
+                    }
+                }
+                if !private {
+                    continue;
+                }
                 for (segs, name, alias) in leaves {
                     if externs.contains(&name) {
                         continue;
@@ -2341,6 +2387,24 @@ fn collect_private_uses_in(
                 }
             }
             _ => {}
+        }
+    }
+    // SOUNDNESS R1657 stage 2b — a module with such a glob DECLARES some names itself, and a name it declares is answered by
+    // the declaration, not by the glob (an own item beats a glob import). The table's `declared` set is types only, so the
+    // module's other declared names (fns, consts, statics, macros, modules) ride along as `DECL_MARK` markers — only for
+    // modules that have the glob, so the wire stays small. Without them, an arm ending at a fn the module declares would be
+    // refused as "may sit behind the glob" (toml_edit: 26 arms of consts and fns the module plainly declares).
+    if unplaced_glob {
+        for it in items {
+            if let Some(n) = declared_item_name(it, include_tests) {
+                out.push(Reexport {
+                    module: modpath.to_string(),
+                    from: Vec::new(),
+                    name: n,
+                    alias: EXT_GLOB_DECL_MARK.to_string(),
+                    cfg_gated: false,
+                });
+            }
         }
     }
 }

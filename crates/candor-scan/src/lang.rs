@@ -2907,6 +2907,12 @@ pub(crate) fn r1657s2_off() -> bool {
     *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1657S2_OFF"))
 }
 
+/// SOUNDNESS R1657 stage 2b — the kill switch for refusing a table arm that ends behind an external / unplaced glob.
+pub(crate) fn r1657s2b_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1657S2B_OFF"))
+}
+
 /// SOUNDNESS R1657 stage 2 — the table's answer for a module-qualified name (no `crate::` prefix) written AS A WHOLE NAME
 /// (nothing written below it), if it has one.
 pub(crate) fn reexport_lookup(key: &str) -> Option<String> {

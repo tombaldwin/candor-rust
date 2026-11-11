@@ -348,3 +348,86 @@ use crate::sys::Tool;\npub fn probe() {{ Tool::act(); }}\n"
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+/// One scan with explicit extra env; returns (exit code, report, stderr). `deps` chains.
+fn scan_env(dir: &Path, deps: Option<&Path>, env: &[(&str, &str)]) -> (serde_json::Value, String) {
+    let mut cmd = Command::new(bin());
+    cmd.arg(dir.to_string_lossy().as_ref()).arg("--json");
+    for v in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1657S2_OFF", "CANDOR_R1657S2B_OFF", "CANDOR_R1657S2_INSTR"] {
+        cmd.env_remove(v);
+    }
+    if let Some(d) = deps {
+        cmd.env("CANDOR_DEPS", d);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run candor-scan");
+    assert!(out.status.code().is_some_and(|c| (0..=2).contains(&c)), "{}", String::from_utf8_lossy(&out.stderr));
+    (serde_json::from_slice(&out.stdout).expect("report json"), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// R1657 stage 2b — an arm that ENDS in a module that globs something this scan cannot enumerate is not a determined
+/// definition. toml_edit: `pub use toml_datetime::*;` at the root binds `Datetime`; `pub(crate) use crate::Datetime;` in
+/// `visit` was filed as `visit::Datetime -> crate::Datetime`, an arm that names nothing. `undetermined` counted only LOCAL
+/// globs. EXECUTED family (lane scratch `rustagent-stage2b/fam/gen2.py`, 5 variants x every consumer spelling, each spelling
+/// with a uniquely named pure twin): every consumer reads identically on published 0.41.3, aacd3880, the stage-2 tip and this
+/// one, so the arm was never observable as a behaviour — the refusal is pinned through the reach counters, and the
+/// SPELLINGS that must keep reading as they did are pinned beside it.
+///
+/// The exception that must NOT be lost: a name the glob-bearing module DECLARES ITSELF (here the fn `helper_zq`, which the
+/// table's types-only `declared` set does not hold) is answered by the declaration, not by the glob.
+#[test]
+fn r1657s2b_an_arm_ending_behind_an_external_glob_is_refused_and_the_modules_own_names_are_not() {
+    let pd_src = format!(
+        "pub struct Datetime;\nimpl Datetime {{ pub fn parse(_s: &str) -> Datetime {{ {W} Datetime }} pub fn inert() -> Datetime {{ Datetime }} }}\n\
+pub fn go_zq() {{ {W} }}\npub fn quiet_zq() {{}}\n"
+    );
+    let pd = fixture("g2pd", "dgdep", &[("lib.rs", pd_src.as_str())], "");
+    let cons_src = format!(
+        "#![allow(unused_imports, dead_code)]\n\
+pub use dgdep::*;\n\
+pub mod visit {{\n\
+    pub(crate) use crate::Datetime;\n    pub(crate) use crate::go_zq;\n    pub(crate) use crate::quiet_zq;\n\
+    pub fn v_assoc_zq() {{ let _ = Datetime::parse(\"a\"); }}\n    pub fn v_calm_zq() {{ let _ = Datetime::inert(); }}\n\
+    pub fn v_fn_zq() {{ go_zq(); }}\n    pub fn v_quiet_zq() {{ quiet_zq(); }}\n\
+}}\n\
+pub mod other {{\n    pub fn o_direct_zq() {{ let _ = crate::Datetime::parse(\"c\"); }}\n    pub fn o_calm_zq() {{ let _ = crate::Datetime::inert(); }}\n}}\n\
+pub mod util {{\n    pub use dgdep::*;\n    pub fn helper_zq() {{ {W} }}\n    pub fn tame_zq() {{}}\n}}\n\
+pub mod facade {{\n    pub use crate::util::helper_zq;\n    pub use crate::util::tame_zq;\n}}\n\
+pub mod user {{\n    pub fn u_helper_zq() {{ crate::facade::helper_zq() }}\n    pub fn u_tame_zq() {{ crate::facade::tame_zq() }}\n}}\n"
+    );
+    let cons = fixture("g2cons", "g2cons", &[("lib.rs", cons_src.as_str())], &format!("dgdep = {{ path = \"{}\" }}\n", pd.display()));
+    let deps = std::env::temp_dir().join(format!("candor-r1657s2b-deps-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&deps);
+    produce(&pd, &deps, "dgdep", false);
+
+    let (on, err_on) = scan_env(&cons, Some(&deps), &[("CANDOR_R1657S2_INSTR", "1")]);
+    let (off2b, err_off2b) = scan_env(&cons, Some(&deps), &[("CANDOR_R1657S2B_OFF", "1"), ("CANDOR_R1657S2_INSTR", "1")]);
+    let (off2, _) = scan_env(&cons, Some(&deps), &[("CANDOR_R1657S2_OFF", "1")]);
+
+    // The fixture REACHES the refusal: the arm is refused here and filed with the stage-2b switch off.
+    assert!(err_on.contains("R1657S2GLOBREFUSE\tvisit::Datetime\tcrate::Datetime"), "refused: {err_on}");
+    assert!(!err_on.contains("R1657S2NAME\tvisit::Datetime\t"), "not filed: {err_on}");
+    assert!(err_off2b.contains("R1657S2NAME\tvisit::Datetime\tcrate::Datetime"), "stage-2 filed an arm naming nothing: {err_off2b}");
+    // ...and the module's OWN declared names stay determined: `facade::helper_zq -> crate::util::helper_zq` is filed.
+    assert!(err_on.contains("R1657S2NAME\tfacade::helper_zq\tcrate::util::helper_zq"), "declared name kept: {err_on}");
+    // Every consumer spelling reads the same on both and the effectful ones charge, the pure twins stay pure.
+    for f in ["visit::v_assoc_zq", "visit::v_fn_zq", "other::o_direct_zq"] {
+        for (arm, r) in [("on", &on), ("2b off", &off2b)] {
+            assert!(inferred(r, f).contains(&"Fs".to_string()), "{arm}: {f} charges chained {r:#}");
+        }
+    }
+    for f in ["visit::v_calm_zq", "visit::v_quiet_zq", "other::o_calm_zq"] {
+        for (arm, r) in [("on", &on), ("2b off", &off2b)] {
+            assert!(!inferred(r, f).contains(&"Fs".to_string()), "{arm}: pure twin {f} stays pure {r:#}");
+        }
+    }
+    // The module's own fn, reached through a re-export of it: resolved by the table (ABSENT before stage 2), still resolved.
+    assert!(inferred(&on, "user::u_helper_zq").contains(&"Fs".to_string()), "declared fn behind an external-glob module still resolves {on:#}");
+    assert!(!inferred(&on, "user::u_tame_zq").contains(&"Fs".to_string()), "its pure twin stays pure {on:#}");
+    assert!(inferred(&off2, "user::u_helper_zq").contains(&"Fs".to_string()), "(the free-fn tail2 route already answered it) {off2:#}");
+    let _ = std::fs::remove_dir_all(&deps);
+    let _ = std::fs::remove_dir_all(&pd);
+    let _ = std::fs::remove_dir_all(&cons);
+}
