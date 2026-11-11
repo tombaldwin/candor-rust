@@ -2116,6 +2116,299 @@ pub(crate) fn collect_cfg_arm_aliases(
     }
 }
 
+/// SOUNDNESS R1657 stage 2 — build the crate-wide RE-EXPORT TABLE `lang::REEXPORT_NAMES` (see `lang::reexport_lookup`)
+/// from the merged `Reexport` edges: every LOCAL NAMED edge (`pub use a::b::X [as Y]`, any non-private visibility,
+/// every `#[cfg]` arm) files `<module>::<alias> -> crate::<from>::<name>` for each `from` module, and every arm is then
+/// CHASED: the longest prefix of an arm that is itself a table key (or, two segments or more, a `mod_aliases` key) is
+/// replaced by what that key denotes, so `pub use io::w as root_w` over `pub use rw::w` names `crate::io::rw::w`, and
+/// `pub(crate) use crate::a::sys` over a `#[cfg]` arm set names every arm.
+///
+/// WHAT IT REFUSES, each in the direction of "no answer here", never a guess:
+///   * a GLOB edge (`*`): its names are not known at the edge; `collect_module_glob`/`reexport_aliases` own them;
+///   * a key `mod_aliases` already answers (R99 external re-exports, R438 mixed sets, R1682 cfg arm sets, aliases):
+///     that answer is already in every file's map and keeps its precedence;
+///   * a CYCLE (`pub use b::x` in `a`, `pub use a::x` in `b` — E0432 in rustc): the arm is kept as written.
+///
+/// A key the module ALSO declares (a `#[cfg]` twin of an item and a re-export under one name) keeps the declaration
+/// as an arm beside the re-export — the union, as R1489 does for a nominal/alias twin.
+///
+/// A key that is ALSO one of the crate's own MODULES (h3's `pub use builder::builder;` beside `mod builder;` in `server`)
+/// names two things in two namespaces: the module (types namespace — anything written BELOW it, `server::builder::Builder`)
+/// and the re-exported fn (values namespace — the name itself). Such an entry carries `REEXPORT_VALUE_ONLY` in front of its
+/// value and is never used as a PREFIX, here or in `lang::qualified_alias`: the module answers a longer path, as rustc's
+/// E0255 rule (one type-namespace binding per name) guarantees.
+pub(crate) const REEXPORT_VALUE_ONLY: char = '\u{7}';
+
+/// SOUNDNESS R1657 stage 2b — the `alias` of a marker edge naming an item a glob-bearing module DECLARES (see
+/// `collect_private_uses_in`). No real `use` alias can contain a control character.
+pub(crate) const EXT_GLOB_DECL_MARK: &str = "\u{1}declared";
+
+pub(crate) fn build_reexport_names(
+    edges: &[Reexport],
+    mod_aliases: &HashMap<String, String>,
+    declared: &std::collections::HashSet<String>,
+    local_mods: &std::collections::HashSet<String>,
+) -> HashMap<String, String> {
+    fn chaseable(k: &str) -> bool {
+        !k.starts_with(REDIRECT_MOD_MARK) && !k.ends_with(MOD_GLOB_KEY) && !k.contains(ITEM_SENTINEL)
+    }
+    fn chase(
+        arm: &str,
+        own: &str,
+        raw: &HashMap<String, String>,
+        mod_aliases: &HashMap<String, String>,
+        local_mods: &std::collections::HashSet<String>,
+        stack: &mut Vec<String>,
+        out: &mut Vec<String>,
+    ) {
+        let Some(rest) = arm.strip_prefix("crate::") else {
+            out.push(arm.to_string());
+            return;
+        };
+        if stack.len() >= 64 {
+            out.push(arm.to_string());
+            return;
+        }
+        let segs: Vec<&str> = rest.split("::").collect();
+        for n in (1..=segs.len()).rev() {
+            let key = segs[..n].join("::");
+            if key == own {
+                continue; // the declaration arm of a twin names itself: terminal
+            }
+            if n < segs.len() && local_mods.contains(&key) {
+                continue; // a path BELOW a declared module is the module's (see `REEXPORT_VALUE_ONLY`)
+            }
+            let hit = raw.get(&key).or_else(|| if n >= 2 && chaseable(&key) { mod_aliases.get(&key) } else { None });
+            let Some(v) = hit else { continue };
+            if stack.contains(&key) {
+                out.push(arm.to_string()); // a cycle: kept as written
+                return;
+            }
+            stack.push(key.clone());
+            for a in v.split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+                let mut sub = Vec::new();
+                chase(a, &key, raw, mod_aliases, local_mods, stack, &mut sub);
+                out.extend(sub.into_iter().map(|r| crate::lang::alias_join(&r, &segs[n..])));
+            }
+            stack.pop();
+            return;
+        }
+        out.push(arm.to_string());
+    }
+    let mut raw: HashMap<String, String> = HashMap::new();
+    for e in edges {
+        if e.name == "*" || e.alias == "*" || e.from.is_empty() {
+            continue;
+        }
+        let key = qualify(&e.module, &e.alias);
+        if mod_aliases.contains_key(&key) {
+            continue;
+        }
+        for m in &e.from {
+            let t = qualify(m, &e.name);
+            if t != key {
+                record_alias(&mut raw, key.clone(), format!("crate::{t}"));
+            }
+        }
+    }
+    let mut keys: Vec<String> = raw.keys().cloned().collect();
+    keys.sort_unstable();
+    for k in &keys {
+        // A declared TYPE twin is unioned in (R1489's rule); a declared MODULE is the other namespace, not an arm.
+        if declared.contains(k) && !local_mods.contains(k) {
+            record_alias(&mut raw, k.clone(), format!("crate::{k}"));
+        }
+    }
+    // Modules that GLOB-import (`use x::*` / `pub use x::*`, any visibility): a name such a module re-binds may sit behind
+    // the glob, which this table does not enumerate. An arm that ends in one of them at a name the crate does not declare
+    // as a type or module is NOT a determined definition (sea-orm: `select.rs` imports `super::consolidate_query_result_
+    // quad_star`, which `executor` has only through `use consolidate::*`; the first cut answered
+    // `crate::executor::consolidate_query_result_quad_star`, named no unit, and lost an edge the leaf index had). Such a
+    // key is REFUSED — no answer, so the routes before this table answer exactly as they did.
+    // SOUNDNESS R1657 stage 2b — a glob with no `from` (external, or a local base this scan could not place) counts too:
+    // `pub use toml_datetime::*;` at the root binds `Datetime` behind a glob this table cannot enumerate.
+    // `CANDOR_R1657S2B_OFF=1` ignores those markers (the stage-2 reading).
+    let glob_mods: std::collections::HashSet<&str> = edges
+        .iter()
+        .filter(|e| e.name == "*" && !(e.from.is_empty() && crate::lang::r1657s2b_off()))
+        .map(|e| e.module.as_str())
+        .collect();
+    let off = crate::lang::r1657s2b_off();
+    // Edges whose `from` is empty are markers: `*` (an unplaced glob) or a declared-name record. A marker `*` is already
+    // in `glob_mods` above; the declared names answer for a glob-bearing module that is not a PLACED-glob module.
+    let placed_glob_mods: std::collections::HashSet<&str> =
+        edges.iter().filter(|e| e.name == "*" && !e.from.is_empty()).map(|e| e.module.as_str()).collect();
+    let ext_declared: std::collections::HashSet<String> = if off {
+        std::collections::HashSet::new()
+    } else {
+        edges.iter().filter(|e| e.alias == EXT_GLOB_DECL_MARK).map(|e| qualify(&e.module, &e.name)).collect()
+    };
+    let undetermined = |arm: &str| -> bool {
+        let Some(q) = arm.strip_prefix("crate::") else { return false };
+        let m = q.rsplit_once("::").map_or("", |(m, _)| m);
+        if !glob_mods.contains(m) || declared.contains(q) || local_mods.contains(q) {
+            return false;
+        }
+        // A module whose ONLY globs are unplaced (external) answers for the names it declares itself.
+        !(ext_declared.contains(q) && !placed_glob_mods.contains(m))
+    };
+    let mut table: HashMap<String, String> = HashMap::new();
+    for k in &keys {
+        let mut out: Vec<String> = Vec::new();
+        for a in raw[k].split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
+            let mut stack = vec![k.clone()];
+            chase(a, k, &raw, mod_aliases, local_mods, &mut stack, &mut out);
+        }
+        let own = format!("crate::{k}");
+        let mut arms: Vec<String> =
+            out.iter().flat_map(|o| o.split(ALIAS_ALT_SEP)).filter(|a| !a.is_empty()).map(str::to_string).collect();
+        arms.sort_unstable();
+        arms.dedup();
+        if arms.is_empty() || arms.iter().all(|a| *a == own) {
+            continue;
+        }
+        if arms.iter().any(|a| undetermined(a)) {
+            if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+                eprintln!("R1657S2GLOBREFUSE\t{k}\t{}", arms.join("|")); // §E1 REACH COUNTER
+            }
+            continue;
+        }
+        if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+            eprintln!("R1657S2NAME\t{k}\t{}", arms.join("|")); // §E1 REACH COUNTER
+        }
+        let v = arms.join(&ALIAS_ALT_SEP.to_string());
+        table.insert(k.clone(), if local_mods.contains(k) { format!("{REEXPORT_VALUE_ONLY}{v}") } else { v });
+    }
+    table
+}
+
+/// SOUNDNESS R1657 stage 2 (R1689) — the PRIVATE local named `use` bindings of every module in this file, recursing into
+/// inline modules, in the `Reexport` shape. A private `use crate::tu as sys;` in `plat` is visible to `plat`'s
+/// DESCENDANTS (`super::sys::fx()`, `crate::plat::sys::fx()` from `plat::child`), and those paths named nothing: ABSENT
+/// over an executed write on published 0.41.3 and on aacd3880. Fed ONLY to the re-export table (never to
+/// `reexport_aliases` or R959, which answer for what a module EXPORTS), and only where the head resolves locally.
+/// A path through such a key from a non-descendant does not compile, so the key cannot answer a call it should not.
+pub(crate) fn collect_private_uses(items: &[syn::Item], modpath: &str, dir: &Path, include_tests: bool, out: &mut Vec<Reexport>) {
+    if crate::lang::r1657s2_off() {
+        return;
+    }
+    let externs = file_extern_crates(items);
+    collect_private_uses_in(items, modpath, dir, include_tests, &externs, out);
+}
+
+/// Every name an `extern crate X [as Y];` binds anywhere in this file's item tree. A `use super::libc;` of such a name
+/// re-binds the EXTERN CRATE, not a local item, and is never a re-export-table edge (pnet_sys: R1657 stage 2's first cut
+/// rewrote `libc::sendto` to a crate-local path and lost the classifier's `Net`).
+pub(crate) fn file_extern_crates(items: &[syn::Item]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for it in items {
+        match it {
+            syn::Item::ExternCrate(e) => {
+                out.insert(e.ident.to_string());
+                if let Some((_, r)) = &e.rename {
+                    out.insert(r.to_string());
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    out.extend(file_extern_crates(inner));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn collect_private_uses_in(
+    items: &[syn::Item],
+    modpath: &str,
+    dir: &Path,
+    include_tests: bool,
+    externs: &std::collections::HashSet<String>,
+    out: &mut Vec<Reexport>,
+) {
+    let mods = mod_targets(items, modpath, dir, include_tests);
+    let mut unplaced_glob = false;
+    for it in items {
+        match it {
+            syn::Item::Use(u) => {
+                let private = match &u.vis {
+                    syn::Visibility::Inherited => true,
+                    syn::Visibility::Restricted(r) => r.path.is_ident("self"),
+                    _ => false,
+                };
+                if !include_tests && is_cfg_test(&u.attrs) {
+                    continue;
+                }
+                let mut leaves = Vec::new();
+                use_leaves(&u.tree, Vec::new(), &mut leaves);
+                // SOUNDNESS R1657 stage 2b — a GLOB (`use dep::*`, `pub use dep::*`, `use std::io::*`, or a local glob whose
+                // base this scan cannot place) that names NO local module has names this table does not enumerate. Recorded,
+                // whatever its visibility, as a `*` edge with no `from`: `build_reexport_names` reads it as "this module may
+                // bind a name behind a glob" and refuses an arm that ENDS there at a name the crate does not declare
+                // (`toml_edit`: `visit::Datetime -> crate::Datetime`, though `crate::Datetime` is `pub use toml_datetime::*`'s).
+                // Pass A fact: cached (rev177).
+                for (segs, name, _) in &leaves {
+                    if name == "*" && resolve_use_base(segs, modpath, &mods).is_empty() {
+                        unplaced_glob = true;
+                        out.push(Reexport {
+                            module: modpath.to_string(),
+                            from: Vec::new(),
+                            name: "*".to_string(),
+                            alias: "*".to_string(),
+                            cfg_gated: has_cfg(&u.attrs),
+                        });
+                    }
+                }
+                if !private {
+                    continue;
+                }
+                for (segs, name, alias) in leaves {
+                    if externs.contains(&name) {
+                        continue;
+                    }
+                    let mut from = resolve_use_base(&segs, modpath, &mods);
+                    if from.is_empty() && segs.is_empty() && mods.contains_key(&name) {
+                        from = vec![modpath.to_string()];
+                    }
+                    if !from.is_empty() {
+                        out.push(Reexport { module: modpath.to_string(), from, name, alias, cfg_gated: has_cfg(&u.attrs) });
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    let name = m.ident.to_string();
+                    collect_private_uses_in(inner, &qualify(modpath, &name), &dir.join(&name), include_tests, externs, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    // SOUNDNESS R1657 stage 2b — a module with such a glob DECLARES some names itself, and a name it declares is answered by
+    // the declaration, not by the glob (an own item beats a glob import). The table's `declared` set is types only, so the
+    // module's other declared names (fns, consts, statics, macros, modules) ride along as `DECL_MARK` markers — only for
+    // modules that have the glob, so the wire stays small. Without them, an arm ending at a fn the module declares would be
+    // refused as "may sit behind the glob" (toml_edit: 26 arms of consts and fns the module plainly declares).
+    if unplaced_glob {
+        for it in items {
+            if let Some(n) = declared_item_name(it, include_tests) {
+                out.push(Reexport {
+                    module: modpath.to_string(),
+                    from: Vec::new(),
+                    name: n,
+                    alias: EXT_GLOB_DECL_MARK.to_string(),
+                    cfg_gated: false,
+                });
+            }
+        }
+    }
+}
+
 pub(crate) fn collect_reexports(
     items: &[syn::Item],
     modpath: &str,
@@ -2162,7 +2455,12 @@ pub(crate) fn collect_reexports(
                 let mut leaves = Vec::new();
                 use_leaves(&u.tree, Vec::new(), &mut leaves);
                 for (segs, name, alias) in leaves {
-                    let from = resolve_use_base(&segs, modpath, &mods);
+                    let mut from = resolve_use_base(&segs, modpath, &mods);
+                    // SOUNDNESS R1657 stage 2 — `pub use tu as sys;` (Rust 2018 uniform path, one segment) names this
+                    // module's own `mod tu`: an edge FROM this module, so the re-export table can follow it.
+                    if from.is_empty() && segs.is_empty() && name != "*" && mods.contains_key(&name) && !crate::lang::r1657s2_off() {
+                        from = vec![modpath.to_string()];
+                    }
                     if from.is_empty() {
                         // R99 (1): the head names no local `mod` and is not `crate`/`self`/`super`, so this
                         // re-exports an EXTERNAL/std item. A GLOB (`pub use std::process::*`) names no

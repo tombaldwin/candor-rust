@@ -4,6 +4,11 @@
 //! `c: &RenamedTbl` formed `RenamedTbl::poke`, named no unit, and was dropped with no edge and no `Unknown`. EXECUTED (lane
 //! scratch `rustagent-floors/fx/f64`, the binary writes the marker): all three spellings of the owner — a `type` alias, a
 //! crate path, an imported name — read ABSENT on published 0.41.3 and on 4df3788. Fixture fns carry `_zq`.
+//!
+//! R1657 STAGE 2 RESOLVES IT: the crate-wide re-export table (`lang::reexport_lookup`) names `cht::segment::Tbl` for
+//! `crate::cht::RenamedTbl`, so all three spellings now edge `Tbl::poke` and charge its write, and the R1664 floor (a
+//! disclosure at the miss) no longer has a miss to fire on. The floor is what `CANDOR_R1657S2_OFF` gives back; with both
+//! switches set the row is ABSENT again, which proves both mechanisms are reached by this fixture.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,6 +27,11 @@ fn fixture(tag: &str, src: &str) -> PathBuf {
 }
 
 fn scan(dir: &Path, policy: Option<&str>, off: bool) -> (i32, serde_json::Value) {
+    scan_with(dir, policy, if off { &["CANDOR_R1664_OFF", "CANDOR_R1657S2_OFF"] } else { &[] })
+}
+
+/// `off` names the kill switches to set.
+fn scan_with(dir: &Path, policy: Option<&str>, off: &[&str]) -> (i32, serde_json::Value) {
     let mut cmd = Command::new(bin());
     cmd.arg(dir.to_string_lossy().as_ref()).arg("--json");
     if let Some(p) = policy {
@@ -29,13 +39,13 @@ fn scan(dir: &Path, policy: Option<&str>, off: bool) -> (i32, serde_json::Value)
         std::fs::write(&pf, p).unwrap();
         cmd.arg("--policy").arg(&pf);
     }
-    cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env_remove("CANDOR_R1664_OFF");
-    if off {
-        cmd.env("CANDOR_R1664_OFF", "1");
+    cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env_remove("CANDOR_R1664_OFF").env_remove("CANDOR_R1657S2_OFF");
+    for v in off {
+        cmd.env(v, "1");
     }
     let out = cmd.output().expect("run candor-scan");
     let code = out.status.code().unwrap_or(-1);
-    let refused_by_switch = off && policy.is_some() && code == 2;
+    let refused_by_switch = !off.is_empty() && policy.is_some() && code == 2;
     assert!(code == 0 || code == 1 || refused_by_switch, "scan failed ({code}): {}", String::from_utf8_lossy(&out.stderr));
     (code, serde_json::from_slice(&out.stdout).expect("report json"))
 }
@@ -69,7 +79,16 @@ pub fn plain_zq(c: &crate::cht::segment::Tbl) { c.poke(); }\n\
 #[test]
 fn r1664_a_renamed_reexport_owner_that_names_no_unit_discloses() {
     let d = fixture("ren", SRC);
-    let (_, on) = scan(&d, None, false);
+    // R1657 stage 2: RESOLVED — the write is charged, with no disclosure left to make.
+    let (_, s2) = scan(&d, None, false);
+    for f in ["user::alias_zq", "user::path_zq", "user::imported_zq"] {
+        assert_eq!(inferred(&s2, f), ["Env", "Fs"], "{f}: stage 2 resolves the renamed owner {s2:#}");
+        assert!(!why(&s2, f).iter().any(|w| w.contains("renamed re-export")), "{f}: {s2:#}");
+    }
+    let (rc, _) = scan(&d, Some("deny Fs user::alias_zq\n"), false);
+    assert_eq!(rc, 1, "the resolved write reaches the gate");
+    // The R1664 floor, which stage 2 supersedes, is what its kill switch gives back.
+    let (_, on) = scan_with(&d, None, &["CANDOR_R1657S2_OFF"]);
     for f in ["user::alias_zq", "user::path_zq", "user::imported_zq"] {
         assert_eq!(inferred(&on, f), ["Unknown"], "{f}: {on:#}");
         assert!(why(&on, f).iter().any(|w| w.starts_with("unresolved:renamed re-export type `RenamedTbl`")), "{f}: {on:#}");
@@ -77,8 +96,6 @@ fn r1664_a_renamed_reexport_owner_that_names_no_unit_discloses() {
     // The control: the declared spelling resolves, charges the write, and carries no such disclosure.
     assert!(inferred(&on, "user::plain_zq").contains(&"Fs".to_string()), "{on:#}");
     assert!(!why(&on, "user::plain_zq").iter().any(|w| w.contains("renamed re-export")), "{on:#}");
-    let (rc, _) = scan(&d, Some("deny Unknown user::alias_zq\n"), false);
-    assert_eq!(rc, 1, "the disclosure reaches the gate");
     let (_, off) = scan(&d, None, true);
     for f in ["user::alias_zq", "user::path_zq", "user::imported_zq"] {
         assert!(row(&off, f).is_none(), "CANDOR_R1664_OFF restores the ABSENT row for {f}: {off:#}");

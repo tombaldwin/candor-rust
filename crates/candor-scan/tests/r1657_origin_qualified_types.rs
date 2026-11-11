@@ -196,8 +196,10 @@ fn main() {{ m::mac_m_body_zq(&m::Holder {{ t: m::Tool }}); n::mac_n_body_zq(&n:
 }
 
 /// HAZARD (ii): an owner spelled through a RE-EXPORT (`crate::runtime::Handle` for `runtime::handle::Handle`) is anchored but
-/// not declared there, so it is not proven. Published: ABSENT over the write (the last twin's pure field). Now: refused and
-/// disclosed with a true reason; the declaring path proves its owner and reads pure.
+/// not declared there. Published: ABSENT over the write (the last twin's pure field). Stage 1a: refused and disclosed with a
+/// true reason. STAGE 2 (the re-export table, `lang::reexport_lookup`): RESOLVED to the declaration the re-export names, so
+/// the write is charged; the stage-1a disclosure is what `CANDOR_R1657S2_OFF` gives back (`tests/r1657s2_reexport_table.rs`
+/// pins that arm). The declaring path proves its owner and reads pure on every arm.
 #[test]
 fn r1657_an_unproven_reexport_owner_is_disclosed_not_picked() {
     let src = format!("mod runtime {{ mod handle {{ pub struct EngR; impl EngR {{ pub fn run(&self) {{ {W} }} }} pub struct Handle {{ pub inner: EngR }} }}\n\
@@ -207,8 +209,7 @@ mod c {{ pub fn rex_param_zq(h: &crate::runtime::Handle) {{ h.inner.run(); }}\np
 fn main() {{ c::rex_param_zq(&runtime::Handle {{ inner: runtime::EngR }}); c::rex_other_zq(&other::Handle {{ inner: other::EngO }}); }}\n");
     let d = fixture("rex", &[("main.rs", &src)]);
     let (_, on) = scan(&d, None, false);
-    assert_eq!(inferred(&on, "c::rex_param_zq"), ["Unknown"], "{on:#}");
-    assert!(why(&on, "c::rex_param_zq").iter().any(|w| w.starts_with("ambiguous:same-name types `Handle`")), "{on:#}");
+    assert_eq!(inferred(&on, "c::rex_param_zq"), ["Env", "Fs"], "stage 2 resolves the re-export owner {on:#}");
     assert!(inferred(&on, "c::rex_other_zq").is_empty(), "the proven owner reads its own pure field {on:#}");
     let _ = std::fs::remove_dir_all(&d);
 }

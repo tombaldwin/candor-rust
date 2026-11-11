@@ -46,7 +46,7 @@ fn scan(dir: &Path, policy: Option<&str>, off: &[&str]) -> (i32, serde_json::Val
         std::fs::write(&pf, p).unwrap();
         cmd.arg("--policy").arg(&pf);
     }
-    for v in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1682_OFF", "CANDOR_R1684_OFF"] {
+    for v in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1682_OFF", "CANDOR_R1684_OFF", "CANDOR_R1657S2_OFF"] {
         cmd.env_remove(v);
     }
     for v in off {
@@ -151,7 +151,9 @@ fn r1682_the_kill_switches_restore_the_last_written_arm_reading() {
     // Windows written last: with both switches off the old reading returns and the fixture's charges vanish — the cases
     // above reach the new code rather than passing for some other reason.
     let d = fixture("off", &family(true));
-    let (_, v) = scan(&d, None, &["CANDOR_R1682_OFF", "CANDOR_R1684_OFF"]);
+    // R1657 stage 2's re-export table answers the same non-root `pub use` arm sets from the `Reexport` edges (a union of
+    // every arm), so it is switched off too: this test is about the cfg-arm routes' own reach.
+    let (_, v) = scan(&d, None, &["CANDOR_R1682_OFF", "CANDOR_R1684_OFF", "CANDOR_R1657S2_OFF"]);
     let silent: Vec<&&str> = CHARGED.iter().filter(|f| !inferred(&v, f).contains(&"Fs".to_string())).collect();
     for f in ["fmt::Adapter::drop", "fmt::r1682_fmt_use", "r1682_root_ci", "r1682_plat_out", "fmt::gl::r1682_fmt_glob"] {
         assert!(silent.contains(&&f), "with the switches set `{f}` reads the old (silent) answer; silent set: {silent:?}");
@@ -181,6 +183,10 @@ fn r1682_an_item_arm_defined_below_its_re_exporting_module_reaches_the_definitio
     let (code, _) = scan(&d, Some("deny Fs Listener::r1682_accept_std\n"), &[]);
     assert_eq!(code, 1);
     // With the switch the pre-R1682 reading returns: the ordinary route's disclosure, never silence.
-    let (_, off) = scan(&d, None, &["CANDOR_R1682_OFF"]);
+    let (_, off) = scan(&d, None, &["CANDOR_R1682_OFF", "CANDOR_R1657S2_OFF"]);
     assert_eq!(inferred(&off, "Listener::r1682_accept_std"), vec!["Unknown".to_string()]);
+    // R1657 stage 2 alone (R1682 off): the re-export table follows `sys::Lis` -> `sys::unix::Lis` -> `sys::unix::tcp::Lis` (and
+    // the windows arm) to the DEFINITIONS, so the field's owner is the definition and the write is charged.
+    let (_, s2) = scan(&d, None, &["CANDOR_R1682_OFF"]);
+    assert!(inferred(&s2, "Listener::r1682_accept_std").contains(&"Fs".to_string()), "{s2:#}");
 }

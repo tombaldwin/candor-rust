@@ -16798,6 +16798,8 @@ trait G {
             // `pub use self::platform::*` in a SUBMODULE — a call `imp::doit()` in ANOTHER file resolves
             // through it, so a change to the edge set re-resolves that file's calls.
             reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into(), cfg_gated: false }); },
+            // SOUNDNESS R1657 stage 2 (R1689) — the private local bindings steer the re-export table's answers.
+            private_uses => |m| { m.private_uses.push(Reexport { module: "plat".into(), from: vec!["".into()], name: "tu".into(), alias: "sys".into(), cfg_gated: false }); },
             // R99: `mod facade { pub use std::process::Command; }` / `pub type Cmd = …` — seeded into
             // EVERY file's `use` map, so a change re-resolves `facade::Command::new` in other files.
             mod_aliases => |m| { m.mod_aliases.insert("facade::Command".into(), "std::process::Command".into()); },
@@ -18451,6 +18453,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // rustagent-r1537c (R1537 (c)) bumped it to rev170 (Pass B's `FnInfo::impl_kind/impl_trait/impl_flags` and `Call::cside`).
         // rustagent-stage1b (R1657 stage 1b) bumped it to rev172 (`self` typed by the impl's origin-qualified self type; rev171 is R1673's).
         // rustagent-r1682 (R1682) bumped it to rev173 (every module's `#[cfg]`-duplicated `use` arm set rides `mod_aliases`).
+        // rustagent-stage2 (R1657 stage 2) bumped it to rev174 (the crate-wide re-export table; the uniform-path module re-export edge).
+        // rustagent-stage2b (R1657 stage 2) bumped it to rev177 (a `*` marker edge for every glob naming no local module; rev175/rev176 are other branches').
         // rustagent-v057 (R1167) bumped it to rev108.
         // rustagent-r1165 (R1165) bumped it to rev107.
         // rustagent-v055 (R1164) bumped it to rev106.
@@ -18494,7 +18498,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172", "rev173", "rev174", "rev175", "rev176"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18505,7 +18509,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev173/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev177/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -23045,7 +23049,7 @@ pub fn go() {{ imp::doit(); }}
         crate::decls::record_alias(&mut aliases, "facade::Cmd".into(), "std::fs::File".into());
         crate::decls::record_alias(&mut aliases, "single::Cmd".into(), "std::process::Command".into());
 
-        let out = alias_expand_decls(&fd, "", &aliases).expect(
+        let out = alias_expand_decls(&fd, "", &aliases, &Default::default()).expect(
             "the SINGLE-arm field must move — without this the assertion below could hold because \
              nothing expands at all",
         );
@@ -23067,7 +23071,7 @@ pub fn go() {{ imp::doit(); }}
         let mut fd2 = FileDecls::default();
         fd2.field_elem.entry("Holder".into()).or_default().insert(
             "v".into(), format!("facade::Cmd{}V", crate::lang::WRAPPED_CONTAINER_MARK));
-        if let Some(o2) = alias_expand_decls(&fd2, "", &aliases) {
+        if let Some(o2) = alias_expand_decls(&fd2, "", &aliases, &Default::default()) {
             assert!(!o2.field_elem["Holder"]["v"].contains('\u{1}'), "a LAYERED entry keeps the refusal");
         }
     }
