@@ -39,6 +39,10 @@ struct Facts {
     m: String,
     /// local `macro_rules!` names whose bodies are known not to write a trait, a `use`, a nested macro call or `m`
     safe_macros: HashSet<String>,
+    /// a name any definition of which is unsafe: a same-name twin never whitelists it
+    unsafe_macros: HashSet<String>,
+    /// local macro names invoked anywhere (checked against `unsafe_macros` after the walk: a twin may be defined later)
+    used_local: std::cell::RefCell<HashSet<String>>,
 }
 
 impl Facts {
@@ -89,7 +93,7 @@ impl Facts {
             {
                 self.doubt(format!("derive:{w}"));
             }
-        } else if matches!(head.as_str(), "cfg_attr" | "path") {
+        } else if matches!(head.as_str(), "cfg_attr" | "path" | "feature") {
             self.doubt(format!("attr:{head}"));
         }
     }
@@ -105,7 +109,7 @@ impl Facts {
                 // a `$name` fragment can stand for any identifier, including a `trait` name or the method
                 T::Punct(p) if p.as_char() == '$' && matches!(toks.get(i + 1), Some(T::Ident(_))) => {
                     if matches!(toks.get(i + 2), Some(T::Punct(c)) if c.as_char() == ':')
-                        && matches!(toks.get(i + 3), Some(T::Ident(k)) if k == "ident" || k == "item" || k == "tt" || k == "path" || k == "meta" || k == "vis")
+                        && matches!(toks.get(i + 3), Some(T::Ident(k)) if k == "ident" || k == "item" || k == "stmt" || k == "block" || k == "tt" || k == "path" || k == "meta" || k == "vis")
                     {
                         return true;
                     }
@@ -130,7 +134,7 @@ impl Facts {
         let segs: Vec<String> = mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
         let last = segs.last().map(String::as_str).unwrap_or("");
         match segs.len() {
-            1 => self.safe_macros.contains(last) || (INERT_STD_MACROS.contains(&last) && !self.local.contains(last)),
+            1 => self.safe_macros.contains(last) && { self.used_local.borrow_mut().insert(last.to_string()); true } || (INERT_STD_MACROS.contains(&last) && !self.local.contains(last)),
             _ => matches!(segs[0].as_str(), "std" | "core" | "alloc") && INERT_STD_MACROS.contains(&last),
         }
     }
@@ -153,6 +157,11 @@ impl<'ast> Visit<'ast> for Facts {
             syn::Item::Use(x) => (None, &x.attrs),
             syn::Item::ExternCrate(x) => (Some(x.rename.as_ref().map(|r| r.1.to_string()).unwrap_or_else(|| x.ident.to_string())), &x.attrs),
             syn::Item::Macro(x) => (x.ident.as_ref().map(|i| i.to_string()), &x.attrs),
+            // `macro` 2.0 (`decl_macro`) and other unparsed items may write a `use`
+            syn::Item::Verbatim(_) => {
+                self.doubt("verbatim".into());
+                (None, &[])
+            }
             _ => (None, &[]),
         };
         // an `extern crate dep as d;` makes `d::Ext` a path this reading would take for a local module's
@@ -183,6 +192,17 @@ impl<'ast> Visit<'ast> for Facts {
         }
         syn::visit::visit_item_trait(self, t);
     }
+    /// SOUNDNESS R1627 (Fable F1) — the collector walks calls out of the TOKENS of any macro invocation, so such a call sits in a
+    /// scope the AST never shows: a `use` the user wrote inside the tokens, or one the macro's expansion injects around them
+    /// (`($e:expr) => {{ use $crate::Ext; $e }}`). Fail closed at every position, expression included: refuse when the tokens write a
+    /// `use` or a `trait`, or when a macro this reading cannot expand is handed the method's name.
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if Self::body_writes_scope(&mac.tokens, "\u{0}") {
+            self.doubt(format!("macrouse:{}", mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()));
+        } else if !self.macro_ok(mac) && Self::body_writes_scope(&mac.tokens, &self.m) {
+            self.doubt(format!("macrocall:{}", mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()));
+        }
+    }
     fn visit_item_macro(&mut self, im: &'ast syn::ItemMacro) {
         if im.mac.path.is_ident("macro_rules") && im.ident.is_some() {
             // a body that writes a `use` or a trait, or names the method, may put a trait in scope around the tokens it is handed
@@ -190,12 +210,17 @@ impl<'ast> Visit<'ast> for Facts {
             if Self::body_writes_scope(&im.mac.tokens, &self.m) {
                 self.doubt(format!("macrobody:{}", im.ident.as_ref().map(|i| i.to_string()).unwrap_or_default()));
             }
-            if !Self::body_unsafe(&im.mac.tokens, &self.m) {
-                if let Some(n) = &im.ident {
+            if let Some(n) = &im.ident {
+                if Self::body_unsafe(&im.mac.tokens, &self.m) {
+                    self.unsafe_macros.insert(n.to_string());
+                    self.safe_macros.remove(&n.to_string());
+                } else if !self.unsafe_macros.contains(&n.to_string()) {
                     self.safe_macros.insert(n.to_string());
                 }
             }
-        } else if !self.macro_ok(&im.mac) {
+        } else if self.macro_ok(&im.mac) {
+            self.visit_macro(&im.mac);
+        } else {
             self.doubt(format!("itemmacro:{}", im.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()));
         }
     }
@@ -272,6 +297,9 @@ impl DepSigs {
         }
         if let Some(w) = facts.why.take() {
             return Err(w);
+        }
+        if let Some(n) = facts.used_local.borrow().iter().find(|n| facts.unsafe_macros.contains(*n)) {
+            return Err(format!("macrotwin:{n}"));
         }
         for r in ["std", "core", "alloc"] {
             if facts.local.contains(r) {

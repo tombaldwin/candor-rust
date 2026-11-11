@@ -39,8 +39,9 @@ fn dep(root: &Path, fmac: bool) {
         &d.join("src/lib.rs"),
         &format!(
             "pub mod exponential;\npub mod extra;\npub mod backoff {{ pub trait Backoff {{}} }}\npub mod prelude {{ pub use crate::extra::Extra; }}\n\
-             pub use crate::exponential::{{ExponentialBackoff, ExponentialBackoffBuilder}};\n{}",
-            if fmac { "pin_project_lite::pin_project! { pub struct Fut<F> { #[pin] f: F } }\n" } else { "" }
+             pub use crate::exponential::{{ExponentialBackoff, ExponentialBackoffBuilder}};\n{}{}",
+            if fmac { "pin_project_lite::pin_project! { pub struct Fut<F> { #[pin] f: F } }\n" } else { "" },
+            "#[macro_export] macro_rules! wrap { ($e:expr) => {{ use $crate::extra::Extra; $e }}; }\n"
         ),
     );
     write(
@@ -72,6 +73,7 @@ pub fn t_build_only() -> backoff::ExponentialBackoff { ExponentialBackoffBuilder
 pub fn t_chain_reset() { ExponentialBackoffBuilder::new().build().reset() }\n\
 pub fn t_let_reset() { let mut e = ExponentialBackoffBuilder::new().build(); e.reset() }\n\
 pub fn t_with_only() { let mut b = ExponentialBackoffBuilder::new(); b.with_multiplier(2.0).with_max(1); }\n\
+pub fn t_local_let() -> Option<u32> { let mut e = loc::B::new().build(); e.next_backoff() }\n\
 pub fn t_local_chain() -> Option<u32> { loc::B::new().build().next_backoff() }\n\
 mod loc { pub struct B; pub struct E; impl B { pub fn new() -> B { B } pub fn build(&self) -> E { E } } impl E { pub fn next_backoff(&mut self) -> Option<u32> { None } } }\n";
 
@@ -79,7 +81,7 @@ const CHARGED: &[&str] = &[
     "s_chain_path", "s_chain_use", "s_chain_reexp", "s_chain_with", "s_let_b", "s_let_with", "s_let_built", "s_closure", "s_closure_let",
     "s_via_local_fn",
 ];
-const PURE: &[&str] = &["t_build_only", "t_chain_reset", "t_let_reset", "t_with_only", "t_local_chain"];
+const PURE: &[&str] = &["t_build_only", "t_chain_reset", "t_let_reset", "t_with_only", "t_local_chain", "t_local_let"];
 
 fn consumer(root: &Path, name: &str, body: &str) -> PathBuf {
     let d = root.join(name);
@@ -162,6 +164,13 @@ fn a_trait_that_could_supply_the_method_keeps_the_published_reading() {
         // a statement-position foreign macro may expand to a `use`
         ("h4", format!("use backoff::ExponentialBackoffBuilder;\npub fn noise() {{ foreign::emit!(); }}\n{call}")),
         // an item-position foreign macro may write a trait
+        // a foreign EXPRESSION macro whose expansion injects `use Extra` around the call it was handed (the call is walked out of
+        // the invocation tokens, in a scope the AST never shows); `Extra::build(self)` wins over the inherent `build(&self)`
+        ("h6", "use backoff::ExponentialBackoffBuilder;\npub fn h_chain() -> Option<u32> { backoff::wrap!(ExponentialBackoffBuilder::new().build().next_backoff()) }\n\
+                pub fn h_let() -> Option<u32> { backoff::wrap!({ let mut e = ExponentialBackoffBuilder::new().build(); e.next_backoff() }) }\n".to_string()),
+        // the user's own `use` inside the tokens of a std macro
+        ("h7", "use backoff::ExponentialBackoffBuilder;\npub fn h_chain() -> Option<u32> { let r = { use backoff::extra::Extra; ExponentialBackoffBuilder::new().build().next_backoff() }; println!(\"{:?}\", { use backoff::extra::Extra as _; r }); r }\n\
+                pub fn h_let() -> Option<u32> { let mut e = ExponentialBackoffBuilder::new().build(); e.next_backoff() }\n".to_string()),
         ("h5", format!("use backoff::ExponentialBackoffBuilder;\nforeign::emit_items! {{ }}\n{call}")),
     ];
     for (name, body) in hazards {
