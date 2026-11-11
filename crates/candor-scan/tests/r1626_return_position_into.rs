@@ -48,8 +48,10 @@ pub fn own_into() -> TgtQ { Own.into() }
 const PURE: &[&str] = &["p_tail", "p_ret", "p_ok", "p_some", "p_string", "p_reflexive", "p_generic", "own_into"];
 const EFF: &[&str] = &["f_tail", "f_return_only", "f_ok", "f_some", "f_branch", "f_match", "f_block", "H::f_method", "f_annot"];
 
-fn fixture() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("candor-r1626-{}", std::process::id()));
+// `tag` keeps each test's tree its own: cargo runs tests as threads of ONE process, so `process::id()` alone is shared and two
+// tests doing remove_dir_all + create_dir_all + write on one path race (measured: ~5% of runs failed at --test-threads=8)
+fn fixture(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("candor-r1626-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("src")).unwrap();
     std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
@@ -87,7 +89,7 @@ fn inf(r: &HashMap<String, Vec<String>>, f: &str) -> Vec<String> {
 
 #[test]
 fn r1626_a_pure_twins_stay_absent() {
-    let d = fixture();
+    let d = fixture("pure");
     for off in [None, Some("into")] {
         let rows = scan(&d, off);
         for f in PURE {
@@ -98,7 +100,7 @@ fn r1626_a_pure_twins_stay_absent() {
 
 #[test]
 fn r1626_b_every_return_position_spelling_reaches_from() {
-    let d = fixture();
+    let d = fixture("spell");
     let on = scan(&d, None);
     for f in EFF {
         assert_eq!(inf(&on, f), vec!["Fs".to_string()], "{f}");
