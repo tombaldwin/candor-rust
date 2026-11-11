@@ -468,6 +468,22 @@ impl ModTable {
         Some(b)
     }
 
+    /// SOUNDNESS R1628 — EVERY binding of `n` in module `m` when there are several and each is conditional, in a module where
+    /// every alternative is visible (no opaque item, no glob). One build compiles at most one of them (a name binds once per
+    /// namespace in a module, E0428/E0255), so the name denotes the UNION of its arms — SPEC ⟨0.38⟩, *a conditional binding
+    /// resolves to the union of its arms* — and a consumer's spelling of it covers whichever arm is compiled. A single binding
+    /// is `one`'s answer, unchanged.
+    fn alts(&self, m: &str, n: &str) -> Option<Vec<&Bind>> {
+        let v = self.binds.get(&(m.to_string(), n.to_string()))?;
+        if let [_] = v.as_slice() {
+            return self.one(m, n).map(|b| vec![b]);
+        }
+        if v.len() < 2 || v.len() > 4 || !v.iter().all(Bind::cond) || self.opaque.contains(m) || self.globs.contains(m) {
+            return None;
+        }
+        Some(v.iter().collect())
+    }
+
     /// The module a path's module segments name, from module `from`: `crate`/`self`/`super`, then declared child modules only.
     fn mod_path(&self, from: &str, segs: &[String]) -> Option<String> {
         let mut cur = from.to_string();
@@ -495,58 +511,77 @@ impl ModTable {
         Some(cur)
     }
 
-    /// What name `n` denotes in module `m` (type namespace). `via_use`: reached through an explicit `use`, so a module with no
-    /// visible binding of it still binds it somewhere out of sight, and the PATH is the answer.
-    fn name(&self, idx: &SrcIndex, m: &str, n: &str, via_use: bool, depth: usize) -> Option<Res> {
+    /// What name `n` denotes in module `m` (type namespace): one `Res` per arm of a conditional binding (`alts`), in source
+    /// order (SOUNDNESS R1628; before it a name bound twice was not read). `via_use`: reached through an explicit `use`, so a
+    /// module with no visible binding of it still binds it somewhere out of sight, and the PATH is the answer.
+    fn names(&self, idx: &SrcIndex, m: &str, n: &str, via_use: bool, depth: usize) -> Option<Vec<Res>> {
         if depth > 8 || !self.readable(m) {
             return None;
         }
         let qual = if m.is_empty() { n.to_string() } else { format!("{m}::{n}") };
         if !self.binds.contains_key(&(m.to_string(), n.to_string())) {
             // a name the module binds out of sight: only an explicit `use` (which compiled) proves it is bound here at all
-            return (via_use && !self.fns.contains_key(&(m.to_string(), n.to_string()))).then_some(Res::Path(qual));
+            return (via_use && !self.fns.contains_key(&(m.to_string(), n.to_string()))).then(|| vec![Res::Path(qual)]);
         }
-        match self.one(m, n)? {
-            Bind::Nominal { params, .. } => Some(Res::Decl(qual, *params)),
-            Bind::Alias { target, .. } => Some(Res::Alias(qual, m.to_string(), target.clone())),
-            Bind::Use { path, .. } => {
-                let root = path.first()?;
-                if matches!(root.as_str(), "std" | "core" | "alloc") {
-                    return Some(Res::Std(path.last()?.clone()));
+        let mut out = Vec::new();
+        for b in self.alts(m, n)? {
+            match b {
+                Bind::Nominal { params, .. } => out.push(Res::Decl(qual.clone(), *params)),
+                Bind::Alias { target, .. } => out.push(Res::Alias(qual.clone(), m.to_string(), target.clone())),
+                Bind::Use { path, .. } => {
+                    let root = path.first()?;
+                    if matches!(root.as_str(), "std" | "core" | "alloc") {
+                        out.push(Res::Std(path.last()?.clone()));
+                        continue;
+                    }
+                    if !matches!(root.as_str(), "crate" | "self" | "super") && idx.external_root(root) {
+                        return None;
+                    }
+                    let (last, mods) = path.split_last()?;
+                    let tm = self.mod_path(m, mods)?;
+                    out.extend(self.names(idx, &tm, last, true, depth + 1)?);
                 }
-                if !matches!(root.as_str(), "crate" | "self" | "super") && idx.external_root(root) {
-                    return None;
-                }
-                let (last, mods) = path.split_last()?;
-                let tm = self.mod_path(m, mods)?;
-                self.name(idx, &tm, last, true, depth + 1)
+                Bind::Mod { .. } | Bind::Other => return None,
             }
-            Bind::Mod { .. } | Bind::Other => None,
         }
+        (out.len() <= 4).then_some(out)
     }
 
     /// A written type path in module `m`.
     fn ty(&self, idx: &SrcIndex, m: &str, segs: &[String]) -> Option<Res> {
+        let mut v = self.tys(idx, m, segs)?;
+        if v.len() == 1 { v.pop() } else { None }
+    }
+
+    /// SOUNDNESS R1628 — `ty`, answering every arm of a conditional binding of the last segment.
+    fn tys(&self, idx: &SrcIndex, m: &str, segs: &[String]) -> Option<Vec<Res>> {
         let (last, mods) = segs.split_last()?;
         if mods.first().is_some_and(|r| matches!(r.as_str(), "std" | "core" | "alloc")) {
-            return Some(Res::Std(last.clone()));
+            return Some(vec![Res::Std(last.clone())]);
         }
         if mods.is_empty() {
             if self.binds.contains_key(&(m.to_string(), last.clone())) {
-                return self.name(idx, m, last, false, 0);
+                return self.names(idx, m, last, false, 0);
             }
             // a std prelude type, where nothing in the module could have bound the name out of sight
             let prelude = matches!(last.as_str(), "String" | "Vec" | "Box" | "Option" | "Result");
-            return (prelude && self.readable(m) && !self.opaque.contains(m) && !self.globs.contains(m)).then(|| Res::Std(last.clone()));
+            return (prelude && self.readable(m) && !self.opaque.contains(m) && !self.globs.contains(m)).then(|| vec![Res::Std(last.clone())]);
         }
         let tm = self.mod_path(m, mods)?;
-        self.name(idx, &tm, last, false, 0)
+        self.names(idx, &tm, last, false, 0)
     }
 
     /// SOUNDNESS R1619 — the shortest PUBLIC path a consumer can spell the nominal `q` (crate-relative declaring qual) by: a
     /// `pub` binding, in a module reached from the root through `pub mod`s only, that resolves to `q`. `None` when there is
     /// none (or `q` is itself that path).
     fn public_path(&self, idx: &SrcIndex, q: &str) -> Option<String> {
+        self.public_paths(idx, q, false).into_iter().filter(|b| b != q).min_by(|a, b| (a.matches("::").count(), a).cmp(&(b.matches("::").count(), b)))
+    }
+
+    /// SOUNDNESS R1619 / R1628 — every public path (see `public_path`) one of whose bindings' arms resolves to `q`. A name bound
+    /// by several conditional `pub use`s (`alts`) is a hit, when `multi`, if ANY arm does: the name denotes the union of its arms.
+    /// Without `multi` only a single binding is read, as R1619 did.
+    fn public_paths(&self, idx: &SrcIndex, q: &str, multi: bool) -> Vec<String> {
         let mut public: HashSet<String> = HashSet::new();
         let mut work = vec![String::new()];
         while let Some(m) = work.pop() {
@@ -559,47 +594,56 @@ impl ModTable {
                 }
             }
         }
-        let mut best: Option<String> = None;
+        let mut out: Vec<String> = Vec::new();
         for ((bm, n), v) in &self.binds {
             if !public.contains(bm) {
                 continue;
             }
-            let pubb = matches!(v.as_slice(), [Bind::Nominal { public: true, .. }] | [Bind::Use { public: true, .. }] | [Bind::Alias { public: true, .. }]);
+            if v.len() != 1 && !multi {
+                continue;
+            }
+            let pubb = v.iter().all(|b| matches!(b, Bind::Nominal { public: true, .. } | Bind::Use { public: true, .. } | Bind::Alias { public: true, .. }));
             if !pubb {
                 continue;
             }
-            let hit = match self.name(idx, bm, n, false, 0) {
-                Some(Res::Decl(d, _)) => d == q,
-                Some(Res::Alias(_, am, Some(t))) => matches!(self.nominal(idx, &am, &t, 0), Some((dm, l, _)) if (if dm.is_empty() { l.clone() } else { format!("{dm}::{l}") }) == q) && matches!(v.as_slice(), [Bind::Use { .. }]),
-                _ => false,
-            };
+            let all_use = v.iter().all(|b| matches!(b, Bind::Use { .. }));
+            let hit = self.names(idx, bm, n, false, 0).is_some_and(|rs| {
+                rs.iter().any(|r| match r {
+                    Res::Decl(d, _) => d == q,
+                    Res::Alias(_, am, Some(t)) => all_use && matches!(self.nominal(idx, am, t, 0), Some((dm, l, _)) if (if dm.is_empty() { l.clone() } else { format!("{dm}::{l}") }) == q),
+                    _ => false,
+                })
+            });
             if hit {
-                let cand = if bm.is_empty() { n.clone() } else { format!("{bm}::{n}") };
-                let better = match &best {
-                    None => true,
-                    Some(b) => (cand.matches("::").count(), &cand) < (b.matches("::").count(), b),
-                };
-                if better {
-                    best = Some(cand);
-                }
+                out.push(if bm.is_empty() { n.clone() } else { format!("{bm}::{n}") });
             }
         }
-        best.filter(|b| b != q)
+        out
     }
 
     /// The declaring module and generic count of the NOMINAL type a path in module `m` names, through aliases.
     fn nominal(&self, idx: &SrcIndex, m: &str, segs: &[String], depth: usize) -> Option<(String, String, usize)> {
+        let mut v = self.nominals(idx, m, segs, depth)?;
+        if v.len() == 1 { v.pop() } else { None }
+    }
+
+    /// SOUNDNESS R1628 — `nominal`, one answer per arm of a conditional binding (`alts`).
+    fn nominals(&self, idx: &SrcIndex, m: &str, segs: &[String], depth: usize) -> Option<Vec<(String, String, usize)>> {
         if depth > 4 {
             return None;
         }
-        match self.ty(idx, m, segs)? {
-            Res::Decl(q, n) => {
-                let (dm, leaf) = q.rsplit_once("::").map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or((String::new(), q.clone()));
-                Some((dm, leaf, n))
+        let mut out = Vec::new();
+        for r in self.tys(idx, m, segs)? {
+            match r {
+                Res::Decl(q, n) => {
+                    let (dm, leaf) = q.rsplit_once("::").map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or((String::new(), q.clone()));
+                    out.push((dm, leaf, n));
+                }
+                Res::Alias(_, am, Some(target)) => out.extend(self.nominals(idx, &am, &target, depth + 1)?),
+                _ => return None,
             }
-            Res::Alias(_, am, Some(target)) => self.nominal(idx, &am, &target, depth + 1),
-            _ => None,
         }
+        (out.len() <= 4).then_some(out)
     }
 }
 
@@ -828,7 +872,8 @@ impl DepSigs {
         }
         let segs: Vec<String> = path.split("::").map(str::to_string).collect();
         let (leaf, pre) = segs.split_last().ok_or("empty")?;
-        let (is_async, wraps, written, home, self_ty) = match need {
+        type Alt = (bool, String, Vec<String>, String, Option<(String, String)>);
+        let alts: Vec<Alt> = match need {
             None => {
                 let m = mt.mod_path("", pre).ok_or("fnmod")?;
                 let v = mt.fns.get(&(m.clone(), leaf.clone())).ok_or("nofn")?;
@@ -843,10 +888,17 @@ impl DepSigs {
                     return Err("cond".into());
                 }
                 let (w, p) = ret_path(&f.output, &f.generics, None).ok_or("ret?")?;
-                (f.is_async, w, p, m, None)
+                vec![(f.is_async, w, p, m, None)]
             }
             Some(k) => {
-                let (dm, tleaf, params) = mt.nominal(idx, "", pre, 0).ok_or("recv?")?;
+                // SOUNDNESS R1628: a receiver whose root binding has several conditional arms (`reqwest::Client`: `async_impl` and
+                // `wasm`, through `if_hyper!`/`if_wasm!`) is read per arm, and the arms must agree (below)
+                let recvs = mt.nominals(idx, "", pre, 0).ok_or("recv?")?;
+                if recvs.len() > 1 && candor_report::env::switch("CANDOR_R1628_OFF") {
+                    return Err("recv?".into());
+                }
+                let mut alts: Vec<Alt> = Vec::new();
+                for (dm, tleaf, params) in recvs {
                 let cands = method_cands(idx, &tleaf, leaf);
                 let mut mine: Vec<&MCand> = Vec::new();
                 for c in &cands {
@@ -882,9 +934,48 @@ impl DepSigs {
                     return Err("form".into());
                 }
                 let (w, p) = ret_path(&c.output, &c.generics, Some(&tleaf)).ok_or("ret?")?;
-                (c.is_async, w, p, dm.clone(), Some((dm, tleaf)))
+                alts.push((c.is_async, w, p, dm.clone(), Some((dm, tleaf))));
+                }
+                alts
             }
         };
+        let mut rets: Vec<DepRet> = Vec::new();
+        for (is_async, wraps, written, home, self_ty) in alts {
+            rets.push(Self::finish_ret(idx, mt, is_async, wraps, written, home, self_ty)?);
+        }
+        let first = rets.first().cloned().ok_or("noalt")?;
+        if rets.len() > 1 && candor_report::env::trace("CANDOR_R1628_INSTR") {
+            eprintln!("R1628ARMS\t{path}\t{}", rets.len()); // §E1 REACH COUNTER
+        }
+        if rets.iter().all(|r| *r == first) {
+            return Ok(first);
+        }
+        // SOUNDNESS R1628 — the arms of a conditional receiver return different declarations. The arms compile one at a time, so
+        // the answer is the UNION of theirs (⟨0.38⟩), and a single typed value can carry it only under a name that denotes the
+        // union: a public path every arm's return type is reachable by (`reqwest::RequestBuilder`, bound by both `if_hyper!` and
+        // `if_wasm!`). Arms that disagree on async-ness or wrappers, return a std type, or share no public name are not typed.
+        if rets.iter().any(|r| r.is_async != first.is_async || r.wraps != first.wraps) {
+            return Err("altshape".into());
+        }
+        let mut common: Option<BTreeSet<String>> = None;
+        for r in &rets {
+            let RetTy::Dep(q) = &r.ty else { return Err("altstd".into()) };
+            let ps: BTreeSet<String> = mt.public_paths(idx, q, true).into_iter().collect();
+            common = Some(match common {
+                None => ps,
+                Some(c) => c.intersection(&ps).cloned().collect(),
+            });
+        }
+        let best = common.unwrap_or_default().into_iter().min_by(|a, b| (a.matches("::").count(), a).cmp(&(b.matches("::").count(), b)));
+        let p = best.ok_or("altpub")?;
+        if candor_report::env::trace("CANDOR_R1628_INSTR") {
+            eprintln!("R1628UNION\t{path}\t{p}"); // §E1 REACH COUNTER
+        }
+        Ok(DepRet { is_async: first.is_async, wraps: first.wraps, ty: RetTy::Dep(p) })
+    }
+
+    /// One arm's written return, placed (`strict_ret`).
+    fn finish_ret(idx: &SrcIndex, mt: &ModTable, is_async: bool, wraps: String, written: Vec<String>, home: String, self_ty: Option<(String, String)>) -> Result<DepRet, String> {
         let ty = if written.len() == 1 && written[0].starts_with('\u{1}') {
             let (dm, tleaf) = self_ty.ok_or("self?")?;
             RetTy::Dep(if dm.is_empty() { tleaf } else { format!("{dm}::{tleaf}") })
