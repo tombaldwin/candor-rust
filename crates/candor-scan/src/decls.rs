@@ -2131,10 +2131,19 @@ pub(crate) fn collect_cfg_arm_aliases(
 ///
 /// A key the module ALSO declares (a `#[cfg]` twin of an item and a re-export under one name) keeps the declaration
 /// as an arm beside the re-export — the union, as R1489 does for a nominal/alias twin.
+///
+/// A key that is ALSO one of the crate's own MODULES (h3's `pub use builder::builder;` beside `mod builder;` in `server`)
+/// names two things in two namespaces: the module (types namespace — anything written BELOW it, `server::builder::Builder`)
+/// and the re-exported fn (values namespace — the name itself). Such an entry carries `REEXPORT_VALUE_ONLY` in front of its
+/// value and is never used as a PREFIX, here or in `lang::qualified_alias`: the module answers a longer path, as rustc's
+/// E0255 rule (one type-namespace binding per name) guarantees.
+pub(crate) const REEXPORT_VALUE_ONLY: char = '\u{7}';
+
 pub(crate) fn build_reexport_names(
     edges: &[Reexport],
     mod_aliases: &HashMap<String, String>,
     declared: &std::collections::HashSet<String>,
+    local_mods: &std::collections::HashSet<String>,
 ) -> HashMap<String, String> {
     fn chaseable(k: &str) -> bool {
         !k.starts_with(REDIRECT_MOD_MARK) && !k.ends_with(MOD_GLOB_KEY) && !k.contains(ITEM_SENTINEL)
@@ -2144,6 +2153,7 @@ pub(crate) fn build_reexport_names(
         own: &str,
         raw: &HashMap<String, String>,
         mod_aliases: &HashMap<String, String>,
+        local_mods: &std::collections::HashSet<String>,
         stack: &mut Vec<String>,
         out: &mut Vec<String>,
     ) {
@@ -2161,6 +2171,9 @@ pub(crate) fn build_reexport_names(
             if key == own {
                 continue; // the declaration arm of a twin names itself: terminal
             }
+            if n < segs.len() && local_mods.contains(&key) {
+                continue; // a path BELOW a declared module is the module's (see `REEXPORT_VALUE_ONLY`)
+            }
             let hit = raw.get(&key).or_else(|| if n >= 2 && chaseable(&key) { mod_aliases.get(&key) } else { None });
             let Some(v) = hit else { continue };
             if stack.contains(&key) {
@@ -2170,7 +2183,7 @@ pub(crate) fn build_reexport_names(
             stack.push(key.clone());
             for a in v.split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
                 let mut sub = Vec::new();
-                chase(a, &key, raw, mod_aliases, stack, &mut sub);
+                chase(a, &key, raw, mod_aliases, local_mods, stack, &mut sub);
                 out.extend(sub.into_iter().map(|r| crate::lang::alias_join(&r, &segs[n..])));
             }
             stack.pop();
@@ -2197,7 +2210,8 @@ pub(crate) fn build_reexport_names(
     let mut keys: Vec<String> = raw.keys().cloned().collect();
     keys.sort_unstable();
     for k in &keys {
-        if declared.contains(k) {
+        // A declared TYPE twin is unioned in (R1489's rule); a declared MODULE is the other namespace, not an arm.
+        if declared.contains(k) && !local_mods.contains(k) {
             record_alias(&mut raw, k.clone(), format!("crate::{k}"));
         }
     }
@@ -2206,7 +2220,7 @@ pub(crate) fn build_reexport_names(
         let mut out: Vec<String> = Vec::new();
         for a in raw[k].split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
             let mut stack = vec![k.clone()];
-            chase(a, k, &raw, mod_aliases, &mut stack, &mut out);
+            chase(a, k, &raw, mod_aliases, local_mods, &mut stack, &mut out);
         }
         let own = format!("crate::{k}");
         let mut arms: Vec<String> =
@@ -2219,7 +2233,8 @@ pub(crate) fn build_reexport_names(
         if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
             eprintln!("R1657S2NAME\t{k}\t{}", arms.join("|")); // §E1 REACH COUNTER
         }
-        table.insert(k.clone(), arms.join(&ALIAS_ALT_SEP.to_string()));
+        let v = arms.join(&ALIAS_ALT_SEP.to_string());
+        table.insert(k.clone(), if local_mods.contains(k) { format!("{REEXPORT_VALUE_ONLY}{v}") } else { v });
     }
     table
 }

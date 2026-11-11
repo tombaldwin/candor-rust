@@ -2865,7 +2865,7 @@ fn qualified_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) 
             return Some(alias_join(full, &segs[n..]));
         }
         if rooted {
-            if let Some(full) = reexport_lookup(&segs[..n].join("::")) {
+            if let Some(full) = reexport_lookup_at(&segs[..n].join("::"), n < segs.len()) {
                 if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
                     eprintln!("R1657S2PATH\t{}\t{}", segs.join("::"), full.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
                 }
@@ -2907,13 +2907,25 @@ pub(crate) fn r1657s2_off() -> bool {
     *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1657S2_OFF"))
 }
 
-/// SOUNDNESS R1657 stage 2 — the table's answer for a module-qualified name (no `crate::` prefix), if it has one.
+/// SOUNDNESS R1657 stage 2 — the table's answer for a module-qualified name (no `crate::` prefix) written AS A WHOLE NAME
+/// (nothing written below it), if it has one.
 pub(crate) fn reexport_lookup(key: &str) -> Option<String> {
+    reexport_lookup_at(key, false)
+}
+
+/// …and for `key` used as a PREFIX (`below`: the path continues under it). A key that is also one of the crate's modules
+/// answers only as a whole name (`decls::REEXPORT_VALUE_ONLY`): below it, the module is what the path names.
+pub(crate) fn reexport_lookup_at(key: &str, below: bool) -> Option<String> {
     let cell = reexport_names_cell().read().ok()?;
     if cell.is_empty() {
         return None;
     }
-    cell.get(key).cloned()
+    let v = cell.get(key)?;
+    match v.strip_prefix(crate::decls::REEXPORT_VALUE_ONLY) {
+        Some(_) if below => None,
+        Some(rest) => Some(rest.to_string()),
+        None => Some(v.clone()),
+    }
 }
 
 /// R99 (SHAPE 1) — resolve `glb::write` through a SUBMODULE's external GLOB re-export
@@ -2991,7 +3003,7 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
             if !hits.iter().any(|h| h == v) {
                 hits.push(v.clone());
             }
-        } else if let Some(v) = reexport_lookup(&key["crate::".len()..]).filter(|v| !v.is_empty()) {
+        } else if let Some(v) = reexport_lookup_at(&key["crate::".len()..], segs.len() >= 2).filter(|v| !v.is_empty()) {
             // SOUNDNESS R1657 stage 2 — a name the glob's module re-exports by a LOCAL named `use` (`pub mod plat
             // { pub use crate::tu as sys; }`, `use crate::plat::*; sys::fx()`): the R1684 residual.
             if !hits.contains(&v) {

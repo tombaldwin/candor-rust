@@ -1818,20 +1818,43 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // SOUNDNESS R1657 stage 2 — the crate-wide RE-EXPORT TABLE (`lang::reexport_lookup`): every local named re-export,
     // chased to the definition(s) it denotes. Installed BEFORE `alias_expand_decls`, which re-expands field / return /
     // payload types through `expand` and so normalises a type written at its re-export spelling.
+    // The crate's MODULE paths: every file's, every module a type or a re-export edge lives in or comes from, and every
+    // ancestor of those (an inline module holding only fns is not seen — it can only cost a value-only refusal's absence).
+    let r1657s2_mods: HashSet<String> = {
+        let mut m: HashSet<String> = HashSet::new();
+        let mut add = |p: &str| {
+            let mut cur = p;
+            while !cur.is_empty() && m.insert(cur.to_string()) {
+                cur = cur.rsplit_once("::").map_or("", |(a, _)| a);
+            }
+        };
+        for (rel, _, fd) in &decls_per_file {
+            add(&module_path(Path::new(rel)));
+            for (q, _, _) in &fd.ts.types {
+                add(q.rsplit_once("::").map_or("", |(a, _)| a));
+            }
+        }
+        for e in &merged.reexports {
+            add(&e.module);
+            for f in &e.from {
+                add(f);
+            }
+        }
+        m
+    };
     let r1657s2_declared: HashSet<String> = if crate::lang::r1657s2_off() {
         HashSet::new()
     } else {
         decls_per_file
             .iter()
             .flat_map(|(_, _, fd)| fd.ts.types.iter().map(|(q, _, _)| q.clone()))
-            .chain(merged.rets.keys().filter_map(|k| k.strip_prefix(crate::lang::LOCAL_MOD_PREFIX)).map(str::to_string))
             .collect()
     };
     let install_reexport_names = |merged: &MergedDecls| {
         let t = if crate::lang::r1657s2_off() {
             HashMap::new()
         } else {
-            crate::decls::build_reexport_names(&merged.reexports, &merged.mod_aliases, &r1657s2_declared)
+            crate::decls::build_reexport_names(&merged.reexports, &merged.mod_aliases, &r1657s2_declared, &r1657s2_mods)
         };
         let n = t.len();
         *crate::lang::reexport_names_cell().write().unwrap() = t;

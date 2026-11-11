@@ -123,6 +123,11 @@ pub mod other {{ pub struct EngO; impl EngO {{ pub fn run(&self) {{}} }} pub str
 pub mod m_owner {{ pub fn owner_zq(h: &crate::runtime::Handle) {{ h.inner.run(); }} pub fn owner_other_zq(h: &crate::other::Handle) {{ h.inner.run(); }} }}\n\
 pub mod uni {{ pub mod inner {{ pub fn fx() {{ {W} }} }} pub use inner as sys; }}\n\
 pub mod m_uni {{ use crate::uni::sys; pub fn uni_zq() {{ sys::fx() }} }}\n\
+pub mod srv {{ pub mod builder {{ pub struct Builder; pub fn builder() -> Builder {{ Builder }} impl Builder {{ pub fn build(&self) {{ {W} }} }} }}\n\
+  pub use builder::builder; pub use builder::Builder;\n\
+  pub mod conn {{ pub fn twin_below_zq() {{ super::builder::builder().build() }} pub fn twin_value_zq() {{ crate::srv::builder().build() }} }} }}\n\
+pub mod cli {{ pub mod builder {{ pub struct Builder; pub fn builder() -> Builder {{ Builder }} impl Builder {{ pub fn build(&self) {{}} }} }}\n\
+  pub use builder::builder; }}\n\
 fn main() {{}}\n"
     )
 }
@@ -144,14 +149,21 @@ fn r1657s2_reexported_names_resolve_on_every_reader() {
         "m_ty::ty_imported_zq",
         "m_owner::owner_zq",
         "m_uni::uni_zq",
+        "srv::conn::twin_below_zq",
+        "srv::conn::twin_value_zq",
     ];
     for f in charged {
         assert!(inferred(&on, f).contains(&"Fs".to_string()), "{f} must carry the re-exported definition's Fs {on:#}");
         let (code, _) = scan(&d, Some(&format!("deny Fs {f}\n")), false, None);
         assert_eq!(code, 1, "deny Fs {f} must fire");
         // The kill switch gives back the old reading: no Fs (absent, or the stage-1a / R1664 disclosure).
-        assert!(!inferred(&off, f).contains(&"Fs".to_string()), "{f}: CANDOR_R1657S2_OFF must restore the old reading {off:#}");
+        if !f.starts_with("srv::") {
+            assert!(!inferred(&off, f).contains(&"Fs".to_string()), "{f}: CANDOR_R1657S2_OFF must restore the old reading {off:#}");
+        }
     }
+    // h3's shape: `pub use builder::builder;` beside `mod builder;` — the fn re-export must not redirect a path written
+    // BELOW the module (`super::builder::builder()`), which aacd3880 resolved and a first cut of the table broke.
+    assert!(inferred(&off, "srv::conn::twin_below_zq").contains(&"Fs".to_string()), "the module path resolves without the table {off:#}");
     // Pure twins with unique names: charged on NO arm.
     for f in ["m_path::pure_ctl_zq", "m_ty::ty_pure_twin_zq", "m_owner::owner_other_zq"] {
         assert!(!inferred(&on, f).contains(&"Fs".to_string()), "{f} is pure {on:#}");
