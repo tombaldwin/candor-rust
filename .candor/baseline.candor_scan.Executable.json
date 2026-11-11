@@ -11463,6 +11463,69 @@
       ]
     },
     {
+      "fn": "depsig::probe::<impl depsig::DepSigs>::probe_clear",
+      "loc": "crates/candor-scan/src/depsig_probe.rs:225:5: 225:142",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "b562b3038f2fe443a46123df8d5a17f1",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::probe::<impl depsig::DepSigs>::probe_uncached"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml",
+        "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "depsig::probe::<impl depsig::DepSigs>::probe_uncached",
+      "loc": "crates/candor-scan/src/depsig_probe.rs:241:5: 241:134",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "b562b3038f2fe443880662b8ea9866f7",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::DepSigs::lock_source",
+        "depsig::DepSigs::trait_declares",
+        "depsig::strict::<impl depsig::DepSigs>::strict_not_trait"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml",
+        "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "depsig::registry_checkout",
       "loc": "crates/candor-scan/src/depsig.rs:3240:1: 3240:102",
       "inferred": [
@@ -11532,6 +11595,34 @@
       "calls": [
         "depsig::DepSigs::index",
         "depsig::DepSigs::lock_source"
+      ],
+      "invisible": [
+        "proc_macro2",
+        "syn",
+        "toml",
+        "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "depsig::strict::<impl depsig::DepSigs>::strict_not_trait",
+      "loc": "crates/candor-scan/src/depsig_strict.rs:991:5: 991:97",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "b562b3038f2fe44356d4fc9fb05ae628",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::DepSigs::index"
       ],
       "invisible": [
         "proc_macro2",

@@ -5012,7 +5012,13 @@ impl<'a> CallCollector<'a> {
                     let syn::Expr::Path(p) = &*c.func else { return None };
                     let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                     if !full.contains("::") || full.starts_with("::") {
-                        return None;
+                        // SOUNDNESS R1627 — a call of the crate's OWN fn (`mkb().build()`) whose declared return types the chain's
+                        // base: the value is a `T:` base of unknown form (the declared return may be a reference)
+                        if candor_report::env::switch("CANDOR_R1627_OFF") || candor_report::env::switch("CANDOR_R1627_LOCAL_OFF") || steps.is_empty() {
+                            return None;
+                        }
+                        let t = self.type_of(cur)?;
+                        break format!("T:{t}:?");
                     }
                     break format!("F:{full}");
                 }
@@ -5040,6 +5046,37 @@ impl<'a> CallCollector<'a> {
             out.push_str(&st);
         }
         Some(out)
+    }
+
+    /// SOUNDNESS R1627 — `let e = Dep::new().build();` (a METHOD chain over a dependency factory call, bound to a name) whose type
+    /// the ctor-chain guess gave as the chain's root: the binding carries the chain's full provenance (`F:<factory>|m:build`) so
+    /// `e.next_backoff()` files the R1617 re-typing marker like the inline spelling. ONLY beside a TYPED value: a provenance
+    /// kept on an UNTYPED value would file the `<untyped>` marker, whose presence suppresses R1095's untyped-receiver hedge —
+    /// and for a root that is no dependency (a generic `M::new(..).map_err(..)?`, a local module) the marker is inert, so the
+    /// hedge would be lost with nothing replacing it (measured on the first corpus A/B: 29 units `Unknown` -> `[]`).
+    fn r1627_chain_prov(&self, expr: &syn::Expr) -> Option<String> {
+        if candor_report::env::switch("CANDOR_R1627_OFF") || candor_report::env::switch("CANDOR_R1627_LET_OFF") {
+            return None;
+        }
+        let pv = self.r1578_prov(expr)?;
+        let base = pv.strip_prefix("F:")?;
+        let (full, rest) = base.split_once('|')?;
+        (rest.starts_with("m:") && full.contains("::")).then(|| r1578_join(full, Some(&pv)))
+    }
+
+    /// SOUNDNESS R1627 — a call on a NAME bound by `let e = Dep::new().build();` whose type the ctor-chain guess gave as the chain's
+    /// root: the chain's method steps (so the R1617 marker is filed, re-typing the value from the lock-pinned source or, chained,
+    /// from the dependency's report), over the binding's recorded provenance. `None` for any other receiver.
+    fn r1627_let_guess(&self, recv: &syn::Expr, ty: &str) -> Option<(Vec<String>, String)> {
+        if candor_report::env::switch("CANDOR_R1627_OFF") || candor_report::env::switch("CANDOR_R1627_LET_OFF") {
+            return None;
+        }
+        let syn::Expr::Path(p) = peel_recv(recv) else { return None };
+        let n = p.path.get_ident()?.to_string();
+        let pv = self.dep_bound_vars.get(&n).and_then(|v| r1578_prov_part(v))?;
+        let (_, rest) = pv.strip_prefix("F:")?.split_once('|')?;
+        let steps: Vec<String> = rest.split('|').map(|s| s.strip_prefix("m:").map(str::to_string)).collect::<Option<_>>()?;
+        (!steps.is_empty()).then(|| (steps, ty.to_string()))
     }
 
     /// SOUNDNESS R1587 — `<factory path>::<peeled>` when `expr` is a dependency factory call followed ONLY by
@@ -13986,6 +14023,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 (st, b)
                             })
                     })
+                    .or_else(|| self.r1627_let_guess(&node.receiver, &ty))
                     .or_else(|| unit_guess.then(|| (Vec::new(), ty.clone())));
                 if let Some((steps, base)) = guess {
                     let root = base.split("::").next().unwrap_or("");
@@ -16425,6 +16463,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             });
                             if !keep {
                                 self.dep_bound_vars.remove(&id.ident.to_string());
+                                // SOUNDNESS R1627 — the ctor-chain guess typed `let e = Dep::new().build();` as the chain's ROOT
+                                // (`Builder`), which no rule keyed on the step's real type answers. The chain's provenance rides
+                                // beside the guess so the call site can file the R1617 re-typing marker (`r1627_let_guess`).
+                                if let Some(pv) = self.with_pre_bindings(&pre_bindings, |s| s.r1627_chain_prov(&init.expr)) {
+                                    self.dep_bound_vars.insert(id.ident.to_string(), pv);
+                                }
                             }
                             // (The DROP-GLUE marker used to be emitted HERE, off the `Pat::Ident` binder.
                             // That is what made the charge BINDER-keyed: `let g = Guard{..}` was charged
