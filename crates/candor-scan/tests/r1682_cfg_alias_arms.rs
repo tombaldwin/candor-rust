@@ -12,6 +12,7 @@
 //!     too, inline or file) read from any other module — ABSENT;
 //!   * `use tu as sys` (a one-segment target);
 //!   * R1684 — a module alias reached through a crate-LOCAL glob (`use crate::*; sys::f()`), armed or not — ABSENT.
+//!
 //! Each case below asserts `Fs` on the row AND the gate `deny Fs <fn>` exiting 1; a pure-arms control stays pure, and the
 //! kill switches restore the old reading (proving the fixture reaches the code). Fixture fns carry unique names because
 //! `deny <E> <fn>` matches by PREFIX.
