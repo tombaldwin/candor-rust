@@ -393,3 +393,47 @@ pub fn localenum_zq(d: &ast::Data) {{ match d {{ ast::Data::Struct(v) => v.uses(
     assert!(inferred(&off, "depenum_zq").contains(&"Fs".to_string()), "CANDOR_R1657_OFF restores the fabrication");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// SOUNDNESS R1660 — a chain hop whose DECLARED return was withdrawn (same-leaf twins declare different returns) is a guessed
+/// hop, like one declared to return another type (R1663). lettre's `conn.unpark().abort()`: sync `ParkedConnection::unpark ->
+/// SmtpConnection` beside an async twin of the same leaf. Once R1657 typed `conn` to its own module's twin, the `ambiguous:` hedge
+/// that covered the site was gone, and the walk's guess `ParkedConnection::abort` named no unit: ABSENT over a write. EXECUTED
+/// (lane fixture `reexret`, `cargo run` writes the marker); disclosed through the untyped-receiver floor now.
+#[test]
+fn r1660_a_withdrawn_hop_return_is_a_guessed_hop() {
+    let d = fixture("r1660", &[("lib.rs", &format!("pub mod smtp {{
+    pub mod client {{
+        pub use self::{{ connection::SmtpConnection, }};
+        mod connection {{
+            pub struct SmtpConnection(pub u8);
+            impl SmtpConnection {{ pub fn abort(&mut self) {{ {W} }} }}
+        }}
+    }}
+    pub mod pool {{
+        pub mod sync_impl {{
+            use super::{{super::client::SmtpConnection}};
+            pub struct ParkedConnection {{ conn: SmtpConnection }}
+            impl ParkedConnection {{ fn unpark(self) -> SmtpConnection {{ self.conn }} }}
+            pub fn hop_zq(conn: ParkedConnection) {{ conn.unpark().abort(); }}
+            pub fn shadow_zq(conn: ParkedConnection) {{ let mut conn = conn.unpark(); conn.abort(); }}
+        }}
+        pub mod async_impl {{
+            pub struct ParkedConnection(u8);
+            impl ParkedConnection {{ pub fn unpark(self) -> u8 {{ self.0 }} }}
+        }}
+    }}
+}}
+"))]);
+    let (_, on) = scan(&d, None, false);
+    let out = Command::new(bin()).arg(d.to_string_lossy().as_ref()).arg("--json")
+        .env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env("CANDOR_R1660_OFF", "1")
+        .output().expect("run candor-scan");
+    let off: serde_json::Value = serde_json::from_slice(&out.stdout).expect("report json");
+    // the chained spelling (R1663's floor) and the bound self-shadowing one (`let mut conn = conn.unpark()`, lettre's Drop)
+    for f in ["smtp::pool::sync_impl::hop_zq", "smtp::pool::sync_impl::shadow_zq"] {
+        assert_eq!(inferred(&on, f), ["Unknown"], "{f} {on:#}");
+        assert!(why(&on, f).iter().any(|w| w.starts_with("dispatch:untyped receiver of `abort`")), "{f} {on:#}");
+        assert!(inferred(&off, f).is_empty(), "CANDOR_R1660_OFF restores the silence for {f} {off:#}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -2027,6 +2027,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if let Some(rest) = k.strip_prefix("<implretgen>") {
                 returns.insert(format!("<implretgenw>{rest}"), "1".to_string());
             }
+            // SOUNDNESS R1660 — and a withdrawn impl-qualified RETURN (`<implret>`), read by R1663's guessed-hop floor.
+            if let Some(rest) = k.strip_prefix(crate::model::RET_IMPL) {
+                if let Some((tl, fl)) = rest.split_once('\u{1f}') {
+                    returns.insert(crate::model::withdrawn_impl_ret_key(tl, fl), "1".to_string());
+                }
+            }
         }
     }
     // SOUNDNESS R1025 (its receiver half) — an `impl` written ON a type alias (`impl LcPtr<EVP_PKEY> { fn

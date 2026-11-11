@@ -3311,6 +3311,18 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1660 — `init` is a method call whose receiver types to `T` and `T`'s own `m` has a WITHDRAWN declared
+    /// return (`model::withdrawn_impl_ret_key`). Off with `CANDOR_R1660_OFF`.
+    fn r1660_withdrawn_step(&self, init: &syn::Expr) -> bool {
+        if candor_report::env::switch("CANDOR_R1660_OFF") {
+            return false;
+        }
+        let syn::Expr::MethodCall(m) = peel_recv(init) else { return false };
+        let Some(t) = self.resolve_recv_type(&m.receiver) else { return false };
+        let leaf = t.rsplit("::").next().unwrap_or(&t);
+        self.returns.contains_key(&crate::model::withdrawn_impl_ret_key(leaf, &m.method.to_string()))
+    }
+
     fn note_untyped_method(&mut self, node: &syn::ExprMethodCall, leaf: &str,
         start: (usize, usize, bool, usize, usize)) {
         let (c0, w0, u0, d0, f0) = start;
@@ -11691,7 +11703,10 @@ impl<'a> CallCollector<'a> {
         // UsesTypeParams>::uses_type_params`) and read pure once origin qualification resolved that wrong edge. Left
         // untyped, exactly as a dependency payload is.
         if !candor_report::env::switch("CANDOR_R1667_OFF") && !candor_report::env::switch("CANDOR_R1657_OFF") {
-            if let Some(written) = tuple_variant_path(pat) {
+            // Only a WRITTEN qualified enum path (`syn::Data`): a one-segment one (`TokenTree::Group(g)` after `use
+            // proc_macro2::TokenTree`) keeps the dependency typing the routes below give it (syn's `tt.rs`, measured: dropping
+            // it removed 100+ `invisible: [proc_macro2]` rows).
+            if let Some(written) = tuple_variant_path(pat).filter(|w| w.contains("::")) {
                 let full = self.expand_scoped(&written);
                 if !full.starts_with("crate::") && self.is_dependency_type(&full) {
                     if candor_report::env::trace("CANDOR_R1657_INSTR") {
@@ -13655,8 +13670,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 if !candor_report::env::switch("CANDOR_R1663_OFF") && !crate::std_methods::is_std_method_name(&leaf) {
                     if let Some((steps, base)) = &strict {
                         let bl = base.rsplit("::").next().unwrap_or(base);
+                        // SOUNDNESS R1660 — …or the step's declared return was WITHDRAWN (same-leaf twins declare different returns:
+                        // lettre's `conn.unpark().abort()`, sync `-> SmtpConnection` beside async `-> AsyncSmtpConnection`). The walk's
+                        // receiver-type assumption is then no more backed than for a declared other type, and the typed tail
+                        // (`ParkedConnection::abort`) names no unit. Reached once R1657 typed `conn` to its own module's twin: the
+                        // `ambiguous:` hedge that covered the whole site before was the only disclosure. EXECUTED (lane fixture
+                        // `reexret`). Kill switch `CANDOR_R1660_OFF`.
+                        let r1660 = !candor_report::env::switch("CANDOR_R1660_OFF");
                         let moved = steps.iter().find(|st| {
                             self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| r != base && r.rsplit("::").next() != Some(bl))
+                                || (r1660 && self.returns.contains_key(&crate::model::withdrawn_impl_ret_key(bl, st)))
                         });
                         if *base == ty && moved.is_some() {
                             if candor_report::env::trace("CANDOR_R1663_INSTR") {
@@ -16248,6 +16271,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     self.std_made_vars.insert(id.ident.to_string());
                                 }
                                 self.vars.insert(id.ident.to_string(), "String".to_string());
+                            } else if self.with_pre_bindings(&pre_bindings, |s| s.r1660_withdrawn_step(&init.expr)) {
+                                // SOUNDNESS R1660 — the bound spelling: `let mut conn = conn.unpark(); conn.abort();` (lettre's
+                                // `impl Drop for Pool`). The init does not type because `unpark`'s declared return is WITHDRAWN
+                                // (same-leaf twins disagree), and a binding left in place from before this statement — here the
+                                // loop variable's `ParkedConnection` — then typed `conn.abort()` to a method that type does not
+                                // have: no unit, no disclosure. Cleared, so the call is an untyped receiver the R1095 judge
+                                // answers. Only on that withdrawn-return evidence: an init that is merely unanswerable keeps
+                                // today's behaviour (the R536 measurement below is why a blanket clear is wrong).
+                                self.vars.remove(&id.ident.to_string());
                             }
                         }
                         }
