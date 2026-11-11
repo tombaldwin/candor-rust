@@ -329,3 +329,42 @@ pub fn use_it(d: &Dfa) -> u8 { Lazy::new(d).c() }\n";
     assert!(inferred(&on, f).contains(&"Unknown".to_string()), "{f} keeps its callee's Unknown {on:#}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// SOUNDNESS R1667 — a PROVEN owner whose own declaration has no indexed entry for a field (`#[cfg(feature = "x")] dfa:
+/// dense::Builder` is not indexed) must not take a same-leaf twin's entry (`hybrid::regex::Builder { dfa: dfa::Builder }`).
+/// regex-automata's shape, EXECUTED both directions (lane fixtures `r1667` / `r1667b`): the dense arm writes and the caller
+/// was ABSENT on 0.41.3 (edge to the hybrid twin's pure `configure`); swapped, the pure dense caller was charged the hybrid
+/// twin's `Fs`. Now refused and disclosed in both; the hybrid caller keeps its own field.
+#[test]
+fn r1667_a_cfg_gated_field_of_a_proven_owner_never_takes_a_twins_entry() {
+    let tree = |dense_eff: &str, hy_eff: &str| -> Vec<(&'static str, String)> {
+        vec![
+            ("lib.rs", "pub mod dfa;\npub mod hybrid;\n".to_string()),
+            ("dfa/mod.rs", "pub mod dense;\npub mod regex;\n".to_string()),
+            ("dfa/dense.rs", format!("#[cfg(feature = \"x\")]\npub struct Builder {{ pub n: u8 }}\n#[cfg(feature = \"x\")]\n\
+impl Builder {{ pub fn new() -> Builder {{ Builder {{ n: 0 }} }} pub fn configure(&mut self) {{ {dense_eff} }} }}\n")),
+            ("dfa/regex.rs", "use crate::dfa::dense;\npub struct Builder {\n    #[cfg(feature = \"x\")]\n    dfa: dense::Builder,\n}\n\
+impl Builder {\n    #[cfg(feature = \"x\")]\n    pub fn r1667_dense_zq(&mut self) -> &mut Builder { self.dfa.configure(); self }\n}\n".to_string()),
+            ("hybrid/mod.rs", "pub mod dfa;\npub mod regex;\n".to_string()),
+            ("hybrid/dfa.rs", format!("pub struct Builder {{ pub m: u16 }}\nimpl Builder {{ pub fn new() -> Builder {{ Builder {{ m: 0 }} }} pub fn configure(&mut self) {{ {hy_eff} }} }}\n")),
+            ("hybrid/regex.rs", "use crate::hybrid::dfa;\npub struct Builder { dfa: dfa::Builder }\n\
+impl Builder { pub fn r1667_hy_regex_zq(&mut self) -> &mut Builder { self.dfa.configure(); self } }\n".to_string()),
+        ]
+    };
+    for (tag, dense_eff, hy_eff) in [("silent", W, ""), ("fabricated", "", W)] {
+        let src = tree(dense_eff, hy_eff);
+        let d = fixture(&format!("r1667{tag}"), &src.iter().map(|(p, s)| (*p, s.as_str())).collect::<Vec<_>>());
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[features]\ndefault = [\"x\"]\nx = []\n").unwrap();
+        let (_, on) = scan(&d, None, false);
+        let f = "dfa::regex::Builder::r1667_dense_zq";
+        assert_eq!(inferred(&on, f), ["Unknown"], "{tag}: refused and disclosed, never the twin's effect {on:#}");
+        assert!(why(&on, f).iter().any(|w| w.starts_with("ambiguous:same-name types `Builder` declare field `dfa`")), "{tag}: {on:#}");
+        let hy = inferred(&on, "hybrid::regex::Builder::r1667_hy_regex_zq");
+        assert_eq!(hy.is_empty(), hy_eff.is_empty(), "{tag}: the hybrid caller keeps its own field's answer {on:#}");
+        let (_, off) = scan(&d, None, true);
+        if tag == "fabricated" {
+            assert!(inferred(&off, f).contains(&"Fs".to_string()), "CANDOR_R1657_OFF restores the fabrication");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

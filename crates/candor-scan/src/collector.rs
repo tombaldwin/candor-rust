@@ -4789,6 +4789,9 @@ impl<'a> CallCollector<'a> {
                     return None; // R862 — a dependency's field is not this crate's leaf-keyed `fields`
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                if self.r1667_foreign_field(&f.base, &base, &key) {
+                    return None;
+                }
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
             syn::Expr::Call(_) if pinned_arg(expr).is_some() => self.type_of(pinned_arg(expr)?), // R980
@@ -5248,6 +5251,41 @@ impl<'a> CallCollector<'a> {
                 None
             }
         }
+    }
+
+    /// SOUNDNESS R1667 — the leaf-keyed field entry is ANOTHER twin's: the owner's path is proven (`owner_qual`), its own
+    /// declaration has no indexed entry for `key` (a `#[cfg]`-gated field is not indexed), and a same-leaf twin's is. The
+    /// field is then not "ambiguous" (only one twin's value is on record), so the R1624 / R1657 rules never ran and the
+    /// unique-leaf fallback answered with the twin's type: regex-automata's `dfa::regex::Builder { #[cfg(feature =
+    /// "dfa-build")] dfa: dense::Builder }` typed `self.dfa` as `hybrid::regex::Builder`'s `hybrid::dfa::Builder`, formed
+    /// `hybrid::dfa::Builder::configure` on every arm and never `dfa::dense::Builder::configure` (EXECUTED, lane fixture
+    /// `r1667`: the dense arm writes, the caller was ABSENT; the swapped fixture charged the pure caller). Refused and
+    /// disclosed, never re-picked. Kill switch `CANDOR_R1667_OFF`.
+    fn r1667_foreign_field(&self, base_expr: &syn::Expr, base: &str, key: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1667_OFF") || candor_report::env::switch("CANDOR_R1657_OFF") {
+            return false;
+        }
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        if !self.assign_drop.twin_leaves.is_some_and(|t| t.contains(leaf)) {
+            return false;
+        }
+        let Some((qi, q)) = self.owner_qual(base_expr, base) else { return false };
+        if qi.fields.get(&q).is_some_and(|m| m.contains_key(key)) || !self.fields.get(leaf).is_some_and(|m| m.contains_key(key)) {
+            return false;
+        }
+        // The owner declares it as a trait-object field (`qual_trait_field_in` answers its dispatch): the twin's concrete
+        // entry is still not its type, but nothing is unknown here, so nothing is disclosed.
+        if qi.trait_fields.get(&q).is_some_and(|m| m.contains_key(key)) {
+            return true;
+        }
+        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+            eprintln!("R1667FOREIGN\t{q}\t{key}"); // §E1 REACH
+        }
+        let why = format!("ambiguous:same-name types `{leaf}` declare field `{key}` differently").replace('.', "_");
+        R1657_REFUSED.with(|r| {
+            r.borrow_mut().insert(why);
+        });
+        true
     }
 
     /// SOUNDNESS R1652/R1657 — record a refused ambiguous-leaf field pick as an `ambiguous:` reason for this body.
@@ -5908,6 +5946,9 @@ impl<'a> CallCollector<'a> {
                 if let Some(Some(t)) = r1624 {
                     return Some(t);
                 }
+                if self.r1667_foreign_field(&f.base, &base, &key) {
+                    return None;
+                }
                 self.fields.get(base_leaf)?.get(&key).cloned()
             }
             // SOUNDNESS R980 — `Pin::new(x)`, `Pin::new_unchecked(x)`, `Box::pin(x)` and `pin!(x)` pin a value
@@ -6419,6 +6460,9 @@ impl<'a> CallCollector<'a> {
                             return None;
                         }
                     }
+                }
+                if self.r1667_foreign_field(&f.base, &base, &key) {
+                    return None;
                 }
                 self.field_elem.get(base_leaf)?.get(&key).cloned()
             }
