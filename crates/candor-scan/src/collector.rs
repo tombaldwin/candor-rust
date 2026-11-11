@@ -3342,8 +3342,41 @@ impl<'a> CallCollector<'a> {
             r1540 && c.path.contains(UNTYPED_RECV_MARKER) && matches!(c.path.split("::").next(), Some("std" | "core" | "alloc"))
                 && !crate::std_methods::is_std_method_name(leaf)
         };
-        if self.calls[c0..].iter().any(|c| !std_untyped(c) && (c.typed || c.path != leaf || !c.method)) {
-            return;
+        // SOUNDNESS R1692 — …and the same for ANY `<untyped>` marker whose root may be no dependency at all. The provenance is
+        // stored for every multi-segment callee (`let m = M::new_from_slice(k)?`, `util::make::<M>(k)?`, `Self::mk(k)?`,
+        // `<T as LocalTr>::mk(k)?`), and the head is checked against the declared dependencies only at CONSUMPTION: for a
+        // generic parameter, `Self`, a crate-local module or type, the marker is dropped there (`scan::r1578_resolve`, the
+        // declared-dependency conjunct of the call loop) with nothing in its place. Reading it here as a call this site formed
+        // stood the floor aside, so `T::mk(k)?.write(k)` over a crate's effectful `impl Tr for X` read ABSENT (EXECUTED,
+        // `tests/r1692_inert_marker_floor.rs`) while the `.map_err(..)?` spelling, which files no marker, hedged. Collection
+        // cannot see the manifest, so the site is recorded conditionally (`lazy::INERT_MARK_PREFIX`, every marker root named)
+        // and `scan.rs` hands it to the judge only when NO root is a declared dependency — exactly when the marker is inert.
+        // A std-root marker stays R1540's; a std prelude type or primitive root (`String::from_utf8(..)?`, `u8::try_from(..)?`)
+        // gets R1540's std-name rule.
+        // Off with `CANDOR_R1692_OFF`.
+        let r1692 = !candor_report::env::switch("CANDOR_R1692_OFF");
+        let mut inert_roots: Vec<String> = Vec::new();
+        for c in &self.calls[c0..] {
+            if std_untyped(c) || !(c.typed || c.path != leaf || !c.method) {
+                continue;
+            }
+            let root = (r1692 && !c.typed)
+                .then(|| c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::")).map(|(r, _)| r))
+                .flatten()
+                .filter(|r| !r.contains('<') && !matches!(*r, "std" | "core" | "alloc"));
+            match root {
+                Some(r) if is_prelude_type_root(r, &self.uses) => {
+                    if crate::std_methods::is_std_method_name(leaf) {
+                        return;
+                    }
+                }
+                Some(r) => {
+                    if !inert_roots.iter().any(|x| x == r) {
+                        inert_roots.push(r.to_string());
+                    }
+                }
+                None => return,
+            }
         }
         // A trait BOUND alone does not count as typed: a bound that answered for `leaf` formed a call or a
         // dispatch site above, and one that did not names nothing this method could run — measured: `for x in
@@ -3380,7 +3413,11 @@ impl<'a> CallCollector<'a> {
         if candor_report::env::trace("CANDOR_R1095_INSTR") {
             eprintln!("R1095SITE\t{leaf}"); // §E1 REACH PROBE — a site, before the candidate judgement
         }
-        self.untyped_methods.insert(leaf.to_string());
+        if inert_roots.is_empty() {
+            self.untyped_methods.insert(leaf.to_string());
+        } else {
+            self.untyped_methods.insert(format!("{}{}\u{1}{leaf}", crate::lazy::INERT_MARK_PREFIX, inert_roots.join(",")));
+        }
     }
 
     /// R1080 — a receiver type that is std's `Vec` / `VecDeque` (not a crate-local or `use`-rebound one).
@@ -17678,6 +17715,18 @@ fn cast_target_ident(e: &syn::Expr) -> Option<String> {
         },
         _ => None,
     }
+}
+
+/// SOUNDNESS R1692 — an `<untyped>` marker root that names a std PRELUDE type or a PRIMITIVE as written
+/// (`String::from_utf8(v)?`, `i32::try_from(n)?`), not rebound by a `use`: the value is std's, so a std-named method on it
+/// is std's own (R1540's rule for a `std::` root). Measured on the first A/B: `let n = i32::from(..); n.unsigned_abs()` in
+/// jiff hedged on the crate's own `unsigned_abs` methods, which std's inherent `i32::unsigned_abs` always beats.
+fn is_prelude_type_root(root: &str, uses: &HashMap<String, String>) -> bool {
+    matches!(
+        root,
+        "String" | "Vec" | "Box" | "Option" | "Result" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16"
+            | "i32" | "i64" | "i128" | "isize" | "f32" | "f64" | "bool" | "char" | "str"
+    ) && !uses.contains_key(root)
 }
 
 pub(crate) fn peel_recv(expr: &syn::Expr) -> &syn::Expr {

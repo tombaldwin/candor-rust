@@ -4307,10 +4307,13 @@ pub fn std_recv() { let mut v: Vec<u8> = Vec::new(); let _ = v.write_all(b"x"); 
         assert!(!effs("user::param_shadow").contains(&"Fs".to_string()),
                 "R557 CARVE-OUT (shadowing): …and must NOT pick up the static's effect, which is a \
                  POSITIVE claim about an unrelated body:\n{body}");
-        assert!(effs("via_ambiguous").is_empty(),
+        // SOUNDNESS R1692 — "NEITHER" means no TYPE, not no disclosure: the refused receiver is untyped, and its value marker's
+        // root (`amb1`, a local module) is no dependency, so the R1095 floor now judges `fetch` and discloses `Unknown` naming
+        // `Client::fetch`. The carve-out's claim is the fabrication one: no `Fs` charged to the pure body.
+        assert!(!effs("via_ambiguous").contains(&"Fs".to_string()),
                 "R557 CARVE-OUT (ambiguity): a leaf two modules declare with different types must \
                  resolve to NEITHER — last-writer-wins would charge `Fs` to a body that does nothing:\n{body}");
-        assert!(effs("via_ambiguous_xfile").is_empty(),
+        assert!(!effs("via_ambiguous_xfile").contains(&"Fs".to_string()),
                 "R557 CARVE-OUT (ambiguity, CROSS-FILE): the same rule at the MERGE — a last-writer-wins \
                  union would charge the other file's `Client` to this pure body:\n{body}");
         let _ = std::fs::remove_dir_all(&d);
@@ -18456,6 +18459,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // rustagent-stage2 (R1657 stage 2) bumped it to rev174 (the crate-wide re-export table; the uniform-path module re-export edge).
         // rustagent-stage2b (R1657 stage 2) bumped it to rev177 (a `*` marker edge for every glob naming no local module; rev175/rev176 are other branches').
         // rustagent-r1627 (R1627) bumped it to rev175 (a call on `let e = Dep::new().build()` files the R1617 chain marker; rev174 is the R1657 stage 2 lane's).
+        // rustagent-r1692 (R1692) bumped it to rev176 (a site typed only by a possibly-inert `<untyped>` marker rides `untyped_methods`; rev174/rev175 are stage 2's and R1627's).
         // rustagent-v057 (R1167) bumped it to rev108.
         // rustagent-r1165 (R1165) bumped it to rev107.
         // rustagent-v055 (R1164) bumped it to rev106.

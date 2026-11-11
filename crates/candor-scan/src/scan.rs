@@ -3662,6 +3662,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     Some(l) => (l, true),
                     None => (m.as_str(), false),
                 };
+                // SOUNDNESS R1692 — a site whose only typing was an `<untyped>` marker: judged as untyped exactly when the
+                // marker is inert, i.e. no root is a declared dependency (the call loop's and `r1578_resolve`'s conjunct). A
+                // dependency root is consumed there (`Unknown` chained, κ `invisible` unchained) and is not judged twice.
+                let leaf = match leaf.strip_prefix(crate::lazy::INERT_MARK_PREFIX) {
+                    Some(rest) => {
+                        let Some((roots, l)) = rest.split_once('\u{1}') else { continue };
+                        if candor_report::env::switch("CANDOR_R1692_OFF") || roots.split(',').any(|r| deps.contains(r)) {
+                            continue;
+                        }
+                        if candor_report::env::trace("CANDOR_R1692_INSTR") && self_methods_by_leaf.contains_key(l) {
+                            eprintln!("R1692SITE\t{}\t{roots}\t{l}", f.qual); // §E1 REACH COUNTER, on the ADDED branch only
+                        }
+                        l
+                    }
+                    None => leaf,
+                };
                 if let Some(c) = self_methods_by_leaf.get(leaf) {
                     out.push((f.qual.clone(), leaf.to_string(), c.clone(), admit));
                 }

@@ -57,6 +57,9 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // rev175 (rustagent-r1627): SOUNDNESS R1627 — Pass B files the R1617 chain marker for a call on a name bound by
     // `let e = Dep::new().build();` (the binding keeps the chain's provenance beside the ctor-chain type guess); a rev173/rev174
     // entry replays without it — the stale direction is SILENCE (the value stays typed as the chain's root). Mandatory.
+    // rev176 (rustagent-r1692): SOUNDNESS R1692 — Pass B's cached `FnInfo::untyped_methods` gains `INERT_MARK_PREFIX` entries (a
+    // method site whose only typing was an `<untyped>` marker that may be inert); a rev173 entry replays the site with no entry,
+    // so the R1095 judge never sees it — the stale direction is SILENCE. Mandatory. (rev174 is the stage-2 lane's, rev175 R1627's.)
     // rev173 (rustagent-r1682): SOUNDNESS R1682 — Pass A's `mod_aliases` gains every module's `#[cfg]`-duplicated `use` arm
     // set (private, `pub`, `cfg_if!` arms), and Pass B's `calls` through such a binding name every arm; a rev172 entry replays
     // the last-written-arm edge (or none) warm — the stale direction is SILENCE. Mandatory.
