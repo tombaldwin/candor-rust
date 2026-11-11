@@ -664,6 +664,12 @@ pub(crate) fn impl_retgen_key(type_leaf: &str, fn_leaf: &str) -> String {
     format!("<implretgen>{type_leaf}\u{1f}{fn_leaf}")
 }
 
+/// SOUNDNESS R1659 — a MARKER filed (by `scan.rs`) for every `impl_retgen_key` that `file_decl_fact` WITHDREW because same-leaf
+/// twins disagree, so a reader can tell a withdrawn position from an absent one. Value `"1"`; no fact reads it as data.
+pub(crate) fn withdrawn_retgen_key(type_leaf: &str, fn_leaf: &str) -> String {
+    format!("<implretgenw>{type_leaf}\u{1f}{fn_leaf}")
+}
+
 /// SOUNDNESS R1648 — `impl_retgen_key`'s position counted over the impl's written TYPE arguments only (lifetimes and
 /// consts skipped), the positions `decls::IMPL_TARGS_KEY` and `model::type_params_key` use. Read against `self`'s written
 /// arguments in ANOTHER impl of the same type, which may write or elide its lifetimes differently.
