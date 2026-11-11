@@ -324,3 +324,27 @@ fn main() {}\n";
     let _ = std::fs::remove_dir_all(&d);
 }
 
+
+/// PART 89's draft cfg-gated-local-type cell (lane scratch `rustagent-stage2/spec/part89-cfglocal.patch`): one `#[cfg]` arm
+/// RE-EXPORTS `Tool` from another module, the other DECLARES a local `Tool`. EXECUTED on macOS (`fx/p89b10`): the unix arm
+/// is built and sets the env var; published 0.41.3 and aacd3880 charge `Fs` ALONE (the cfg-off declaration picked), so
+/// `deny Env probe` exited 0 over a real `set_var`. The re-export table unions the declared arm with the re-exported one.
+#[test]
+fn r1657s2_a_cfg_gated_local_type_beside_a_reexport_arm_is_the_union() {
+    for (tag, re, local) in [("p89a", "unix", "not(unix)"), ("p89b", "not(unix)", "unix")] {
+        let src = format!(
+            "pub mod a {{ pub struct Tool; impl Tool {{ pub fn act() {{ std::env::set_var(\"CANDOR_PART89\", \"1\"); }} }} }}\n\
+pub mod sys {{ #[cfg({re})] pub use crate::a::Tool; #[cfg({local})] pub struct Tool;\n\
+  #[cfg({local})] impl Tool {{ pub fn act() {{ let _ = std::fs::write(\"/tmp/benign\", b\"x\"); }} }} }}\n\
+use crate::sys::Tool;\npub fn probe() {{ Tool::act(); }}\n"
+        );
+        let d = fixture(tag, "p89s2", &[("lib.rs", src.as_str())], "");
+        let (_, on) = scan(&d, None, false, None);
+        assert_eq!(inferred(&on, "probe"), ["Env", "Fs"], "{tag}: the union of both arms {on:#}");
+        let (rc, _) = scan(&d, Some("deny Env probe\n"), false, None);
+        assert_eq!(rc, 1, "{tag}: deny Env must fire");
+        let (_, off) = scan(&d, None, true, None);
+        assert!(!inferred(&off, "probe").contains(&"Env".to_string()), "{tag}: pre-stage-2 picked the local arm {off:#}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
