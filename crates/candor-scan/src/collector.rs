@@ -864,6 +864,20 @@ thread_local! {
     static R1657_REFUSED: std::cell::RefCell<std::collections::BTreeSet<String>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
 }
 
+/// SOUNDNESS R1667 — the ENUM part of a single-payload tuple-variant pattern's written path (`syn::Data` in
+/// `syn::Data::Struct(v)`), or `None` for a one-segment path or another pattern shape.
+fn tuple_variant_path(pat: &syn::Pat) -> Option<String> {
+    match pat {
+        syn::Pat::Reference(r) => tuple_variant_path(&r.pat),
+        syn::Pat::Paren(p) => tuple_variant_path(&p.pat),
+        syn::Pat::TupleStruct(ts) if ts.qself.is_none() && ts.elems.len() == 1 && ts.path.segments.len() >= 2 => {
+            let n = ts.path.segments.len();
+            Some(ts.path.segments.iter().take(n - 1).map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::"))
+        }
+        _ => None,
+    }
+}
+
 /// SOUNDNESS R1652/R1657 — take (and clear) the refusals recorded since the last call (see `R1657_REFUSED`).
 pub(crate) fn r1657_take() -> std::collections::BTreeSet<String> {
     R1657_REFUSED.with(|r| std::mem::take(&mut *r.borrow_mut()))
@@ -11660,6 +11674,23 @@ impl<'a> CallCollector<'a> {
     }
     fn enum_variant_binding(&mut self, pat: &syn::Pat) -> Option<(String, Vec<String>, Option<String>)> {
         let (name, leaf) = tuple_variant_binding(pat)?;
+        // SOUNDNESS R1667 — a pattern that WRITES a dependency's enum (`syn::Data::Struct(ref v)`) is not a variant of this
+        // crate's same-leaf enum (`ast::data::Data::Struct(Fields<..>)`): the `Enum\u{1e}Variant` and bare-variant indexes are
+        // keyed by LEAF and name only local enums. darling_core's `impl UsesTypeParams for syn::Data` typed `v` as darling's
+        // own `ast::data::Fields`, formed `Fields::uses_type_params` (rustc's MIR calls `<DataStruct as
+        // UsesTypeParams>::uses_type_params`) and read pure once origin qualification resolved that wrong edge. Left
+        // untyped, exactly as a dependency payload is.
+        if !candor_report::env::switch("CANDOR_R1667_OFF") && !candor_report::env::switch("CANDOR_R1657_OFF") {
+            if let Some(written) = tuple_variant_path(pat).filter(|p| p.contains("::")) {
+                let full = self.expand_scoped(&written);
+                if !full.starts_with("crate::") && self.is_dependency_type(&full) {
+                    if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                        eprintln!("R1667DEPENUM\t{full}\t{leaf}"); // §E1 REACH
+                    }
+                    return Some((name, Vec::new(), None));
+                }
+            }
+        }
         let leaves = self.enum_variant_traits.get(&leaf).cloned().unwrap_or_default();
         // VEIN A — a pattern that NAMES its enum is typed by that enum's own variant first (see the
         // `Enum\u{1e}Variant` key in `decls::collect_decls`); the leaf key is the fallback, unchanged.

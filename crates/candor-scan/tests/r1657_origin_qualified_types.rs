@@ -368,3 +368,28 @@ impl Builder { pub fn r1667_hy_regex_zq(&mut self) -> &mut Builder { self.dfa.co
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+/// SOUNDNESS R1667 (second spelling) — a pattern that WRITES a dependency's enum (`dep::Data::Struct(v)`) is not a variant of
+/// this crate's same-leaf enum (`ast::Data::Struct(Fields)`). darling_core's shape (`impl UsesTypeParams for syn::Data`).
+/// EXECUTED (lane fixture `depenum`): the dependency arm writes nothing and was charged the local `Fields::uses`'s `Fs` on
+/// 0.41.3; the local-enum arm writes and stays charged.
+#[test]
+fn r1667_a_dependency_enum_pattern_is_not_typed_by_a_local_same_leaf_enum() {
+    let base = std::env::temp_dir().join(format!("candor-r1667-depenum-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("dep/src")).unwrap();
+    std::fs::create_dir_all(base.join("app/src")).unwrap();
+    std::fs::write(base.join("dep/Cargo.toml"), "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(base.join("dep/src/lib.rs"), "pub struct DataStruct; pub enum Data { Struct(DataStruct), Other(u8) }\n").unwrap();
+    std::fs::write(base.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\ndep = { path = \"../dep\" }\n").unwrap();
+    std::fs::write(base.join("app/src/lib.rs"), format!("pub mod ast {{ pub struct Fields; impl Fields {{ pub fn uses(&self) {{ {W} }} }}\n\
+pub enum Data {{ Struct(Fields), Other(u8) }} }}\npub trait Uses {{ fn uses(&self); }}\nimpl Uses for dep::DataStruct {{ fn uses(&self) {{}} }}\n\
+pub fn depenum_zq(d: &dep::Data) {{ match d {{ dep::Data::Struct(v) => v.uses(), dep::Data::Other(_) => {{}} }} }}\n\
+pub fn localenum_zq(d: &ast::Data) {{ match d {{ ast::Data::Struct(v) => v.uses(), ast::Data::Other(_) => {{}} }} }}\n")).unwrap();
+    let (_, on) = scan(&base.join("app"), None, false);
+    assert!(!inferred(&on, "depenum_zq").contains(&"Fs".to_string()), "the local twin's effect is not the dependency payload's {on:#}");
+    assert_eq!(inferred(&on, "localenum_zq"), ["Env", "Fs"], "{on:#}");
+    let (_, off) = scan(&base.join("app"), None, true);
+    assert!(inferred(&off, "depenum_zq").contains(&"Fs".to_string()), "CANDOR_R1657_OFF restores the fabrication");
+    let _ = std::fs::remove_dir_all(&base);
+}
