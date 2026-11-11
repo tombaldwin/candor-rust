@@ -13455,6 +13455,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // SOUNDNESS R1617(4) — a chain through an element-yielding accessor (`get`) the walk went through files its
                 // marker too, but ONLY for the unchained re-typing: R861's chained consumer never saw these and must not
                 // start hedging them, so the marker is tagged (`R1617_ACCESSOR_STEP` on its steps) and R861 skips it.
+                // SOUNDNESS R1665 — A DEPENDENCY WRAPPER OVER A CRATE-LOCAL TYPE ARGUMENT (`sleep: CachePadded<Stack>`,
+                // `self.sleep.push(..)`): the dependency type declares no such method (its `Deref` reaches the argument, which the
+                // dependency's report cannot say), so the typed call joins a dependency that never had a `push` — and the
+                // effect is in THIS crate's `Stack::push`, which chaining the dependency cannot reveal. EXECUTED (lane fixture
+                // `f65d`: `[]` with `invisible: [cp]` over a write). Where the receiver is a field whose written type is a
+                // dependency type with a crate-local argument that declares `leaf`, the site goes to the R1095 judge as an untyped
+                // receiver of `leaf` (the dependency wrapper does not type the value this call runs on). Kill switch
+                // `CANDOR_R1665_OFF`.
+                if self.is_dependency_type(&ty) && !candor_report::env::switch("CANDOR_R1665_OFF") {
+                    if let syn::Expr::Field(fe) = peel_recv(&node.receiver) {
+                        if let Some(owner) = self.resolve_recv_type(&fe.base).filter(|o| !self.is_dependency_type(o)) {
+                            let key = match &fe.member {
+                                syn::Member::Named(n) => n.to_string(),
+                                syn::Member::Unnamed(i) => i.index.to_string(),
+                            };
+                            if let Some(args) = self.owner_field_args(&fe.base, &owner, &key, &fe.member) {
+                                let hit = args.split('\u{1}').any(|a| {
+                                    let al = a.rsplit("::").next().unwrap_or(a);
+                                    crate::lang::is_type_ident(al) && self.returns.contains_key(&crate::model::impl_fn_key(al, &leaf))
+                                });
+                                if hit {
+                                    if candor_report::env::trace("CANDOR_R1665_INSTR") {
+                                        eprintln!("R1665WRAP\t{ty}\t.{leaf}"); // §E1 REACH COUNTER
+                                    }
+                                    self.untyped_methods.insert(format!("{}{leaf}", crate::lazy::WRAP_PREFIX));
+                                }
+                            }
+                        }
+                    }
+                }
                 let strict = self.chain_steps(&node.receiver);
                 // SOUNDNESS R1663 — A GUESSED HOP. `x.sel().go()` with `sel` DECLARED to return another type: the walk above
                 // assumed every step returns its receiver's type, so the typed call just formed is `A::go` on `x`'s own type. Where

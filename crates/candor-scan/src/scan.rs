@@ -3477,8 +3477,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let mut out = Vec::new();
         for f in &fns {
             for m in &f.untyped_methods {
-                if let Some(c) = self_methods_by_leaf.get(m.as_str()) {
-                    out.push((f.qual.clone(), m.clone(), c.clone(), false));
+                // SOUNDNESS R1665 — a dependency-wrapper site (`WRAP_PREFIX`) counts an `Unknown`-only candidate (narrow population).
+                let (leaf, admit) = match m.strip_prefix(crate::lazy::WRAP_PREFIX) {
+                    Some(l) => (l, true),
+                    None => (m.as_str(), false),
+                };
+                if let Some(c) = self_methods_by_leaf.get(leaf) {
+                    out.push((f.qual.clone(), leaf.to_string(), c.clone(), admit));
                 }
             }
         }
