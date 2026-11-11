@@ -6907,6 +6907,30 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if let Some(t2) = tail2(&c.path) {
                     let ty = t2.split("::").next().unwrap_or("").to_string();
                     let claimants = by_tail2.get(&t2).map(|v| v.len()).unwrap_or(0);
+                    // SOUNDNESS R1664 — THE RECEIVER'S TYPE IS A RENAME RE-EXPORT (`pub(crate) use segment::HashMap as
+                    // SegmentedHashMap`) and no unit answers the tail. Nothing indexes a renamed TYPE (`reexport_aliases` folds
+                    // fns only), so a call on it formed `SegmentedHashMap::get` and vanished: no edge, no `Unknown`, no reason
+                    // (EXECUTED, lane fixture `f64`: all three spellings of the owner read ABSENT over a write; moka's
+                    // `Inner::admit`, whose `type CacheStore = crate::cht::SegmentedHashMap<..>` parameter reads `inferred []`
+                    // with no `unknownWhy`). The miss is disclosed; the RESOLUTION (map the alias to its single target) is stage 2's.
+                    // Only an alias no struct/enum of the crate is itself named, and only where the renamed item is type-shaped
+                    // (a unit struct has no `fields` entry, so the declaration index cannot say it is one). Kill switch
+                    // `CANDOR_R1664_OFF`.
+                    if claimants == 0 && (resolvable || c.path.starts_with("crate::")) && !aliased && !candor_report::env::switch("CANDOR_R1664_OFF")
+                        && !merged.fields.contains_key(&ty)
+                        && merged.reexports.iter().any(|r| {
+                            r.name != "*" && r.alias == ty && r.name != r.alias && crate::lang::is_type_ident(&r.name)
+                        })
+                    {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert(format!("unresolved:renamed re-export type `{ty}` names no unit"));
+                        if candor_report::env::trace("CANDOR_R1664_INSTR") {
+                            eprintln!("R1664HIT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                    }
                     // SOUNDNESS R1663 — a typed call FORMED BY A GUESSED CHAIN HOP (`x.sel().go()`, `sel` declared to return
                     // another type: the walk typed `go` on `x`'s own type) that names no unit is a call on a receiver no route
                     // typed. Handed to the R1095 judge below, which discloses where a crate-local `self` method of that name
