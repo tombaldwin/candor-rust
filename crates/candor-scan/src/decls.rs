@@ -3640,6 +3640,7 @@ pub(crate) fn fninfo(
         forced_lazies: std::collections::HashSet::new(),
         unresolved: false,
         refusals: std::collections::BTreeSet::new(),
+        late_refusals: Default::default(),
         err_ret_leaf: result_err_leaf(&sig.output, uses),
         const_strings,
         str_locals: std::collections::HashMap::new(),
@@ -3854,7 +3855,7 @@ pub(crate) fn fninfo(
         ret_idents,
         ret_bound_type,
         ret_proto,
-        refusals: c.refusals.into_iter().collect(),
+        refusals: c.refusals.into_iter().chain(c.late_refusals.into_inner()).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
         dispatch: c.dispatch_sites.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
         foreign_dispatch_prov: {

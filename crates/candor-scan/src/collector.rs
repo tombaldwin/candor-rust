@@ -478,6 +478,8 @@ pub(crate) struct CallCollector<'a> {
     /// SOUNDNESS R182/R196 — the NAMED refusals this body hit; see `FnInfo::refusals`. A set, so a shape
     /// repeated in one body discloses once, and `BTreeSet` so the emitted order is deterministic.
     pub(crate) refusals: std::collections::BTreeSet<String>,
+    /// SOUNDNESS R1659 — refusals recorded by a `&self` typing query (`disclose_withdrawn_accessor`); merged with `refusals`.
+    pub(crate) late_refusals: std::cell::RefCell<std::collections::BTreeSet<String>>,
     /// The ERROR type leaf of the enclosing fn's `Result<_, E>` return, if any — the `?` operator's
     /// `From::from` TARGET. A `may_fail()?` where `may_fail` returns `Result<_, E1>` and this fn returns
     /// `Result<_, E2>` desugars to `E2::from(e1)` via a local `impl From<E1> for E2`; we edge to
@@ -4303,7 +4305,11 @@ impl<'a> CallCollector<'a> {
     /// step types.
     fn impl_generic_return(&self, recv: &syn::Expr, base: &str, leaf: &str, outer: &str) -> Option<String> {
         let base_leaf = base.rsplit("::").next().unwrap_or(base);
-        let pos: usize = self.returns.get(&crate::model::impl_retgen_key(base_leaf, leaf))?.parse().ok()?;
+        let Some(pos) = self.returns.get(&crate::model::impl_retgen_key(base_leaf, leaf)).and_then(|p| p.parse::<usize>().ok()) else {
+            // SOUNDNESS R1659 — a WITHDRAWN position (same-leaf twins that disagree) is not an ABSENT one.
+            self.disclose_withdrawn_accessor(recv, base_leaf, leaf, outer);
+            return None;
+        };
         let mut r = recv;
         loop {
             match r {
@@ -4369,6 +4375,20 @@ impl<'a> CallCollector<'a> {
         if ret == "_" || ret == "'" || ret.is_empty() {
             return None;
         }
+        // SOUNDNESS R1658 — the FIELD branch's half of R1643: the field's written argument at the accessor's position is a std
+        // I/O HANDLE (`w: u::U<std::fs::File>`, `fn get(&mut self) -> &mut F`), which no crate `impl_fn_key` can name, so the
+        // second gate below refused it and the call fell to `Some(base)` — `U::read`, a key nothing answers — and
+        // `h.w.get().read(buf)` read ABSENT over a file read (EXECUTED rustagent-fxg/fx/fxg `uniq_read`). `self`'s branch and
+        // `impl_declared_return` have carried this rule since R1643; the arguments are written FULL paths (`decls::field_type_args`
+        // expands them in the declaring file), so a crate-local `File` is never one. `CANDOR_R1658_OFF=1`.
+        if !candor_report::env::switch("CANDOR_R1658_OFF") {
+            if let Some(h) = std_io_handle(ret) {
+                if candor_report::env::trace("CANDOR_R1658_INSTR") {
+                    eprintln!("R1658HANDLE\t{base_leaf}.{leaf}\t{owner_leaf}.{key}\t{h}"); // §E1 REACH COUNTER
+                }
+                return Some(h);
+            }
+        }
         if !outer.is_empty() && !crate::lang::is_result_plumbing(outer) {
             let ret_leaf = ret.rsplit("::").next().unwrap_or(ret);
             if !self.returns.contains_key(&crate::model::impl_fn_key(ret_leaf, outer)) {
@@ -4379,6 +4399,79 @@ impl<'a> CallCollector<'a> {
             eprintln!("R979RET {base_leaf}::{leaf} -> {ret}");
         }
         Some(ret.to_string())
+    }
+
+    /// SOUNDNESS R1659 — `impl<F> W<F> { fn get(&mut self) -> &mut F }` declared by two SAME-LEAF twins (`a::W<F>`, `b::W<X, F>`)
+    /// whose positions disagree: `file_decl_fact` WITHDRAWS `impl_retgen_key`, and `impl_generic_return` read that as "no such
+    /// accessor" — the call formed `W::poke`, a key nothing answers, and `h.w.get().poke()` read ABSENT over a write (EXECUTED
+    /// rustagent-fxg/fx/fxg2 `twin_poke`; `uniq_poke`, same body over a unique owner, charges `Fs`). Withdrawn is not absent:
+    /// `scan.rs` files a `withdrawn_retgen_key` marker beside every withdrawn position. This DISCLOSES (`ambiguous:`, the kind
+    /// reserved for two declarations competing) at exactly the conjunction that lost the answer: the withdrawn accessor is read
+    /// through a FIELD (or `self`) whose written arguments hold a candidate — a std I/O handle, or a type declaring `outer` once.
+    /// ADD-ONLY; retired by the value-typing restructure's stage 3 (qual-keyed instantiation facts), which RESOLVES it.
+    /// `CANDOR_R1659_OFF=1`.
+    fn disclose_withdrawn_accessor(&self, recv: &syn::Expr, base_leaf: &str, leaf: &str, outer: &str) {
+        if outer.is_empty() || crate::lang::is_result_plumbing(outer) || candor_report::env::switch("CANDOR_R1659_OFF") {
+            return;
+        }
+        if !self.returns.contains_key(&crate::model::withdrawn_retgen_key(base_leaf, leaf)) {
+            return;
+        }
+        let trace = candor_report::env::trace("CANDOR_R1659_INSTR");
+        if trace {
+            eprintln!("R1659READ\t{base_leaf}.{leaf}\t{outer}"); // §E1 FUNNEL: the withdrawn position was read at a method call
+        }
+        let mut r = recv;
+        loop {
+            match r {
+                syn::Expr::Reference(x) => r = &x.expr,
+                syn::Expr::Paren(x) => r = &x.expr,
+                syn::Expr::Group(x) => r = &x.expr,
+                _ => break,
+            }
+        }
+        if trace {
+            eprintln!("R1659RECV\t{}", if matches!(r, syn::Expr::Field(_)) { "field" } else if matches!(r, syn::Expr::Path(p) if p.path.is_ident("self")) { "self" } else { "other" });
+        }
+        let args: Vec<String> = match r {
+            syn::Expr::Path(p) if p.path.is_ident("self") => {
+                self.uses.get(crate::decls::IMPL_ARGS_KEY).map(|a| a.split(',').map(str::to_string).collect()).unwrap_or_default()
+            }
+            syn::Expr::Field(f) => {
+                let Some(owner) = self.resolve_recv_type(&f.base) else { return };
+                if self.field_ambiguous(&owner, &f.member) || self.is_dependency_type(&owner) {
+                    return;
+                }
+                let key = match &f.member {
+                    syn::Member::Named(n) => n.to_string(),
+                    syn::Member::Unnamed(i) => i.index.to_string(),
+                };
+                let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner);
+                match self.returns.get(&crate::model::field_args_key(owner_leaf, &key)) {
+                    Some(a) => a.split('\u{1}').map(str::to_string).collect(),
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        if trace {
+            eprintln!("R1659ARGS\t{base_leaf}.{leaf}"); // §E1 FUNNEL: owner typed, written arguments in hand
+        }
+        let candidate = args.iter().any(|a| {
+            a != "_" && a != "'" && !a.is_empty() && {
+                let al = a.rsplit("::").next().unwrap_or(a);
+                std_io_handle(a).is_some() || self.returns.contains_key(&crate::model::impl_fn_key(al, outer))
+            }
+        });
+        if !candidate {
+            return;
+        }
+        if candor_report::env::trace("CANDOR_R1659_INSTR") {
+            eprintln!("R1659WITHDRAWN\t{base_leaf}.{leaf}\t{outer}"); // §E1 REACH COUNTER
+        }
+        self.late_refusals.borrow_mut().insert(format!(
+            "ambiguous:generic accessor `{base_leaf}::{leaf}` is declared by same-leaf twins, so its instantiation position is withdrawn"
+        ));
     }
 
     fn impl_declared_return(&self, base: &str, leaf: &str, outer: &str) -> Option<String> {

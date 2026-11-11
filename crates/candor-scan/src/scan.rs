@@ -2021,6 +2021,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     #[allow(unused_mut)]
     let mut returns: ReturnIndex =
         merged.rets.iter().filter_map(|(k, v)| v.clone().map(|t| (k.clone(), t))).collect();
+    // SOUNDNESS R1659 — a WITHDRAWN accessor position is not an ABSENT one: marker beside it (`model::withdrawn_retgen_key`).
+    for (k, v) in &merged.rets {
+        if v.is_none() {
+            if let Some(rest) = k.strip_prefix("<implretgen>") {
+                returns.insert(format!("<implretgenw>{rest}"), "1".to_string());
+            }
+        }
+    }
     // SOUNDNESS R1025 (its receiver half) — an `impl` written ON a type alias (`impl LcPtr<EVP_PKEY> { fn
     // agree }`, `type LcPtr<T> = ManagedPointer<*mut T>` in aws-lc-rs) files its (TYPE, method) facts under
     // the ALIAS's leaf, while a receiver typed through the alias — a field, a parameter, a declared return
