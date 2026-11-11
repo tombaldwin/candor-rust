@@ -31,9 +31,13 @@ fn scan(dir: &Path, policy: Option<&str>, off: bool) -> (i32, serde_json::Value)
         std::fs::write(&pf, p).unwrap();
         cmd.arg("--policy").arg(&pf);
     }
-    cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env_remove("CANDOR_R1661_OFF");
+    cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env_remove("CANDOR_R1661_OFF")
+        .env_remove("CANDOR_R1692_OFF");
+    // SOUNDNESS R1692 generalises this row: ANY `<untyped>` marker whose roots are no declared dependency now reaches the R1095
+    // floor, so `CANDOR_R1661_OFF` alone no longer restores the silence (`r1692_subsumes_the_crate_rooted_marker` below). The
+    // attribution arm turns both off.
     if off {
-        cmd.env("CANDOR_R1661_OFF", "1");
+        cmd.env("CANDOR_R1661_OFF", "1").env("CANDOR_R1692_OFF", "1");
     }
     let out = cmd.output().expect("run candor-scan");
     let code = out.status.code().unwrap_or(-1);
@@ -76,5 +80,22 @@ fn r1661_the_crate_qualified_spelling_keeps_the_untyped_receiver_floor() {
     assert!(row(&off, "m::m2_bare_zq").is_none(), "R1657 anchors the bare spelling onto the R1661 path {off:#}");
     let (refused, _) = scan(&d, Some("deny Unknown n::m2_qual_zq\n"), true);
     assert_eq!(refused, 2);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn r1692_subsumes_the_crate_rooted_marker() {
+    let d = fixture("m2x1692", SRC);
+    let mut cmd = Command::new(bin());
+    cmd.arg(d.to_string_lossy().as_ref()).arg("--json");
+    for (k, _) in std::env::vars() {
+        if k.starts_with("CANDOR_") {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.env("CANDOR_R1661_OFF", "1");
+    let out = cmd.output().expect("run candor-scan");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("report json");
+    assert_eq!(inferred(&v, "n::m2_qual_zq"), ["Unknown"], "R1692 keeps the disclosure with R1661 off {v:#}");
     let _ = std::fs::remove_dir_all(&d);
 }

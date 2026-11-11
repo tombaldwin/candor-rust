@@ -38,6 +38,10 @@ pub(crate) const HOP_GUESS_PREFIX: &str = "\u{1}hop:";
 /// SOUNDNESS R1665 — the prefix of an `untyped_methods` entry that is a method leaf called on a DEPENDENCY wrapper field whose written
 /// argument is a crate-local type declaring it; the judge counts an `Unknown`-only candidate for it, as for `HOP_GUESS_PREFIX`.
 pub(crate) const WRAP_PREFIX: &str = "\u{1}wrap:";
+/// SOUNDNESS R1692 — the prefix of an `untyped_methods` entry `<roots>\u{1}<leaf>`: a method called on a receiver whose only
+/// typing was an `<untyped>` marker with these (comma-joined) roots, which collection cannot tell from a dependency. `scan.rs`
+/// judges it as an untyped receiver of `<leaf>` only when no root is a declared dependency (the marker is then inert).
+pub(crate) const INERT_MARK_PREFIX: &str = "\u{1}imark:";
 /// SOUNDNESS R1657 stage 1b — the prefix of an `untyped_methods` entry naming a typed tail (`<base leaf>::<method>`) the chain
 /// walk formed by ASSUMING a step returns its receiver's type, where no step's declared return backs that. Where such a tail
 /// settles on the calling unit itself, `scan.rs` judges the site as an untyped receiver (the self-edge carries nothing). Not a
