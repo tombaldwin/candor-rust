@@ -5048,11 +5048,12 @@ impl<'a> CallCollector<'a> {
         Some(out)
     }
 
-    /// SOUNDNESS R1627 — `let e = Dep::new().build();` (a METHOD chain over a dependency factory call, bound to a name): the
-    /// binding carries the chain's full provenance (`F:<factory>|m:build`), as `let c = Dep::build();` carries the factory's, so
-    /// `e.next_backoff()` is typed from the lock-pinned source like the inline spelling. Only where nothing else typed the
-    /// value (the caller's order) and the chain has at least one method step (`r1578_prov` is `None` for any shape it does not
-    /// know).
+    /// SOUNDNESS R1627 — `let e = Dep::new().build();` (a METHOD chain over a dependency factory call, bound to a name) whose type
+    /// the ctor-chain guess gave as the chain's root: the binding carries the chain's full provenance (`F:<factory>|m:build`) so
+    /// `e.next_backoff()` files the R1617 re-typing marker like the inline spelling. ONLY beside a TYPED value: a provenance
+    /// kept on an UNTYPED value would file the `<untyped>` marker, whose presence suppresses R1095's untyped-receiver hedge —
+    /// and for a root that is no dependency (a generic `M::new(..).map_err(..)?`, a local module) the marker is inert, so the
+    /// hedge would be lost with nothing replacing it (measured on the first corpus A/B: 29 units `Unknown` -> `[]`).
     fn r1627_chain_prov(&self, expr: &syn::Expr) -> Option<String> {
         if candor_report::env::switch("CANDOR_R1627_OFF") || candor_report::env::switch("CANDOR_R1627_LET_OFF") {
             return None;
@@ -16443,7 +16444,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             if s.resolve_recv_type(&init.expr).is_some() {
                                 None
                             } else {
-                                s.dep_value_provenance(&init.expr).or_else(|| s.r1627_chain_prov(&init.expr))
+                                s.dep_value_provenance(&init.expr)
                             }
                         }) {
                             self.dep_bound_vars.insert(id.ident.to_string(), prov);
