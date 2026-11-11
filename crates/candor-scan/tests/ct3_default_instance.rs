@@ -138,3 +138,36 @@ fn ct3_a_instance_keeps_the_defaults_dispatch_keys() {
         assert!(keys.iter().any(|k| k.ends_with("Q::q")), "off={off}: zz_caller lost the sibling's Q::q key: {row}");
     }
 }
+
+/// R1634 / R1680: `CANDOR_CT3A_OFF` is a RESULT-MOVING switch, so a switched report names it in `switches` and a gate under it refuses
+/// (exit 2, SPEC §3.4) instead of passing or failing on a mixed answer. It is NOT named `CANDOR_R*_OFF`: an ablation that enumerates
+/// switches by that pattern misses it (the release-bar ablation did, and read 73 R1420(a) flips as "no switch").
+#[test]
+fn ct3_a_switch_is_named_and_a_gate_under_it_refuses() {
+    let d: PathBuf = std::env::temp_dir().join(format!("candor-ct3-switch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"ct3switch\"\n").unwrap();
+    std::fs::write(d.join("src/lib.rs"), format!("{}\npub fn zz_caller() {{ P.go() }}\n", T.replace("EFF", W).replace("PURE", P))).unwrap();
+    std::fs::write(d.join("pol.txt"), "deny Net zz_caller\n").unwrap();
+    let run = |off: bool, policy: bool| {
+        let mut cmd = Command::new(bin());
+        cmd.arg(d.to_string_lossy().as_ref()).arg("--json").env_remove("CANDOR_DEPS").env_remove("CANDOR_CT3A_OFF").env("CANDOR_CACHE", d.join("cache"));
+        if policy {
+            cmd.arg("--policy").arg(d.join("pol.txt"));
+        }
+        if off {
+            cmd.env("CANDOR_CT3A_OFF", "1");
+        }
+        cmd.output().expect("run candor-scan")
+    };
+    let plain: serde_json::Value = serde_json::from_slice(&run(false, false).stdout).unwrap();
+    assert!(plain.get("switches").is_none(), "no switch set: no `switches` key");
+    let off: serde_json::Value = serde_json::from_slice(&run(true, false).stdout).unwrap();
+    assert_eq!(off["switches"], serde_json::json!(["CANDOR_CT3A_OFF"]));
+    assert_eq!(run(false, true).status.code(), Some(0), "the policy passes with no switch set (so the refusal below is the switch's)");
+    let refused = run(true, true);
+    assert_eq!(refused.status.code(), Some(2), "a gate under a result-moving switch refuses");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("CANDOR_CT3A_OFF"));
+    let _ = std::fs::remove_dir_all(&d);
+}
