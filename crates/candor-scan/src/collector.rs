@@ -5205,7 +5205,24 @@ impl<'a> CallCollector<'a> {
                 if v == crate::cache::QUAL_TOMB || crate::lang::dyn_alias_leaves_str(v).is_some() {
                     return None;
                 }
-                legacy.get(leaf)?.get(key)?;
+                if legacy.get(leaf).and_then(|m| m.get(key)).is_none() {
+                    // SOUNDNESS R1657 stage 1b (F1) — the leaf-keyed entry is gone because R476 moved it to `trait_fields`: a
+                    // same-leaf TWIN declares this field as its own type PARAMETER (futures-lite `io::Chain { #[pin] first: R1 }`
+                    // beside `stream::Chain { #[pin] first: Fuse<S> }`). The proven owner's own declaration is CONCRETE, so it
+                    // answers: without this `this.first` (`let mut this = self.project();`) typed to nothing, the R1624 trait
+                    // route answered "concrete, no bounds", and `this.first.as_mut().poll_next(cx)` lost both its edge to
+                    // `Fuse::poll_next` and the `Stream::poll_next` key the published arm carried (EXECUTED fixture `f1`).
+                    // Only a value that names no parameter of the owner and no trait object. Kill switch `CANDOR_R1657F1_OFF`.
+                    let moved = !elem
+                        && !candor_report::env::switch("CANDOR_R1657F1_OFF")
+                        && !qi.names_param(&qual, v)
+                        && self.trait_fields.get(leaf).is_some_and(|m| m.contains_key(key));
+                    if !moved {
+                        return None;
+                    }
+                    instr("moved-concrete", v);
+                    return Some(Some(v.clone()));
+                }
                 // SOUNDNESS R1624 (twin element) — the owner's own ELEMENT is one of its type PARAMETERS (`m: RefCell<HashMap<K, C>>` in
                 // `struct ClusterConnection<C>`): that names no type, so it is not a concrete answer — and the leaf entry is a
                 // twin's, so it must not answer either. The bound route answers it (`qual_trait_field_in`). Measured: redis
@@ -12671,7 +12688,38 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // own generics are already installed in `generic_bounds` above.
         let outer_ts = self.trait_self.take();
         let outer_ig = std::mem::take(&mut self.impl_generic_bounds);
+        // SOUNDNESS R1657 stage 1b (F4) — …and the VALUE `self`. A nested impl's methods are walked inside the enclosing
+        // unit's body, and `self` there still held the ENCLOSING impl's type: tokio's broadcast `Receiver::drop` declares
+        // `struct NotifyGuard<'a, T> { rx: &'a mut Receiver<T>, .. }` and `impl Drop for NotifyGuard { fn drop(&mut self) {
+        // self.rx.shared.notify_last_rx_drop.notify_waiters(); } }` in its body, and `self.rx` was read as a field of
+        // `Receiver`. Before stage 1b that bare leaf picked some twin's `rx` and reached `Notify::notify_waiters` by luck;
+        // once `self` was origin-qualified the proven owner `broadcast::Receiver` has no `rx` and the read was refused
+        // (the edge and its `Log` lost, hedged). The nested impl's own self type is the answer, by its written name (a
+        // body-local struct's fields are this block's variant, `block_field_variants`). Only a plain nominal name with no
+        // generic parameter of the nested impl; otherwise `self` is UNBOUND inside it rather than the outer type, so a
+        // read through it refuses instead of borrowing the enclosing impl's fields. Kill switch `CANDOR_R1657F4_OFF`.
+        let f4 = !candor_report::env::switch("CANDOR_R1657F4_OFF");
+        let saved_self = f4.then(|| (self.vars.remove("self"), self.trait_vars.remove("self")));
+        if f4 {
+            if let Some(n) = crate::lang::impl_type_name(&node.self_ty)
+                .filter(|n| !n.contains("::") && !node.generics.type_params().any(|t| t.ident == n.as_str()))
+            {
+                // Spelled as a binder of the same type is (`let g = NotifyGuard { .. }` types `g` through this scope's `use`
+                // map, which names a body-local struct by `ITEM_SENTINEL`), so the two read one field index.
+                self.vars.insert("self".to_string(), crate::lang::expand(&n, &self.uses));
+            }
+        }
         syn::visit::visit_item_impl(self, node);
+        if let Some((v, tv)) = saved_self {
+            self.vars.remove("self");
+            self.trait_vars.remove("self");
+            if let Some(v) = v {
+                self.vars.insert("self".to_string(), v);
+            }
+            if let Some(tv) = tv {
+                self.trait_vars.insert("self".to_string(), tv);
+            }
+        }
         self.trait_self = outer_ts;
         self.impl_generic_bounds = outer_ig;
         self.restore_self(outer_self);
