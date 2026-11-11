@@ -38,7 +38,7 @@ fn dep(root: &Path, fmac: bool) {
     write(
         &d.join("src/lib.rs"),
         &format!(
-            "pub mod exponential;\npub mod extra;\npub mod prelude {{ pub use crate::extra::Extra; }}\n\
+            "pub mod exponential;\npub mod extra;\npub mod backoff {{ pub trait Backoff {{}} }}\npub mod prelude {{ pub use crate::extra::Extra; }}\n\
              pub use crate::exponential::{{ExponentialBackoff, ExponentialBackoffBuilder}};\n{}",
             if fmac { "pin_project_lite::pin_project! { pub struct Fut<F> { #[pin] f: F } }\n" } else { "" }
         ),
@@ -177,4 +177,25 @@ fn a_trait_that_could_supply_the_method_keeps_the_published_reading() {
     for f in ["h_chain", "h_let"] {
         assert!(rand(&on, f), "control: `{f}` must be charged Rand with no trait in scope: {:?}", on.get(f));
     }
+}
+
+/// A chain over a root that is NO dependency (`<M as Trait>::make(k).map_err(..)?`, a generic) bound to an UNTYPED name must keep
+/// R1095's untyped-receiver hedge: the first corpus A/B showed a chain provenance kept on such a binding filed the `<untyped>`
+/// marker, whose presence suppressed the hedge while the marker, its root being no dependency, was inert — `Unknown` -> `[]`
+/// over 29 units (mongodb `client::auth::mac`'s exact shape). The local `Cache::update` is the candidate the hedge names.
+#[test]
+fn an_untyped_binding_over_a_chain_keeps_the_untyped_receiver_hedge() {
+    let root = tmpdir("hedge");
+    dep(&root, true);
+    let app = consumer(
+        &root,
+        "hg",
+        "pub struct Cache;\nimpl Cache { pub fn update(&mut self, k: &[u8]) { std::fs::write(\"/tmp/r1627-x\", k).unwrap(); } }\n\
+         pub fn u_mac<M: backoff::backoff::Backoff>(key: &[u8]) -> Result<(), ()> {\n \
+         let mut mac = <M as backoff::backoff::Backoff>::new_from_slice(key).map_err(|_| ())?;\n mac.update(key);\n Ok(())\n}\n",
+    );
+    let on = scan(&app, false);
+    let off = scan(&app, true);
+    assert!(off.get("u_mac").is_some_and(|r| r.iter().any(|e| e == "Unknown")), "control: the published reading hedges: {:?}", off.get("u_mac"));
+    assert!(on.get("u_mac").is_some_and(|r| r.iter().any(|e| e == "Unknown")), "the hedge was lost with nothing replacing it: {:?}", on.get("u_mac"));
 }
