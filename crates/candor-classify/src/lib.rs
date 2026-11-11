@@ -867,6 +867,67 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     // with a query in flight, 0 with nothing in flight, 0 over an in-memory `duplex` whose server never opens a socket).
     ("rand", "rand::rng::u8::fill_slice", "R1598:conditional"),
     ("tokio_postgres", "tokio_postgres::connection::Connection::poll_message", "R1598:conditional"),
+    // SOUNDNESS R1528 — the 2026-11-11 weekly refresh (64 grown rows on main aacd3880; 58 at 7e8870b, reproduced exactly on macOS, so
+    // the checked-in-macOS / CI-Linux split (R212) explains none). 30 got classify rules (postgres sync, sqlx Migrator, redis PubSub,
+    // mongodb Aggregate, async-nats unpin_consumer, sea-orm accepts, tracing-subscriber OffsetTime); the 34 below hold a verdict.
+    //
+    // R1693 (conditional x16): chrono 0.4.45 `Date<Tz>::{and_time, and_hms*}` and `DateTime<Tz>::{checked_add/sub_days,
+    // checked_add/sub_signed, with_time}` forward to `TimeZone::from_local_datetime`, so the effect is the caller's `Tz`: EXECUTED
+    // (macOS interposer, TZ unset, offsets built without reading the zone) `Local` = getenv(TZ) + lstat/open(/etc/localtime) + 1
+    // clock read for and_hms_opt, and_time, checked_add_days, checked_add_signed, with_time (and `Local::from_utc_datetime`), `Utc` =
+    // 0 events on the same five; the other seven spellings share those bodies and are READ. diesel 2.3.14 `DateTime::from_sql` is the
+    // same fact one hop out: the key merges the `DateTime<Utc>` impl (`Utc.from_utc_datetime`, pure) with the `DateTime<Local>` one
+    // (`Local::from_utc_datetime`, the executed read) — READ, not executed.
+    ("chrono", "chrono::date::Date::and_hms", "R1693:conditional"),
+    ("chrono", "chrono::date::Date::and_hms_micro", "R1693:conditional"),
+    ("chrono", "chrono::date::Date::and_hms_micro_opt", "R1693:conditional"),
+    ("chrono", "chrono::date::Date::and_hms_milli", "R1693:conditional"),
+    ("chrono", "chrono::date::Date::and_hms_milli_opt", "R1693:conditional"),
+    ("chrono", "chrono::date::Date::and_hms_nano", "R1693:conditional"),
+    ("chrono", "chrono::date::Date::and_hms_nano_opt", "R1693:conditional"),
+    ("chrono", "chrono::date::Date::and_hms_opt", "R1693:conditional"),
+    ("chrono", "chrono::date::Date::and_time", "R1693:conditional"),
+    ("chrono", "chrono::datetime::DateTime::checked_add_days", "R1693:conditional"),
+    ("chrono", "chrono::datetime::DateTime::checked_add_signed", "R1693:conditional"),
+    ("chrono", "chrono::datetime::DateTime::checked_sub_days", "R1693:conditional"),
+    ("chrono", "chrono::datetime::DateTime::checked_sub_signed", "R1693:conditional"),
+    ("chrono", "chrono::datetime::DateTime::with_time", "R1693:conditional"),
+    ("diesel", "diesel::pg::types::date_and_time::chrono::DateTime::from_sql", "R1693:conditional"),
+    ("diesel", "diesel::sqlite::types::date_and_time::chrono::DateTime::from_sql", "R1693:conditional"),
+    // R1694 (overcharge x4): the self-scan fabricates the effect on a body that reads none. (a) chrono `NaiveDateTime::
+    // {parse_from_str, parse_and_remainder}` and `Parsed::to_naive_datetime_with_offset` are arithmetic on `NaiveDate`/`NaiveDateTime`/
+    // `Parsed`, but `date.and_time(t)` / `datetime.hour()` on those receivers are resolved to the `Date<Tz>` / `DateTime<Tz>`
+    // generic impls and so inherit the `Local` arm of R1693 (EXECUTED: all three 0 events). (b) ureq 3.5.1 `Config::new_agent` is
+    // `self.clone().into()` -> `Agent::new_with_config`, already `REVIEWED_PURE_ENTRIES`; the scan charges the pool's connector
+    // CLOSURE (built, never called) at its creator (EXECUTED: 0 connect, 0 getenv in the window).
+    ("chrono", "chrono::format::parsed::Parsed::to_naive_datetime_with_offset", "R1694:overcharge"),
+    ("chrono", "chrono::naive::datetime::NaiveDateTime::parse_and_remainder", "R1694:overcharge"),
+    ("chrono", "chrono::naive::datetime::NaiveDateTime::parse_from_str", "R1694:overcharge"),
+    ("ureq", "ureq::config::Config::new_agent", "R1694:overcharge"),
+    // R1695 (conditional x11): ureq 3.5.1 `Body`/`BodyWithConfig` readers and `Body::as_body` take their effect from where the body
+    // came from — a connection (`BodyDataSource::Handler`: the read blocks on the socket, EXECUTED 810 ms against a server that
+    // withholds the tail 0.8 s; the Net is charged at `.call()`) or memory (`Body::builder().data(..)`, 0 ms, EXECUTED); the oracle's
+    // `Log` is a `debug!` on gzip/brotli/charset/unknown-encoding only. `DefaultResolver::host_and_port` is a `format!`; its `Log`
+    // is `Scheme::default_port`'s `debug!("Unknown scheme")`, emitted only for a non-http(s)/proxy scheme under a debug logger.
+    ("ureq", "ureq::body::Body::as_reader", "R1695:conditional"),
+    ("ureq", "ureq::body::Body::into_reader", "R1695:conditional"),
+    ("ureq", "ureq::body::Body::read_json", "R1695:conditional"),
+    ("ureq", "ureq::body::Body::read_to_string", "R1695:conditional"),
+    ("ureq", "ureq::body::Body::read_to_vec", "R1695:conditional"),
+    ("ureq", "ureq::body::BodyWithConfig::read_json", "R1695:conditional"),
+    ("ureq", "ureq::body::BodyWithConfig::read_to_string", "R1695:conditional"),
+    ("ureq", "ureq::body::BodyWithConfig::read_to_vec", "R1695:conditional"),
+    ("ureq", "ureq::body::BodyWithConfig::reader", "R1695:conditional"),
+    ("ureq", "ureq::send_body::Body::as_body", "R1695:conditional"),
+    ("ureq", "ureq::unversioned::resolver::DefaultResolver::host_and_port", "R1695:conditional"),
+    // R1553 (+2): `ConfigBuilder::timeout_per_read` / `timeout_per_write`, setters new in ureq 3.5.x and the same shape as the 30 above.
+    ("ureq", "ureq::config::ConfigBuilder::timeout_per_read", "R1553:conditional"),
+    ("ureq", "ureq::config::ConfigBuilder::timeout_per_write", "R1553:conditional"),
+    // R1696 (conditional x1): ureq 3.5.1 `TcpStream::shutdown` is `shutdown(2)` on the socket, but `mod tcp;` is private and the type
+    // has no re-export, so no consumer spelling reaches it; the one consumer route is `Agent::shutdown`, which the scan marks
+    // `Unknown` alone (a `dyn ShutdownHandle`) and which now carries a `Net` rule (EXECUTED: a worker blocked in a body read ended at
+    // 260 ms with an error after `agent.shutdown()`, ran 811 ms to success without it).
+    ("ureq", "ureq::unversioned::transport::tcp::TcpStream::shutdown", "R1696:conditional"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -1548,6 +1609,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
                 ("TcpConnector" | "DefaultConnector" | "ConnectProxyConnector" | "SocksConnector"
                     | "NativeTlsConnector", "connect") => Some("Net"),
                 ("TcpTransport", "transmit_output" | "await_input" | "is_open") => Some("Net"),
+                // `Agent::shutdown` (ureq 3.5.x; SOUNDNESS R1528 refresh, covgate lane, R1696): the consumer-callable route to the
+                // `ShutdownHandle::shutdown` of every transport the agent registered, which `TcpStream::shutdown` implements with
+                // `shutdown(2)` on the socket — the self-scan nominates `Unknown` alone for `Agent::shutdown` (a `dyn` handle),
+                // so the row it DID nominate, `TcpStream::shutdown` (in a private module), has no consumer spelling. EXECUTED
+                // (slow local HTTP server, a worker blocked in `read_to_string`): `agent.shutdown()` after 250 ms ended the
+                // worker's read at 260 ms with an error; the same program without the call ran 811 ms to success. An agent with
+                // no live transport shuts nothing down: charged on the call, like the other pool-level verbs.
+                ("Agent", "shutdown") => Some("Net"),
                 ("Config", "builder" | "default") | ("Agent", "config_builder" | "new_with_defaults")
                 | ("Proxy", "try_from_env") => Some("Env"),
                 ("Form", "file") | ("Part", "file") | ("File", "as_body") => Some("Fs"),
@@ -2838,6 +2907,17 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             //     `transaction*` call `self.conn.begin*()` before any permission check, `commit`/`rollback` call the
             //     wrapped transaction's. EXECUTED against an RBAC-enabled sqlite file: BEGIN/COMMIT/ROLLBACK spans, a
             //     write lock held across `begin_with_options(Immediate)`.
+            // SOUNDNESS R1528 (sea-orm 2.0.4 refresh, covgate lane): `SqlxPostgresConnector::accepts(url)` is `url.starts_with(
+            // "postgres://") && url.parse::<PgConnectOptions>().is_ok()` (driver/sqlx_postgres.rs:61), and that parse reads the
+            // `PG*` environment. EXECUTED (macOS, DYLD interposer, sea-orm 2.0.4): `postgres://u@h/db` = 13 `PG*` getenv + 3
+            // stat of the unix-socket candidates + open `~/.pgpass` (the second effect: `ALSO_EFFECTS`); `postgres://u:pw@h/db`
+            // = 12 getenv; a `mysql://` string and a pure control = 0 (the `&&` short-circuits), so the charge is an
+            // over-approximation for a non-postgres URL, the same stated trade as the `PgConnectOptions::from_str` row (R1623).
+            if let Some(("SqlxPostgresConnector", "accepts")) =
+                type_method(path, "sea_orm", &["", "driver", "driver::sqlx_postgres"])
+            {
+                return Some("Env");
+            }
             if let Some((ty, m)) = type_method(path, "sea_orm", &[""]) {
                 if matches!(
                     (ty, m),
@@ -3958,9 +4038,14 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             "tracing_subscriber",
             &["", "fmt", "fmt::time", "fmt::time::time_crate", "fmt::time::chrono_crate", "time"],
         ) {
+            // `OffsetTime::local_rfc_3339` (tracing-subscriber 0.3.23, the refresh's drift row): `Self::new(UtcOffset::
+            // current_local_offset()?, Rfc3339)` (fmt/time/time_crate.rs:363), the `time` crate's local-offset probe that this
+            // file already charges `Clock` + `Fs` (R1612). EXECUTED (macOS, DYLD interposer, TZ unset): 1 `clock_gettime` +
+            // `access(/etc/localtime)`; a pure control in the same harness 0.
             if (m == "format_time"
                 && matches!(ty, "SystemTime" | "UtcTime" | "LocalTime" | "OffsetTime" | "ChronoLocal" | "ChronoUtc"))
                 || (ty == "Uptime" && m == "default")
+                || (ty == "OffsetTime" && m == "local_rfc_3339")
             {
                 return Some("Clock");
             }
@@ -4807,11 +4892,11 @@ fn b11_r1528(crate_name: &str, path: &str) -> Option<Option<&'static str>> {
         ("elasticsearch", "Transport", "single_node" | "static_node_list" | "sniffing_node_list" | "cloud") => hit("Env"),
         ("elasticsearch", "TransportBuilder", "build") => hit("Env"),
         ("elasticsearch", "MultiNodeConnectionPool", "reseed") => hit("Clock"),
-        ("tokio_postgres" | "deadpool_postgres", "Client" | "Transaction" | "ClientWrapper", "execute_raw" | "execute_typed"
+        ("tokio_postgres" | "deadpool_postgres" | "postgres", "Client" | "Transaction" | "ClientWrapper", "execute_raw" | "execute_typed"
             | "query_typed_raw" | "query_typed_one" | "query_typed_opt" | "query_scalar" | "query_one_scalar"
             | "query_opt_scalar" | "bind" | "bind_raw" | "query_portal" | "query_portal_raw" | "commit" | "rollback"
             | "savepoint") => hit("Db"),
-        ("tokio_postgres" | "deadpool_postgres", "Client" | "ClientWrapper", "simple_query_raw" | "check_connection") => hit("Db"),
+        ("tokio_postgres" | "deadpool_postgres" | "postgres", "Client" | "ClientWrapper", "simple_query_raw" | "check_connection") => hit("Db"),
         // deadpool's sealed `GenericClient` (implemented for its `Client` and `Transaction` only, both EXECUTED above)
         ("deadpool_postgres", "GenericClient", "execute_raw") => hit("Db"),
         // `ToStatementType` lives in tokio-postgres's private `to_statement::private` module and the method needs the
@@ -5182,6 +5267,13 @@ fn sqlx_r1528(krate: &str, path: &str) -> Option<&'static str> {
         ("" | "pool" | "pool::connection", "PoolConnection", "close") => Some("Net"),
         ("" | "pool" | "pool::connection", "PoolConnection", "return_to_pool") => Some("Db"),
         ("" | "migrate" | "migrate::migrator", "Migrator", "new") => Some("Fs"),
+        // SOUNDNESS R1528 (sqlx-core 0.9.0 refresh, covgate lane) — the four migration RUNNERS. EXECUTED (sqlite file db behind
+        // `connect_lazy`, so the file exists only if the verb touched it): `run`, `run_to`, `skip`, `undo` and the doc-hidden
+        // `run_direct` each created the db file and `_sqlx_migrations` (`run`/`run_to`/`run_direct` also applied the migration:
+        // table `t1`; `skip` marked it applied: 1 row; `undo` ensured the table: 0 rows); the pure control `Migrator::iter` and a
+        // constructed-but-not-run `Migrator`: no file. The scan could not reach this itself: the connection is the caller's
+        // `A: Acquire` and the `Migrate` impl is dispatched, so the oracle nominated `Clock,Log,Unknown` and no rule named `Db`.
+        ("" | "migrate" | "migrate::migrator", "Migrator", "run" | "run_to" | "skip" | "undo" | "run_direct") => Some("Db"),
         ("fs", "ReadDir", "next") if krate == "sqlx_core" => Some("Fs"),
         ("logger", "QueryLogger", "new") if krate == "sqlx_core" => Some("Clock"),
         ("logger", "QueryLogger", "finish") if krate == "sqlx_core" => Some("Log"),
@@ -5262,6 +5354,15 @@ fn redis_r1528(path: &str) -> Option<&'static str> {
                 && matches!(method, "is_open" | "check_connection" | "get_async_pubsub" | "get_async_monitor")
         }
         "Cmd" => matches!(module, "" | "cmd") && method == "iter_async",
+        // SOUNDNESS R1528 (redis 1.8.1 refresh, covgate lane): the SYNC `PubSub`'s command verbs — each writes a command and reads
+        // its reply through `cache_messages_until_received_response` (connection.rs:2232-2266). EXECUTED against redis:7 behind a
+        // counting proxy, idle window beside each: subscribe 27 up / 31 down, psubscribe 29/33, unsubscribe 30/34, punsubscribe 31/35,
+        // ping 14/7, ping_message 21/7; the pure control and an idle window 0/0. `Db` like the `Commands` verbs (these ISSUE a
+        // command), where `PubSub::get_message` above only reads. The sync module guard keeps the async `aio` pub/sub out.
+        "PubSub" => {
+            matches!(module, "" | "connection")
+                && matches!(method, "subscribe" | "psubscribe" | "unsubscribe" | "punsubscribe" | "ping" | "ping_message")
+        }
         "MultiplexedConnection" => {
             (matches!(module, "aio" | "aio::multiplexed_connection")
                 && matches!(method, "send_packed_command" | "send_packed_commands" | "connect_with_config"))
@@ -5361,6 +5462,11 @@ fn async_nats_r1528(path: &str) -> Option<&'static str> {
                     "info" | "get_info" | "info_with_subjects" | "consumer_info" | "create_consumer"
                         | "create_consumer_strict" | "update_consumer" | "get_consumer" | "get_or_create_consumer"
                         | "delete_consumer" | "pause_consumer" | "resume_consumer" | "reset_consumer"
+                        // `unpin_consumer` (async-nats 0.52.0, feature `server_2_11`; the 0.50.0 lane found it absent): one
+                        // `CONSUMER.UNPIN.<stream>.<name>` request/reply through `Context::request`. EXECUTED against nats
+                        // `-js` behind a counting proxy: 106 up / 198 down (the stream existed, the consumer did not: the
+                        // request still goes out); an idle window and a pure control 0.
+                        | "unpin_consumer"
                         | "delete_message" | "purge_subject" | "direct_get" | "direct_get_first_for_subject"
                         | "direct_get_last_for_subject" | "direct_get_next_for_subject" | "get_raw_message"
                         | "get_first_raw_message_by_subject" | "get_next_raw_message_by_subject"
@@ -5556,7 +5662,10 @@ fn mongodb_r1528(path: &str) -> Option<&'static str> {
         }
         // The macro-input / action-type spellings (no consumer can write them; see above).
         ("StartTransaction", "and_run" | "and_run2") => true,
-        ("AbortTransaction" | "CommitTransaction" | "BulkWrite" | "CountDocuments" | "CreateCollection"
+        // `Aggregate` (SOUNDNESS R1528, mongodb 3.10.0 refresh): EXECUTED against mongo:latest behind a counting proxy after a
+        // warm-up op: `.await`, `.batch().await`, and both with `.session(..)` each moved 139 up / 92 down; the builder
+        // `aggregate(..)` held without awaiting, and an idle window, 0.
+        ("Aggregate" | "AbortTransaction" | "CommitTransaction" | "BulkWrite" | "CountDocuments" | "CreateCollection"
             | "CreateSearchIndex" | "DropCollection" | "DropDatabase" | "DropIndex" | "Find" | "FindOneAndDelete"
             | "FindOneAndReplace" | "FindOneAndUpdate" | "ListCollections" | "ListDatabases" | "ListIndexes"
             | "RunCommand" | "RunCursorCommand" | "Shutdown" | "Watch", "execute" | "batch") => true,
@@ -6602,6 +6711,24 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
         fs_kind: &["read"],
         row: "R1623",
         evidence: "EXECUTED (postgres:16, interposer): connect_lazy(url) = 12 PG* getenv [Env primary] + 3 stat, 0 connections.",
+    },
+    AlsoEffect {
+        krate: &["tracing_subscriber"],
+        on: AlsoOn::Method("OffsetTime", &["local_rfc_3339"]),
+        effects: &["Fs"],
+        fs_kind: &["read"],
+        row: "R1528",
+        evidence: "EXECUTED (tracing-subscriber 0.3.23, macOS interposer, TZ unset): 1 clock_gettime [Clock primary] + access(/etc/localtime) \
+                   (the `time` crate's current_local_offset, R1612); a pure control: 0.",
+    },
+    AlsoEffect {
+        krate: &["sea_orm"],
+        on: AlsoOn::Method("SqlxPostgresConnector", &["accepts"]),
+        effects: &["Fs"],
+        fs_kind: &["read"],
+        row: "R1528",
+        evidence: "EXECUTED (sea-orm 2.0.4, macOS interposer): accepts(\"postgres://u@h/db\") = 13 PG* getenv [Env primary] + stat of \
+                   /var/run/postgresql, /private/tmp, /tmp `.s.PGSQL.5432` + open ~/.pgpass; a `mysql://` string and a pure control: 0.",
     },
     AlsoEffect {
         krate: &["sqlx"],
