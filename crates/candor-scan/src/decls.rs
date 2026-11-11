@@ -2049,6 +2049,7 @@ pub(crate) fn collect_cfg_arm_aliases(
     let lifted = crate::lang::cfg_if_use_items(items);
     let mut gated: HashMap<String, Vec<String>> = HashMap::new();
     let mut ungated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut local_arms: std::collections::HashSet<String> = std::collections::HashSet::new();
     let real = items.iter().filter_map(|it| if let syn::Item::Use(u) = it { Some(u) } else { None });
     for u in real.chain(lifted.iter()) {
         if !crate::lang::use_item_applies(u, include_tests) {
@@ -2079,6 +2080,9 @@ pub(crate) fn collect_cfg_arm_aliases(
             } else {
                 vec![format!("{}::{name}", segs.join("::"))]
             };
+            if !bases.is_empty() || (segs.is_empty() && mods.contains_key(&name)) {
+                local_arms.insert(alias.clone());
+            }
             let e = gated.entry(alias).or_default();
             for t in targets {
                 if !e.contains(&t) {
@@ -2088,7 +2092,9 @@ pub(crate) fn collect_cfg_arm_aliases(
         }
     }
     for (alias, targets) in gated {
-        if targets.len() < 2 || ungated.contains(&alias) {
+        // Only a set with a LOCAL arm — see `lang::collect_item_uses`'s twin rule: an all-external set (flate2's
+        // `std::io` / `alloc::io`) types bounds through this map, where a joined value withdrew a measured disclosure.
+        if targets.len() < 2 || ungated.contains(&alias) || !local_arms.contains(&alias) {
             continue;
         }
         if candor_report::env::trace("CANDOR_R1682_INSTR") {

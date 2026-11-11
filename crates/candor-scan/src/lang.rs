@@ -2933,6 +2933,18 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
     if hits.len() != 1 {
         return None;
     }
+    // A LOCAL alias only (a module or item of this crate). A glob-imported EXTERNAL binding (`use crate::*;` over the root's
+    // `use core::fmt;`, then `W: fmt::Write`) is the extern-prelude question `glob_candidates_ext` owns, and resolving it here
+    // moved a measured disclosure (writeable 0.5.5 `CoreWriteAsPartsWrite::write_char`'s `dispatch:Write.write_char`) without
+    // that route's precedence rules.
+    let deps = uses.get(DEPS_KEY).map(String::as_str).unwrap_or("");
+    let external = |a: &str| {
+        let h = a.split("::").next().unwrap_or(a);
+        h != "crate" && (matches!(h, "std" | "core" | "alloc") || deps.split('\u{1}').any(|d| d == h) || !a.contains("::") && h.is_empty())
+    };
+    if hits[0].split(crate::decls::ALIAS_ALT_SEP).any(external) {
+        return None;
+    }
     let r = alias_join(hits[0], &segs[1..]);
     if candor_report::env::trace("CANDOR_R1684_INSTR") {
         eprintln!("R1684GLOB\t{}\t{}", segs.join("::"), r.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH COUNTER
@@ -6379,7 +6391,14 @@ pub(crate) fn collect_item_uses(
             let mut a: Vec<&str> = arms.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
             a.sort_unstable();
             a.dedup();
-            if a.len() >= 2 {
+            // …and only a set with a LOCAL arm (the R1682 class: a platform module pair). An all-external set (flate2's
+            // `#[cfg(..)] use {alloc::io, ..}` / `use std::{error, io}`) types BOUNDS and fields through this map, and a
+            // joined value there withdrew a measured `dispatch:Read.read` disclosure without adding an edge.
+            let local = |v: &str| {
+                v.starts_with("crate::") || v.starts_with("self::") || v.starts_with("super::")
+                    || module_declares(out, v.split("::").next().unwrap_or(v)) == Some(true)
+            };
+            if a.len() >= 2 && a.iter().any(|v| local(v)) {
                 out.insert(cfg_arm_key(k), a.join(&crate::decls::ALIAS_ALT_SEP.to_string()));
             }
         }
