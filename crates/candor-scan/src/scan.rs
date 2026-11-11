@@ -3462,21 +3462,28 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut nonpath_contested: Vec<(String, Vec<String>)> = Vec::new();
     // SOUNDNESS R1095 — (caller, method leaf, candidate units): a method called on a receiver no route typed,
     // whose name a crate-local `self` method carries. Judged after the fixpoint, below.
-    let untyped_contested: Vec<(String, String, Vec<String>)> = {
-        let mut by_method: HashMap<&str, Vec<&str>> = HashMap::new();
-        for f in &fns {
-            if f.has_self && !f.extern_decl && !f.reexport_alias {
-                let v = by_method.entry(f.leaf.as_str()).or_default();
-                if !v.contains(&f.qual.as_str()) {
-                    v.push(f.qual.as_str());
-                }
+    // The crate-local `self` methods by leaf, owned: the R1095 judge below reads them, and SOUNDNESS R1663 adds a site to
+    // that judge from the typed-call resolution (a guessed chain hop whose typed tail names no unit).
+    let mut self_methods_by_leaf: HashMap<String, Vec<String>> = HashMap::new();
+    for f in &fns {
+        if f.has_self && !f.extern_decl && !f.reexport_alias {
+            let v = self_methods_by_leaf.entry(f.leaf.clone()).or_default();
+            if !v.contains(&f.qual) {
+                v.push(f.qual.clone());
             }
         }
+    }
+    let mut untyped_contested: Vec<(String, String, Vec<String>, bool)> = {
         let mut out = Vec::new();
         for f in &fns {
             for m in &f.untyped_methods {
-                if let Some(c) = by_method.get(m.as_str()) {
-                    out.push((f.qual.clone(), m.clone(), c.iter().map(|q| q.to_string()).collect()));
+                // SOUNDNESS R1665 — a dependency-wrapper site (`WRAP_PREFIX`) counts an `Unknown`-only candidate (narrow population).
+                let (leaf, admit) = match m.strip_prefix(crate::lazy::WRAP_PREFIX) {
+                    Some(l) => (l, true),
+                    None => (m.as_str(), false),
+                };
+                if let Some(c) = self_methods_by_leaf.get(leaf) {
+                    out.push((f.qual.clone(), leaf.to_string(), c.clone(), admit));
                 }
             }
         }
@@ -6905,6 +6912,44 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if let Some(t2) = tail2(&c.path) {
                     let ty = t2.split("::").next().unwrap_or("").to_string();
                     let claimants = by_tail2.get(&t2).map(|v| v.len()).unwrap_or(0);
+                    // SOUNDNESS R1664 — THE RECEIVER'S TYPE IS A RENAME RE-EXPORT (`pub(crate) use segment::HashMap as
+                    // SegmentedHashMap`) and no unit answers the tail. Nothing indexes a renamed TYPE (`reexport_aliases` folds
+                    // fns only), so a call on it formed `SegmentedHashMap::get` and vanished: no edge, no `Unknown`, no reason
+                    // (EXECUTED, lane fixture `f64`: all three spellings of the owner read ABSENT over a write; moka's
+                    // `Inner::admit`, whose `type CacheStore = crate::cht::SegmentedHashMap<..>` parameter reads `inferred []`
+                    // with no `unknownWhy`). The miss is disclosed; the RESOLUTION (map the alias to its single target) is stage 2's.
+                    // Only an alias no struct/enum of the crate is itself named, and only where the renamed item is type-shaped
+                    // (a unit struct has no `fields` entry, so the declaration index cannot say it is one). Kill switch
+                    // `CANDOR_R1664_OFF`.
+                    if claimants == 0 && (resolvable || c.path.starts_with("crate::")) && !aliased && !candor_report::env::switch("CANDOR_R1664_OFF")
+                        && !merged.fields.contains_key(&ty)
+                        && merged.reexports.iter().any(|r| {
+                            r.name != "*" && r.alias == ty && r.name != r.alias && crate::lang::is_type_ident(&r.name)
+                        })
+                    {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert(format!("unresolved:renamed re-export type `{ty}` names no unit"));
+                        if candor_report::env::trace("CANDOR_R1664_INSTR") {
+                            eprintln!("R1664HIT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                    }
+                    // SOUNDNESS R1663 — a typed call FORMED BY A GUESSED CHAIN HOP (`x.sel().go()`, `sel` declared to return
+                    // another type: the walk typed `go` on `x`'s own type) that names no unit is a call on a receiver no route
+                    // typed. Handed to the R1095 judge below, which discloses where a crate-local `self` method of that name
+                    // carries a concrete effect. Only the miss: where `Base::go` exists the typed edge is already formed.
+                    if claimants == 0
+                        && f.untyped_methods.iter().any(|m| m.strip_prefix(crate::lazy::HOP_GUESS_PREFIX) == Some(t2.as_str()))
+                    {
+                        if let Some(cands) = self_methods_by_leaf.get(c.leaf.as_str()) {
+                            if candor_report::env::trace("CANDOR_R1663_INSTR") {
+                                eprintln!("R1663MISS\t{}\t{t2}", f.qual); // §E1 REACH COUNTER
+                            }
+                            untyped_contested.push((f.qual.clone(), c.leaf.clone(), cands.clone(), true));
+                        }
+                    }
                     // (a) THE CRATE DECLARES `Type::method` MORE THAN ONCE. `resolve_target` keys on the
                     // 2-segment tail and refuses a tail several DISTINCT definitions claim, because
                     // linking a many-way tail fabricates one type's effect onto the other's caller. The
@@ -7859,7 +7904,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // dependency) defines has no candidate here and is untouched; a candidate set with no concrete effect
         // discloses nothing (see the measurement below for why `Unknown`-only candidates are excluded). The
         // detail is dot-free (§4: no owner could be formed), with any `.` in a qual replaced.
-        for (caller, leaf, cands) in &untyped_contested {
+        for (caller, leaf, cands, admit_unknown) in &untyped_contested {
             // A CONCRETELY effectful candidate only. Measured over a quarter of the 1,916-crate registry corpus
             // (480 entries): any not-genuinely-pure candidate hedged 8,871 callers (5.95% of all rows newly
             // `Unknown` on the full corpus — above the declined band), dominated by std-trait names whose crate
@@ -7885,10 +7930,44 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // kept this caller hedged. Without this, the removal turned a hedged caller into an absent one (EXECUTED shape:
             // a generic `E::delete_by_id(id).exec(db)` with no lock-pinned source, reached through an untyped field).
             let r1605_unknown = |u: &String| r1605_reach.get(u).is_some_and(|b| !b.is_empty());
-            let impure: Vec<&String> = cands
+            let mut impure: Vec<&String> = cands
                 .iter()
-                .filter(|u| inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown")) || blanket_unknown(u) || r1605_unknown(u))
+                .filter(|u| {
+                    inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown"))
+                        // SOUNDNESS R1663 — a GUESSED HOP's miss is a narrow population (a typed call that named no unit), so a
+                        // candidate that is not genuinely pure counts, `Unknown`-only included: moka's `Cache::insert_with_hash`
+                        // is hedged all the way down and was the only candidate.
+                        || (*admit_unknown && inferred.get(*u).is_some_and(|e| !e.is_empty()))
+                        || blanket_unknown(u)
+                        || r1605_unknown(u)
+                })
                 .collect();
+            // SOUNDNESS R1666 — THE RESIDUAL THE FLOOR STATED, CLOSED FOR A NAME STD DOES NOT HAVE. A candidate whose ONLY effect is
+            // `Unknown` (basic-toml's `Error::fix_offset`, hedged through a callback) was excluded because the std-trait names
+            // (`hash`, `clone`, `as_ref`, `to_tokens`) dominated the 5.95% measurement. Those are std names; a method std has no
+            // member of that name for is not one of them. So an `Unknown`-only candidate counts where `leaf` is no std method
+            // name (`std_methods`, generated from rust-src). The untyped call to a crate method that is hedged all the way down
+            // read ABSENT at the caller (EXECUTED, lane fixture `f66`). Kill switch `CANDOR_R1666_OFF`.
+            if impure.is_empty() {
+                let unknown_only: Vec<&String> =
+                    cands.iter().filter(|u| inferred.get(*u).is_some_and(|e| !e.is_empty() && e.iter().all(|x| *x == "Unknown"))).collect();
+                if !unknown_only.is_empty() && !*admit_unknown {
+                    let std_name = crate::std_methods::is_std_method_name(leaf);
+                    let cb = unknown_only.iter().any(|u| unknown_why.get(*u).is_some_and(|w| w.iter().any(|x| x.starts_with("callback"))));
+                    if candor_report::env::trace("CANDOR_R1666_INSTR") && !direct.get(caller).is_some_and(|d| d.contains("Unknown")) {
+                        eprintln!("R1666ALL\t{caller}\t{leaf}"); // §E1 REACH COUNTER: every Unknown-only site (the declined form)
+                        if !std_name {
+                            eprintln!("R1666NOSTD\t{caller}\t{leaf}");
+                            if cb {
+                                eprintln!("R1666CB\t{caller}\t{leaf}");
+                            }
+                        }
+                    }
+                    if !std_name && !candor_report::env::switch("CANDOR_R1666_OFF") {
+                        impure = unknown_only;
+                    }
+                }
+            }
             if impure.is_empty() {
                 continue;
             }
@@ -9362,7 +9441,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // a duplicate (§4 ⟨0.40⟩ union clause, rule 1).
                     let don_adds = entries.iter().find(|e| e.hash == hash)
                         .is_some_and(|real| don_u.iter().any(|k| !real.dispatches_on.contains(k)));
-                    if !eff_adds && !blind_adds && !don_adds {
+                    // SOUNDNESS R1666 — …and every REASON CLASS. `Unknown` on the real row covers any EFFECT, but not a class
+                    // gate: a union that carries `Unknown[unresolved]` beside a real row whose own reasons are all
+                    // `dispatch` was suppressed as a duplicate, so `deny Unknown[unresolved]` went 1 -> 0 on the unit the day
+                    // the real row gained an `Unknown` of its own (EXECUTED on object-0.24.0 `Object::symbol_map`, whose union
+                    // row carries a `macro:` reason the R1666 floor's new `dispatch` reasons do not). Exact set arithmetic on
+                    // the published `unknownWhy` fields. Kill switch `CANDOR_R1666B_OFF`.
+                    let class_adds = !candor_report::env::switch("CANDOR_R1666B_OFF")
+                        && inf_u.contains("Unknown")
+                        && entries.iter().find(|e| e.hash == hash).is_some_and(|real| {
+                            let real_cls: BTreeSet<&str> =
+                                real.unknown_why.iter().map(|w| candor_classify::policy::ReasonClass::classify(w).token()).collect();
+                            why_u.iter().any(|w| !real_cls.contains(candor_classify::policy::ReasonClass::classify(w).token()))
+                        });
+                    if class_adds && !eff_adds && !blind_adds && !don_adds && candor_report::env::trace("CANDOR_R1666B_INSTR") {
+                        eprintln!("R1666BCLASS\t{hash}"); // §E1 REACH COUNTER: a union row emitted ONLY for its reason classes
+                    }
+                    if !eff_adds && !blind_adds && !don_adds && !class_adds {
                         // The real entry at this hash already carries every EFFECT **and** every
                         // UNCOVERED PACKAGE the union knows, so a second row would be a duplicate
                         // carrying nothing. 233 of the 244 measured suppressions are this case.

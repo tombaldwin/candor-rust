@@ -13498,7 +13498,58 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // SOUNDNESS R1617(4) — a chain through an element-yielding accessor (`get`) the walk went through files its
                 // marker too, but ONLY for the unchained re-typing: R861's chained consumer never saw these and must not
                 // start hedging them, so the marker is tagged (`R1617_ACCESSOR_STEP` on its steps) and R861 skips it.
+                // SOUNDNESS R1665 — A DEPENDENCY WRAPPER OVER A CRATE-LOCAL TYPE ARGUMENT (`sleep: CachePadded<Stack>`,
+                // `self.sleep.push(..)`): the dependency type declares no such method (its `Deref` reaches the argument, which the
+                // dependency's report cannot say), so the typed call joins a dependency that never had a `push` — and the
+                // effect is in THIS crate's `Stack::push`, which chaining the dependency cannot reveal. EXECUTED (lane fixture
+                // `f65d`: `[]` with `invisible: [cp]` over a write). Where the receiver is a field whose written type is a
+                // dependency type with a crate-local argument that declares `leaf`, the site goes to the R1095 judge as an untyped
+                // receiver of `leaf` (the dependency wrapper does not type the value this call runs on). Kill switch
+                // `CANDOR_R1665_OFF`.
+                if self.is_dependency_type(&ty) && !candor_report::env::switch("CANDOR_R1665_OFF") {
+                    if let syn::Expr::Field(fe) = peel_recv(&node.receiver) {
+                        if let Some(owner) = self.resolve_recv_type(&fe.base).filter(|o| !self.is_dependency_type(o)) {
+                            let key = match &fe.member {
+                                syn::Member::Named(n) => n.to_string(),
+                                syn::Member::Unnamed(i) => i.index.to_string(),
+                            };
+                            if let Some(args) = self.owner_field_args(&fe.base, &owner, &key, &fe.member) {
+                                let hit = args.split('\u{1}').any(|a| {
+                                    let al = a.rsplit("::").next().unwrap_or(a);
+                                    crate::lang::is_type_ident(al) && self.returns.contains_key(&crate::model::impl_fn_key(al, &leaf))
+                                });
+                                if hit {
+                                    if candor_report::env::trace("CANDOR_R1665_INSTR") {
+                                        eprintln!("R1665WRAP\t{ty}\t.{leaf}"); // §E1 REACH COUNTER
+                                    }
+                                    self.untyped_methods.insert(format!("{}{leaf}", crate::lazy::WRAP_PREFIX));
+                                }
+                            }
+                        }
+                    }
+                }
                 let strict = self.chain_steps(&node.receiver);
+                // SOUNDNESS R1663 — A GUESSED HOP. `x.sel().go()` with `sel` DECLARED to return another type: the walk above
+                // assumed every step returns its receiver's type, so the typed call just formed is `A::go` on `x`'s own type. Where
+                // `A` has no such method that call names no unit and is DROPPED with no disclosure (EXECUTED, lane fixture `f63`:
+                // `deny Fs` 0 over a write; moka's `self.inner.select(h).insert_with_hash(..)`). The site is filed here as
+                // `HOP_GUESS_PREFIX + <base leaf>::<method>`; `scan.rs` hands it to the R1095 judge only if that tail names no
+                // unit. A std-named method is std's on the declared (std) return (`Option::unwrap`) and is left alone. Kill switch
+                // `CANDOR_R1663_OFF`.
+                if !candor_report::env::switch("CANDOR_R1663_OFF") && !crate::std_methods::is_std_method_name(&leaf) {
+                    if let Some((steps, base)) = &strict {
+                        let bl = base.rsplit("::").next().unwrap_or(base);
+                        let moved = steps.iter().find(|st| {
+                            self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| r != base && r.rsplit("::").next() != Some(bl))
+                        });
+                        if *base == ty && moved.is_some() {
+                            if candor_report::env::trace("CANDOR_R1663_INSTR") {
+                                eprintln!("R1663HOP\t{bl}.{}\t.{leaf}", moved.map_or("", |m| m.as_str())); // §E1 REACH COUNTER
+                            }
+                            self.untyped_methods.insert(format!("{}{bl}::{leaf}", crate::lazy::HOP_GUESS_PREFIX));
+                        }
+                    }
+                }
                 let guess = strict.clone()
                     .or_else(|| {
                         (!candor_report::env::switch("CANDOR_R1617H_OFF"))

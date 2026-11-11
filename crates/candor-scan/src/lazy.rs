@@ -32,6 +32,12 @@ pub(crate) const CONSTRUCT_MARKER: &str = "<construct>";
 /// nothing — it exists so the engine DISCLOSES that it never formed a key, rather than to carry an
 /// effect across. See candor-spec/DEP-RECEIVER-TYPING-DESIGN.md (half 1).
 pub(crate) const UNTYPED_RECV_MARKER: &str = "<untyped>";
+/// SOUNDNESS R1663 — the prefix of an `untyped_methods` entry that is NOT a method leaf but a guessed chain hop's typed tail
+/// (`<base leaf>::<method>`); `scan.rs` reads it against `by_tail2` and skips it in the leaf judge.
+pub(crate) const HOP_GUESS_PREFIX: &str = "\u{1}hop:";
+/// SOUNDNESS R1665 — the prefix of an `untyped_methods` entry that is a method leaf called on a DEPENDENCY wrapper field whose written
+/// argument is a crate-local type declaring it; the judge counts an `Unknown`-only candidate for it, as for `HOP_GUESS_PREFIX`.
+pub(crate) const WRAP_PREFIX: &str = "\u{1}wrap:";
 /// SOUNDNESS R1587 — a provenance segment: the value is a dependency FACTORY's return peeled by `unwrap`/`expect`
 /// (`let js = dep::f(c).unwrap()`), so the callee path names no function whose return the value IS. A chained `returns`
 /// lookup on it misses by construction and the consumer discloses; only `scan::r1578_resolve` reads the peel, from
