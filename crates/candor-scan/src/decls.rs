@@ -2249,6 +2249,42 @@ pub(crate) fn collect_private_uses(items: &[syn::Item], modpath: &str, dir: &Pat
     if crate::lang::r1657s2_off() {
         return;
     }
+    let externs = file_extern_crates(items);
+    collect_private_uses_in(items, modpath, dir, include_tests, &externs, out);
+}
+
+/// Every name an `extern crate X [as Y];` binds anywhere in this file's item tree. A `use super::libc;` of such a name
+/// re-binds the EXTERN CRATE, not a local item, and is never a re-export-table edge (pnet_sys: R1657 stage 2's first cut
+/// rewrote `libc::sendto` to a crate-local path and lost the classifier's `Net`).
+pub(crate) fn file_extern_crates(items: &[syn::Item]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for it in items {
+        match it {
+            syn::Item::ExternCrate(e) => {
+                out.insert(e.ident.to_string());
+                if let Some((_, r)) = &e.rename {
+                    out.insert(r.to_string());
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    out.extend(file_extern_crates(inner));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn collect_private_uses_in(
+    items: &[syn::Item],
+    modpath: &str,
+    dir: &Path,
+    include_tests: bool,
+    externs: &std::collections::HashSet<String>,
+    out: &mut Vec<Reexport>,
+) {
     let mods = mod_targets(items, modpath, dir, include_tests);
     for it in items {
         match it {
@@ -2264,7 +2300,7 @@ pub(crate) fn collect_private_uses(items: &[syn::Item], modpath: &str, dir: &Pat
                 let mut leaves = Vec::new();
                 use_leaves(&u.tree, Vec::new(), &mut leaves);
                 for (segs, name, alias) in leaves {
-                    if name == "*" {
+                    if name == "*" || externs.contains(&name) {
                         continue;
                     }
                     let mut from = resolve_use_base(&segs, modpath, &mods);
@@ -2282,7 +2318,7 @@ pub(crate) fn collect_private_uses(items: &[syn::Item], modpath: &str, dir: &Pat
                 }
                 if let Some((_, inner)) = &m.content {
                     let name = m.ident.to_string();
-                    collect_private_uses(inner, &qualify(modpath, &name), &dir.join(&name), include_tests, out);
+                    collect_private_uses_in(inner, &qualify(modpath, &name), &dir.join(&name), include_tests, externs, out);
                 }
             }
             _ => {}

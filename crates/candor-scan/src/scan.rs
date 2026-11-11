@@ -1850,13 +1850,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .flat_map(|(_, _, fd)| fd.ts.types.iter().map(|(q, _, _)| q.clone()))
             .collect()
     };
+    let r1657s2_deps = cargo_deps(dir).0;
     let install_reexport_names = |merged: &MergedDecls| {
         let t = if crate::lang::r1657s2_off() {
             HashMap::new()
         } else {
             {
                 // Exports first, then the private bindings (a name both bind is a `#[cfg]` pair: the union).
-                let edges: Vec<crate::model::Reexport> = merged.reexports.iter().chain(merged.private_uses.iter()).cloned().collect();
+                // A re-exported EXTERN CRATE (`pub use super::libc;`, `use super::libc;` under `extern crate libc;`) is the
+                // dependency, not a local item: routed through the table, `libc::sendto` became a crate-local path and the
+                // classifier's `Net` was lost (pnet_sys, first cut). Dependency and toolchain crate names stay out.
+                let edges: Vec<crate::model::Reexport> = merged
+                    .reexports
+                    .iter()
+                    .chain(merged.private_uses.iter())
+                    .filter(|e| !r1657s2_deps.contains(&e.name) && !matches!(e.name.as_str(), "std" | "core" | "alloc"))
+                    .cloned()
+                    .collect();
                 crate::decls::build_reexport_names(&edges, &merged.mod_aliases, &r1657s2_declared, &r1657s2_mods)
             }
         };

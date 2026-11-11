@@ -2980,6 +2980,12 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
     if uses.contains_key(head) || module_declares(uses, head) == Some(true) {
         return None;
     }
+    // SOUNDNESS R1657 stage 2 — `extern crate libc;` binds `libc` in THIS module, ahead of any glob (pnet_sys `unix.rs`:
+    // `libc::sendto(..)` beside `use self::public::*`, whose `public` privately imports `super::libc`; the first cut sent the
+    // call through the glob to `crate::imp::libc::sendto` and the classifier's `Net` was lost).
+    if uses.get(MODEXTERN_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == head)) {
+        return None;
+    }
     // SOUNDNESS R1657 stage 2 — a ONE-segment name is any namespace's: a module's own `fn split` shadows a glob's `split`
     // (rayon `str::split` beside `use crate::iter::*` re-exporting `splitter::split`; the first cut edged the glob's).
     if segs.len() == 1

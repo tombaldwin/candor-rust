@@ -305,3 +305,22 @@ fn main() { println!(\"{} {}\", user::glob_macro_zq(), user::arm_extern_zq()); }
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&mac);
 }
+
+/// pnet_sys's shape: `extern crate libc;` in a module whose child PRIVATELY imports it (`use super::libc;`) and which globs
+/// that child (`use self::public::*`). `libc::sendto(..)` names the extern crate; the first cut of the private-binding table
+/// sent it through the glob to a crate-local path and the classifier's `Net` was lost. The extern crate (and any manifest
+/// dependency's name) is never a table edge, and a module's own `extern crate` beats a glob.
+#[test]
+fn r1657s2_an_extern_crate_rebound_privately_is_not_a_local_item() {
+    let src = "pub mod imp {\n\
+extern crate libc;\n\
+pub mod public { use super::libc; pub type CSocket = libc::c_int; }\n\
+use self::public::*;\n\
+pub unsafe fn sendto_zq(s: CSocket, b: *const libc::c_void, n: libc::size_t) -> libc::ssize_t { libc::sendto(s, b, n, 0, std::ptr::null(), 0) } }\n\
+fn main() {}\n";
+    let d = fixture("pnet", "pnets2", &[("main.rs", src)], "libc = \"0.2\"\n");
+    let (_, on) = scan(&d, None, false, None);
+    assert!(inferred(&on, "imp::sendto_zq").contains(&"Net".to_string()), "{on:#}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
