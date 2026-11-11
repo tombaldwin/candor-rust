@@ -252,12 +252,13 @@ pub(crate) fn scan_items(
                                     if let Some(l) = tp.segments.last() {
                                         info.impl_kind = 2;
                                         info.impl_trait = l.ident.to_string();
+                                        info.impl_trait_path = syn::__private::ToTokens::to_token_stream(tp).to_string().split_whitespace().collect();
                                     }
                                 }
                                 Some(_) => {}
                                 None => {
                                     info.impl_kind = 1;
-                                    info.impl_flags = crate::model::inherent_impl_flags(im, &m.vis);
+                                    info.impl_flags = crate::model::inherent_impl_flags(im, &m.vis, &m.attrs);
                                 }
                             }
                         }
@@ -3919,6 +3920,7 @@ pub(crate) fn fninfo(
         inst_of: None,
         impl_kind: 0,
         impl_trait: String::new(),
+        impl_trait_path: String::new(),
         impl_flags: 0,
     }
 }

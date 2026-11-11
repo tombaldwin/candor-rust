@@ -365,6 +365,12 @@ pub(crate) struct FnInfo {
     /// SOUNDNESS R1537 (c) — for `impl_kind` 2, the implemented trait's LEAF as written (`Tr` for `impl tm::Tr<A> for S`).
     #[serde(rename = "it", default, skip_serializing_if = "String::is_empty")]
     pub(crate) impl_trait: String,
+    /// SOUNDNESS R1537 (c) — for `impl_kind` 2, the trait path AS WRITTEN, generic arguments included, whitespace removed
+    /// (`tm::Tr<A>`). Two impls whose leaves agree but whose written paths differ (`impl a::Tr for S` + `impl b::Tr for S`,
+    /// `impl Tr<A> for S` + `impl Tr<B> for S`) are two traits by this record, and the set is left merged (R1342 / the
+    /// trait-args class), never split with both trait bodies under one `(Tr)` label.
+    #[serde(rename = "itp", default, skip_serializing_if = "String::is_empty")]
+    pub(crate) impl_trait_path: String,
     /// SOUNDNESS R1537 (c) — for `impl_kind` 1, `IMPL_UNCOND`: the inherent block applies to EVERY instance of its self type
     /// (no `where`, every self-type argument a bare unbounded parameter of the impl or a lifetime), so a call on that type
     /// can always reach it; `IMPL_PUB`: the method is visible crate-wide (`pub`, `pub(crate)`, `pub(in crate)`). Rust's
@@ -404,10 +410,11 @@ pub(crate) const IMPL_UNCOND: u8 = 1;
 pub(crate) const IMPL_PUB: u8 = 2;
 
 /// SOUNDNESS R1537 (c) — `FnInfo::impl_flags` for a method `vis` of the inherent block `im`. `IMPL_UNCOND` only where nothing
-/// can make the block inapplicable to an instance of its self type: no `where` clause, and every self-type argument a lifetime
+/// can make the block inapplicable to an instance of its self type: no `#[cfg]` on the block or the method, no `where` clause,
+/// and every self-type argument a lifetime
 /// or a bare type/const parameter of the impl with no bound of its own (`impl<T> S<T>`, `impl S`). `impl S<u8>` or
 /// `impl<T: Clone> S<T>` does not apply to every `S`, and on an instance it does not apply to the trait's member runs.
-pub(crate) fn inherent_impl_flags(im: &syn::ItemImpl, vis: &syn::Visibility) -> u8 {
+pub(crate) fn inherent_impl_flags(im: &syn::ItemImpl, vis: &syn::Visibility, method_attrs: &[syn::Attribute]) -> u8 {
     let mut f = 0;
     let crate_wide = match vis {
         syn::Visibility::Public(_) => true,
@@ -424,7 +431,13 @@ pub(crate) fn inherent_impl_flags(im: &syn::ItemImpl, vis: &syn::Visibility) -> 
             syn::GenericParam::Lifetime(_) => false,
         })
     };
-    let uncond = im.generics.where_clause.as_ref().is_none_or(|w| w.predicates.is_empty())
+    // A `#[cfg]` on the block or on the method: under the configuration that turns it off the inherent method does not
+    // exist and the trait's member runs (Fable R1537 (c) review, F2), while the scan reads every arm (⟨0.36⟩). Not
+    // applicable to every build, so no pick.
+    let cfg_gated = |attrs: &[syn::Attribute]| attrs.iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"));
+    let uncond = !cfg_gated(&im.attrs)
+        && !cfg_gated(method_attrs)
+        && im.generics.where_clause.as_ref().is_none_or(|w| w.predicates.is_empty())
         && match &*im.self_ty {
             syn::Type::Path(tp) if tp.qself.is_none() => tp.path.segments.iter().all(|seg| match &seg.arguments {
                 syn::PathArguments::None => true,

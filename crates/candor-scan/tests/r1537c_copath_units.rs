@@ -81,6 +81,18 @@ fn cells() -> Vec<(&'static str, String, &'static [&'static str])> {
             format!("pub mod t {{ pub trait Tr {{ fn act(&self); }} }}\npub struct S;\nimpl S {{ pub fn act(&self) {{ {INH} }} }}\nimpl t::Tr for S {{ fn act(&self) {{ {TR} }} }}\npub fn zz(s: &S) {{ s.act() }}"),
             &["Env"],
         ),
+        // Fable review F2 — a `#[cfg]`-gated inherent block or method: with the cfg OFF rustc runs the trait (EXECUTED both
+        // states, `fx/f2`), so no pick: the union.
+        (
+            "cfg_inherent_block",
+            format!("pub trait Tr {{ fn act(&self); }}\npub struct S;\n#[cfg(feature = \"x\")] impl S {{ pub fn act(&self) {{ {INH} }} }}\nimpl Tr for S {{ fn act(&self) {{ {TR} }} }}\npub fn zz(s: &S) {{ s.act(); S::act(s) }}"),
+            &["Env", "Fs"],
+        ),
+        (
+            "cfg_inherent_method",
+            format!("pub trait Tr {{ fn act(&self); }}\npub struct S;\nimpl S {{ #[cfg(feature = \"x\")] pub fn act(&self) {{ {INH} }} }}\nimpl Tr for S {{ fn act(&self) {{ {TR} }} }}\npub fn zz(s: &S) {{ s.act() }}"),
+            &["Env", "Fs"],
+        ),
         ("both_spellings", format!("{p}pub fn zz(s: &S) {{ s.act(); <S as Tr>::act(s) }}"), &["Env", "Fs"]),
         // a member that DELEGATES to its sibling through a route no resolver forms (a foreign trait's UFCS path, a same-leaf
         // twin `self`): the sibling-call rule keeps the sibling's body (num-bigint-dig `BigUint::sqrt`, font-kit `full_name`).
@@ -289,5 +301,22 @@ fn r1537c_a_delegating_member_reaches_its_sibling() {
     assert_eq!(effects(&rep, "a::Font::name(Ld)"), vec!["Fs"], "the delegating trait member carries its sibling's body");
     assert_eq!(side["a::Font::name(Ld)"], serde_json::json!(["a::Font::name(Font)"]));
     assert!(effects(&rep, "b::Font::name(Ld)").is_empty(), "control: the other twin's sibling is pure");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn r1537c_two_traits_sharing_a_leaf_stay_merged() {
+    // Fable review F3 — `impl a::Tr` + `impl b::Tr` (or `G<u8>` + `G<u16>`) beside an inherent method are two traits by their
+    // WRITTEN paths: the set is R1342 / trait-args territory and is left merged, never split with both trait bodies under one
+    // `(Tr)` label.
+    let src = format!("pub mod a {{ pub trait Tr {{ fn act(&self); }} }}\npub mod b {{ pub trait Tr {{ fn act(&self); }} }}\npub trait G<X> {{ fn go(&self); }}\npub struct S;\nimpl S {{ pub fn act(&self) {{ {INH} }} pub fn go(&self) {{ {INH} }} }}\nimpl a::Tr for S {{ fn act(&self) {{ {TR} }} }}\nimpl b::Tr for S {{ fn act(&self) {{ {TR} }} }}\nimpl G<u8> for S {{ fn go(&self) {{ {TR} }} }}\nimpl G<u16> for S {{ fn go(&self) {{ {TR} }} }}\npub fn zz(s: &S) {{ s.act(); s.go() }}");
+    let d = tmp("twoleaf");
+    write_crate(&d, "cx", &src, "");
+    let out = d.join("out").join("r");
+    std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let (rep, _) = scan(&d, &out, &[], None, false);
+    let fns: Vec<&str> = rep["functions"].as_array().unwrap().iter().map(|f| f["fn"].as_str().unwrap()).collect();
+    assert!(!fns.iter().any(|f| f.ends_with(')')), "no member of a two-trait set is split: {fns:?}");
+    assert!(fns.contains(&"S::act") && fns.contains(&"S::go"), "{fns:?}");
     let _ = std::fs::remove_dir_all(&d);
 }

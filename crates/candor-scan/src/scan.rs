@@ -11200,6 +11200,10 @@ pub(crate) fn copath_sets(fns: &[FnInfo], unit_quals: &HashSet<String>) -> HashM
         }
         let inh: Vec<&&FnInfo> = fs.iter().filter(|f| f.impl_kind == 1).collect();
         let trs: Vec<&&FnInfo> = fs.iter().filter(|f| f.impl_kind == 2).collect();
+        // ONE trait by its written path (arguments included), not just by leaf — see `FnInfo::impl_trait_path`.
+        if trs.iter().map(|f| f.impl_trait_path.as_str()).collect::<BTreeSet<_>>().len() != 1 {
+            continue;
+        }
         let leaves: Vec<&str> = trs.iter().map(|f| f.impl_trait.as_str()).collect::<BTreeSet<_>>().into_iter().collect();
         let (Some(ty_leaf), [tr_leaf]) = (q.rsplit("::").nth(1), leaves.as_slice()) else {
             continue;
