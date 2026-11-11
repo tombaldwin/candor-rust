@@ -350,6 +350,8 @@ pub(crate) fn scan_items(
                 // matches no unit and evaporates — unchanged by this line, and noted as a residual.
                 let prev_self = uses.insert(SELF_KEY.to_string(), tname.clone());
                 debug_assert!(prev_self.is_none(), "`Self` is a reserved word: nothing else can bind it");
+                // SOUNDNESS R1652/R1657 — the trait's own generic parameters shadow a same-named nominal declaration.
+                let tr_gen = crate::lang::shadow_generics(uses, [&tr.generics]);
                 for ti in &tr.items {
                     if let syn::TraitItem::Fn(m) = ti {
                         let Some(block) = &m.default else { continue }; // no body ⇒ abstract, skip
@@ -365,7 +367,7 @@ pub(crate) fn scan_items(
                             Some(&tname),
                             None, // R549 impl_generics — a trait-DEFAULT body has no impl block
                             None, // R1024 impl_self — nor a written self type
-                            include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                            include_tests, tr_gen.as_ref().unwrap_or(uses), &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
                     }
                 }
                 uses.remove(SELF_KEY); // scoped to THIS trait, exactly as in the impl arm
@@ -469,6 +471,8 @@ pub(crate) fn submodule_uses(
     subuses.remove(crate::lang::MODDECL_KEY);
     subuses.remove(crate::lang::MODDECL_ALL_KEY);
     subuses.remove(crate::lang::MODDECL_CFGONLY_KEY);
+    subuses.remove(crate::lang::MODDECL_NOMINAL_KEY);
+    subuses.remove(crate::lang::MODGENERIC_KEY);
     subuses.remove(crate::lang::MODMACRO_KEY);
     subuses.remove(crate::lang::MODEXTERN_KEY);
     // A parent's glob imports do not reach an inline child in rustc (only `use super::*` brings them,
@@ -1938,6 +1942,11 @@ pub(crate) fn collect_static_types(
                             out.insert(ek, e);
                         }
                         Some(prev) if prev == &e => {}
+                        // SOUNDNESS R1652/R1657 — one crate-local element leaf in two modules is the bare leaf.
+                        Some(Some(prev)) if e.as_deref().is_some_and(|t| !candor_report::env::switch("CANDOR_R1657_OFF") && rets_leaf_join(prev, t).is_some()) => {
+                            let j = e.as_deref().and_then(|t| rets_leaf_join(prev, t));
+                            out.insert(ek, j);
+                        }
                         Some(_) => {
                             out.insert(ek, None);
                         }
@@ -1952,6 +1961,13 @@ pub(crate) fn collect_static_types(
                     }
                     // The same answer twice (the `#[cfg]`-split platform arms of one static) — keep it.
                     Some(prev) if prev == &ty => {}
+                    // SOUNDNESS R1652/R1657 — one crate-local type leaf in two modules is the bare leaf, as before origin
+                    // qualification (`rets_leaf_join`): jiff's two `DEFAULT_DATETIME_PARSER` statics (`fmt::rfc2822`,
+                    // `fmt::temporal`) agreed as `DateTimeParser`, and withdrawing the name left `Date::from_str` untyped.
+                    Some(Some(prev)) if ty.as_deref().is_some_and(|t| !candor_report::env::switch("CANDOR_R1657_OFF") && rets_leaf_join(prev, t).is_some()) => {
+                        let j = ty.as_deref().and_then(|t| rets_leaf_join(prev, t));
+                        out.insert(name, j);
+                    }
                     // Two different answers for one leaf — refuse the name permanently.
                     Some(_) => {
                         out.insert(name, None);
@@ -2886,6 +2902,11 @@ pub(crate) fn fninfo(
     drop_relevant: &std::collections::HashSet<String>,
 ) -> FnInfo {
     let _ = crate::collector::fd_prov_take(); // F3 — nothing from a previous body
+    let _ = crate::collector::r1657_take(); // SOUNDNESS R1652/R1657 — nor a previous body's refused field picks
+    // SOUNDNESS R1652/R1657 — a generic parameter of this fn or its impl that shadows a nominal name the module declares is
+    // the PARAMETER in this scope, so origin qualification (`lang::anchor_origin`) must not name the declaration for it.
+    let gen_shadow = crate::lang::shadow_generics(uses, std::iter::once(&sig.generics).chain(impl_generics));
+    let uses: &HashMap<String, String> = gen_shadow.as_ref().unwrap_or(uses);
     // Function-LOCAL `use` statements (`fn f() { use rustix::time::clock_settime; … }`) are body
     // STATEMENTS, not module items, so the module-level use map misses them — every call they import then
     // fails to resolve to its crate and is under-reported (found on coreutils `date`: its rustix clock
@@ -3822,6 +3843,11 @@ pub(crate) fn fninfo(
     // values — without passing `absolutise`'s refusal, so the head is dropped here, once, for every call:
     // left on, mongodb's `command.body.append(..)` named no unit and no dependency and its typed
     // `dispatch:RawDocumentBuf.append` hedge vanished with nothing in its place.
+    // SOUNDNESS R1652/R1657 — every ambiguous-leaf field pick this body's typers refused, disclosed on the body.
+    for why in crate::collector::r1657_take() {
+        c.unresolved = true;
+        c.unresolved_why.insert(why);
+    }
     let mut calls = c.calls;
     for call in &mut calls {
         if call.path.contains("crate::") {
@@ -4096,6 +4122,9 @@ pub(crate) fn record_return(
     // entry; nothing above it reads this, because every sentinel shape up there is already leaf-keyed by
     // a reader that wants the leaf answer.
     impl_key: Option<(&str, &std::collections::HashSet<String>)>,
+    // SOUNDNESS R1652/R1657 — the impl's self type QUALIFIED AT ITS ORIGIN (`lang::anchor_origin`), when it is written as a
+    // bare name this module declares: the type a `-> Self` return hands the caller. `None` keeps `self_ty`'s leaf.
+    self_origin: Option<&str>,
 ) {
     // SOUNDNESS R893 — the crate-anchored qual of a FREE fn, when this pass knows its module (Pass A seeds
     // `MODPATH_KEY` for every file and, since R898, every inline module).
@@ -4308,7 +4337,7 @@ pub(crate) fn record_return(
     // the ambiguity check. `Result<Self>`/`Option<Self>` arrive here already unwrapped.
     if tp == "Self" {
         match self_ty {
-            Some(s) => tp = s.to_string(),
+            Some(s) => tp = self_origin.filter(|o| o.rsplit("::").next() == Some(s)).unwrap_or(s).to_string(),
             None => return, // `Self` outside an impl — nothing safe to record
         }
     }
@@ -4352,16 +4381,17 @@ pub(crate) fn record_return(
         }
         if !is_generic && tp_leaf != impl_ty {
             let k = crate::model::impl_ret_key(impl_ty, &leaf);
-            match rets.get(&k) {
-                None => { rets.insert(k, Some(tp.clone())); }
-                Some(Some(prev)) if *prev != tp => { rets.insert(k, None); }
-                _ => {}
-            }
+            file_payload(rets, k, tp.clone()); // SOUNDNESS R1652/R1657 — the same leaf join as the leaf entry
         }
     }
     match rets.get(&leaf) {
         None => {
             rets.insert(leaf, Some(tp));
+        }
+        // SOUNDNESS R1652/R1657 — one leaf in two modules is the bare leaf, not a conflict (`rets_leaf_join`).
+        Some(Some(prev)) if !candor_report::env::switch("CANDOR_R1657_OFF") && rets_leaf_join(prev, &tp).is_some() => {
+            let j = rets_leaf_join(prev, &tp);
+            rets.insert(leaf, j);
         }
         Some(Some(prev)) if *prev != tp => {
             // SOUNDNESS R182 — record BOTH candidates before the withdrawal, so the drop route can
@@ -4379,6 +4409,48 @@ pub(crate) fn record_return(
         }
         _ => {}
     }
+}
+
+/// An enum payload type under `key` with the index's conflict rule (a disagreeing contributor withdraws), except that one
+/// crate-local leaf in two modules is the bare leaf (SOUNDNESS R1652/R1657, `rets_leaf_join`): same-leaf payloads
+/// (`map::Entry::Occupied(OccupiedEntry)`, `set::Entry::Occupied(OccupiedEntry)`) agreed as bare strings before origin
+/// qualification, and withdrawing them untyped the binding — measured on hashbrown, `Entry::insert` lost its edge.
+fn file_payload(m: &mut HashMap<String, Option<String>>, key: String, tp: String) {
+    match m.get(&key) {
+        None => {
+            m.insert(key, Some(tp));
+        }
+        Some(Some(prev)) if !candor_report::env::switch("CANDOR_R1657_OFF") && rets_leaf_join(prev, &tp).is_some() => {
+            let j = rets_leaf_join(prev, &tp);
+            m.insert(key, j);
+        }
+        Some(Some(prev)) if *prev != tp => {
+            m.insert(key, None);
+        }
+        _ => {}
+    }
+}
+
+/// SOUNDNESS R1652/R1657 — the leaf-keyed `rets` entry for two contributors that name crate-local types of ONE leaf in
+/// different modules (`crate::a::Holder`, `crate::b::Holder`), or a crate-local type and that leaf already joined: the BARE
+/// LEAF. That is what the entry said before origin qualification (both were the bare `Holder`), it is module-blind, and a
+/// reader that proves an owner from an anchored path (`CallCollector::owner_qual`) cannot take it as a proof — where
+/// keeping one contributor's path (the cross-file rule this replaces) proved whichever file merged FIRST. `None`: the two
+/// conflict as before. `CANDOR_R1657_OFF` restores the pre-change rules at both sites.
+pub(crate) fn rets_leaf_join(prev: &str, tp: &str) -> Option<String> {
+    let local = |s: &str| s.starts_with("crate::") && !s.contains(ALIAS_ALT_SEP) && !s.contains('<') && !s.contains(ITEM_SENTINEL);
+    let leaf = |s: &str| s.rsplit("::").next().unwrap_or(s).to_string();
+    let bare = |s: &str| !s.contains("::") && !s.contains(ALIAS_ALT_SEP) && !s.contains('<') && !s.starts_with('<');
+    if prev == tp || !local(tp) {
+        return None;
+    }
+    if (local(prev) || bare(prev)) && leaf(prev) == leaf(tp) {
+        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+            eprintln!("R1657RETJOIN\t{prev}\t{tp}"); // §E1 REACH
+        }
+        return Some(leaf(tp));
+    }
+    None
 }
 
 /// VEIN B — file a declared-return FACT under a sentinel key with the index's one conflict rule: a first
@@ -4526,6 +4598,11 @@ fn file_decl_fact(rets: &mut HashMap<String, Option<String>>, key: String, val: 
     match rets.get(&key) {
         None => {
             rets.insert(key, Some(val));
+        }
+        // SOUNDNESS R1652/R1657 — one crate-local leaf in two modules is the bare leaf (`rets_leaf_join`).
+        Some(Some(prev)) if !candor_report::env::switch("CANDOR_R1657_OFF") && rets_leaf_join(prev, &val).is_some() => {
+            let j = rets_leaf_join(prev, &val);
+            rets.insert(key, j);
         }
         Some(Some(prev)) if *prev != val => {
             rets.insert(key, None);
@@ -5247,6 +5324,9 @@ pub(crate) fn collect_decls(
                     m
                 });
                 let uses_ty: &HashMap<String, String> = uses_gen_owned.as_ref().unwrap_or(uses_ty);
+                // SOUNDNESS R1652/R1657 — and a parameter shadowing a nominal name this module DECLARES is the parameter too.
+                let s_gen = crate::lang::shadow_generics(uses_ty, [&s.generics]);
+                let uses_ty: &HashMap<String, String> = s_gen.as_ref().unwrap_or(uses_ty);
                 // the struct's OWN generic bounds (`struct Pipe<T: Saver>` / `where T: Saver`) — so a field
                 // typed as a bounded param resolves to its trait bound and dispatches (R31).
                 let struct_bounds = generic_bounds_of_generics(&s.generics);
@@ -5674,7 +5754,10 @@ pub(crate) fn collect_decls(
                 }
             }
             syn::Item::Fn(f) => {
-                record_return(&f.sig, uses_ty, rets, None, callable_aliases, None);
+                // SOUNDNESS R1652/R1657 — the fn's generics shadow a same-named declaration.
+                let f_gen = crate::lang::shadow_generics(uses_ty, [&f.sig.generics]);
+                let uses_ty: &HashMap<String, String> = f_gen.as_ref().unwrap_or(uses_ty);
+                record_return(&f.sig, uses_ty, rets, None, callable_aliases, None, None);
                 note_async_return(&f.sig, uses_ty, rets); // SOUNDNESS R1168
                 note_err_return(&f.sig, uses_ty, rets, None, &Default::default()); // SOUNDNESS R1196
                 // SOUNDNESS R1145 — see `model::gen_op_key`. Filed for every free fn, so a same-leaf twin withdraws it.
@@ -5689,6 +5772,9 @@ pub(crate) fn collect_decls(
             // composite `"VariantLeaf::field"` key in these SAME two maps — see the `Fields::Named` arm
             // below (R77 residual).
             syn::Item::Enum(en) => {
+                // SOUNDNESS R1652/R1657 — the enum's generics shadow a same-named declaration in its payload types.
+                let en_gen = crate::lang::shadow_generics(uses_ty, [&en.generics]);
+                let uses_ty: &HashMap<String, String> = en_gen.as_ref().unwrap_or(uses_ty);
                 // SOUNDNESS R1279/R1281 — the enum's type parameters, by position (`model::type_params_key`).
                 file_decl_fact(rets, crate::model::type_params_key(&en.ident.to_string()),
                     en.generics.type_params().map(|t| t.ident.to_string()).collect::<Vec<_>>().join(","));
@@ -5755,24 +5841,10 @@ pub(crate) fn collect_decls(
                                 let generic_payload = en.generics.type_params().any(|g| g.ident == tp.as_str());
                                 if generic_payload {
                                     // fall through to the leaf key only
-                                } else { match enum_tmp.get(&qk) {
-                                    None => {
-                                        enum_tmp.insert(qk, Some(tp.clone()));
-                                    }
-                                    Some(Some(prev)) if *prev != tp => {
-                                        enum_tmp.insert(qk, None);
-                                    }
-                                    _ => {}
-                                } }
-                                match enum_tmp.get(&leaf) {
-                                    None => {
-                                        enum_tmp.insert(leaf.clone(), Some(tp));
-                                    }
-                                    Some(Some(prev)) if *prev != tp => {
-                                        enum_tmp.insert(leaf.clone(), None); // conflicting payloads — ambiguous, drop
-                                    }
-                                    _ => {}
+                                } else {
+                                    file_payload(enum_tmp, qk, tp.clone());
                                 }
+                                file_payload(enum_tmp, leaf.clone(), tp); // conflicting payloads — ambiguous, drop
                             }
                         }
                         // R77 STRUCT-VARIANT FIELDS (the remaining half of the vein — SOUNDNESS.md R77):
@@ -5808,15 +5880,7 @@ pub(crate) fn collect_decls(
                                         _ => {}
                                     }
                                 } else if let Some(tp) = r372_type_path(&f.ty, uses_ty) {
-                                    match enum_tmp.get(&key) {
-                                        None => {
-                                            enum_tmp.insert(key.clone(), Some(tp));
-                                        }
-                                        Some(Some(prev)) if *prev != tp => {
-                                            enum_tmp.insert(key.clone(), None); // conflicting payloads — ambiguous, drop
-                                        }
-                                        _ => {}
-                                    }
+                                    file_payload(enum_tmp, key.clone(), tp); // conflicting payloads — ambiguous, drop
                                 }
                             }
                         }
@@ -5961,6 +6025,17 @@ pub(crate) fn collect_decls(
             syn::Item::Impl(im) if crate::model::is_derive_synth(&im.attrs) => {} // R1146: published only, no Pass A fact
             syn::Item::Impl(im) => {
                 let self_ty = crate::lang::impl_key_avoiding_free_fns(im, items, uses); // R1034
+                // SOUNDNESS R1652/R1657 — the impl's generics shadow a same-named declaration in every type it writes.
+                let im_gen = crate::lang::shadow_generics(uses_ty, [&im.generics]);
+                let uses_ty: &HashMap<String, String> = im_gen.as_ref().unwrap_or(uses_ty);
+                // SOUNDNESS R1652/R1657 — a `-> Self` return's type, qualified at its origin: only for a self type written as
+                // ONE bare segment this module declares (`impl Holder`), never `impl super::Holder` or a generic.
+                let self_origin: Option<String> = match &*im.self_ty {
+                    syn::Type::Path(sp) if sp.qself.is_none() && sp.path.leading_colon.is_none() && sp.path.segments.len() == 1 => {
+                        crate::lang::anchor_origin(&sp.path.segments[0].ident.to_string(), uses_ty)
+                    }
+                    _ => None,
+                };
                 // SOUNDNESS R451 — the impl's own generic type-param names, and the self type LEAF only
                 // when it is NOT one of them. A blanket `impl<T> Trait for T` names every type at once,
                 // so an impl-qualified return key written from it would claim `T::get -> R` for whatever
@@ -6253,8 +6328,11 @@ pub(crate) fn collect_decls(
                                 tpos.map_or_else(|| crate::model::RET_GENERIC_NONE.to_string(), |i| i.to_string()),
                             );
                         }
+                        // SOUNDNESS R1652/R1657 — the impl's and the method's generics shadow a same-named declaration.
+                        let m_gen = crate::lang::shadow_generics(uses_ty, [&m.sig.generics]);
+                        let uses_ty: &HashMap<String, String> = m_gen.as_ref().unwrap_or(uses_ty);
                         record_return(&m.sig, uses_ty, rets, self_ty.as_deref(), callable_aliases,
-                            impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)));
+                            impl_key_ty.as_ref().map(|t| (t.as_str(), &impl_generic_params)), self_origin.as_deref());
                         note_async_return(&m.sig, uses_ty, rets); // SOUNDNESS R1168
                         // SOUNDNESS R1196 — with the impl's own generics, which name no type either.
                         note_err_return(&m.sig, uses_ty, rets, impl_key_ty.as_deref(), &impl_generic_params);

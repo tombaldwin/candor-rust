@@ -1204,6 +1204,12 @@ pub(crate) fn type_path_b(ty: &syn::Type, uses: &HashMap<String, String>) -> Opt
                     return Some((pointee, false));
                 }
             }
+            // SOUNDNESS R1652/R1657 — a bare declared nominal name is qualified where it is minted (`anchor_origin`).
+            if p.qself.is_none() && p.path.leading_colon.is_none() && p.path.segments.len() == 1 {
+                if let Some(q) = anchor_origin(&t, uses) {
+                    return Some((q, false));
+                }
+            }
             Some((t, false))
         }
         _ => None,
@@ -2056,6 +2062,17 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                         (None, true) => return Some(full_ty),
                         _ => {}
                     }
+                }
+            }
+            // SOUNDNESS R1652/R1657 — the written path's OWN declaration first: with returns qualified at their origin, the
+            // leaf-keyed record of two same-leaf constructors is their module-blind join (`decls::rets_leaf_join`, the bare
+            // leaf), which would answer before the declaration `crate::b::make` carries and leave the owner unproven.
+            if !candor_report::env::switch("CANDOR_R1657_OFF") {
+                if let Some(q) = qual_recorded_return(&full, uses, returns)
+                    .filter(|t| *t != RET_FN_TYPED && *t != RET_UNIT && ret_dyn_leaves(t).is_none()
+                        && ret_elem_dyn_leaves(t).is_none() && ret_tuple_dyn_leaves(t).is_none())
+                {
+                    return Some(q);
                 }
             }
             recorded_return_type(leaf, returns).or_else(|| qual_recorded_return(&full, uses, returns))
@@ -2984,6 +3001,14 @@ pub(crate) fn seed_moddecls(items: &[syn::Item], include_tests: bool, uses: &mut
     }
     let cfg_only: Vec<&str> = gated.iter().filter(|(_, g)| **g).map(|(n, _)| n.as_str()).collect();
     uses.insert(MODDECL_CFGONLY_KEY.to_string(), cfg_only.join("\u{1}"));
+    // SOUNDNESS R1652/R1657 — the NOMINAL names (`struct`/`enum`/`union`) this module declares: the only names a bare type
+    // is qualified at its origin by (`anchor_origin`). A `type` alias, a trait and a module are not.
+    let nominal: Vec<String> = items
+        .iter()
+        .filter(|it| matches!(it, syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Union(_)))
+        .filter_map(|it| crate::decls::declared_item_name(it, include_tests))
+        .collect();
+    uses.insert(MODDECL_NOMINAL_KEY.to_string(), nominal.join("\u{1}"));
     // `extern crate X;` written IN this module binds `X` here to the EXTERN crate (log-0.4.20's
     // `kv/value.rs`: `extern crate value_bag; use self::value_bag::ValueBag;`) — a `self::X::…` path names
     // that crate, not a child module, and must not be anchored (`absolutise`).
@@ -3008,6 +3033,86 @@ pub(crate) fn seed_moddecls(items: &[syn::Item], include_tests: bool, uses: &mut
 pub(crate) const MODEXTERN_KEY: &str = "*modextern";
 /// SOUNDNESS R1153 — the declared names whose every declaration is `#[cfg]`-gated (see `seed_moddecls`).
 pub(crate) const MODDECL_CFGONLY_KEY: &str = "*moddeclscfg";
+/// SOUNDNESS R1652/R1657 — the `struct`/`enum`/`union` names this module declares (see `seed_moddecls`); same lifecycle.
+pub(crate) const MODDECL_NOMINAL_KEY: &str = "*moddeclsnom";
+/// SOUNDNESS R1652/R1657 — the in-scope GENERIC type parameters that SHADOW a nominal name this module declares
+/// (`struct State; impl<State> X<State>`), `\u{1}`-joined. Seeded only where such a collision exists (`shadow_generics`),
+/// so the map is cloned only for those items; `anchor_origin` never qualifies a name listed here.
+pub(crate) const MODGENERIC_KEY: &str = "*modgenerics";
+
+/// SOUNDNESS R1652/R1657 — `uses` with `MODGENERIC_KEY` naming every one of `generics` that this module also declares as a
+/// nominal type, or `None` when there is none (the common case: no clone). A generic parameter shadows the module's item of
+/// the same name inside its scope, so a type written with that name is the PARAMETER, not the declaration.
+pub(crate) fn shadow_generics<'g>(
+    uses: &HashMap<String, String>,
+    generics: impl IntoIterator<Item = &'g syn::Generics>,
+) -> Option<HashMap<String, String>> {
+    let nominal = uses.get(MODDECL_NOMINAL_KEY)?;
+    let mut hit: Vec<String> = uses
+        .get(MODGENERIC_KEY)
+        .map(|l| l.split('\u{1}').filter(|n| !n.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
+    let before = hit.len();
+    for g in generics {
+        for t in g.type_params() {
+            let n = t.ident.to_string();
+            if nominal.split('\u{1}').any(|d| d == n) && !hit.contains(&n) {
+                hit.push(n);
+            }
+        }
+    }
+    if hit.len() == before {
+        return None;
+    }
+    if candor_report::env::trace("CANDOR_R1657_INSTR") {
+        eprintln!("R1657GENSHADOW\t{}\t{}", uses.get(MODPATH_KEY).map_or("-", String::as_str), hit.join(",")); // §E1 REACH
+    }
+    let mut m = uses.clone();
+    m.insert(MODGENERIC_KEY.to_string(), hit.join("\u{1}"));
+    Some(m)
+}
+
+/// SOUNDNESS R1652/R1657 — QUALIFY A BARE TYPE NAME AT ITS ORIGIN. A one-segment type name this module declares as a
+/// `struct`/`enum`/`union` is that declaration (a declared name cannot also be a non-glob import, E0255, and a glob loses
+/// to it), so it is spelled `crate::<module>::<Name>` where it is minted, not left as a bare leaf that a same-leaf twin
+/// in another module also answers to. `None` (keep the bare spelling, exactly as before) when:
+///   * the module is not known (`MODPATH_KEY` absent: a pass that does not know which module it is in);
+///   * the name is declared ONLY under `#[cfg(...)]` (`MODDECL_CFGONLY_KEY`, R1153 g2): where the cfg is off, a glob or
+///     another arm supplies it, so the declaration is one candidate, not the answer (SPEC ⟨0.36⟩: never a pick);
+///   * an in-scope generic parameter shadows it (`MODGENERIC_KEY`);
+///   * it is a `type` alias, a trait or a module (only nominal types carry a field declaration to prove an owner by).
+///
+/// A name an item-position macro declares is not in the list, so it stays bare (by design, `seed_moddecls`). Kill switch
+/// `CANDOR_R1657_OFF`.
+pub(crate) fn anchor_origin(t: &str, uses: &HashMap<String, String>) -> Option<String> {
+    if t.contains("::") || t.contains(crate::decls::ALIAS_ALT_SEP) || t.contains(crate::decls::ITEM_SENTINEL) {
+        return None;
+    }
+    let listed = |k: &str| uses.get(k).is_some_and(|l| l.split('\u{1}').any(|n| n == t));
+    if !listed(MODDECL_NOMINAL_KEY) {
+        return None;
+    }
+    let mp = uses.get(MODPATH_KEY)?;
+    if listed(MODDECL_CFGONLY_KEY) {
+        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+            eprintln!("R1657CFG\t{mp}\t{t}"); // §E1 — a cfg-only declaration: left bare (R1153 g2)
+        }
+        return None;
+    }
+    if listed(MODGENERIC_KEY) {
+        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+            eprintln!("R1657GEN\t{mp}\t{t}"); // §E1 — a generic parameter shadows the declaration: left bare
+        }
+        return None;
+    }
+    if candor_report::env::switch("CANDOR_R1657_OFF") {
+        return None;
+    }
+    if candor_report::env::trace("CANDOR_R1657_INSTR") {
+        eprintln!("R1657ANCHOR\t{mp}\t{t}"); // §E1 REACH
+    }
+    Some(if mp.is_empty() { format!("crate::{t}") } else { format!("crate::{mp}::{t}") })
+}
 /// VEIN A — every-namespace declaration list (see `seed_moddecls`); same lifecycle as `MODDECL_KEY`.
 pub(crate) const MODDECL_ALL_KEY: &str = "*moddeclsall";
 /// VEIN A — present when the module holds an item-position macro invocation (see `seed_moddecls`).

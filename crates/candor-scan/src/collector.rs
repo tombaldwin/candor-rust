@@ -858,6 +858,15 @@ pub(crate) fn ret_dispatch_leaves(t: &str) -> Option<Vec<String>> {
 thread_local! {
     /// R1608 — set while `r1608_stopped` asks for the root reading the walk would replace.
     static R1608_SUPPRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// SOUNDNESS R1652/R1657 — the field-type questions this body's receiver typers REFUSED (an ambiguous same-leaf
+    /// owner whose path is not proven), as their `ambiguous:` reasons. `decls::fninfo` drains it into the body's
+    /// `unresolved_why` after the walk (`r1657_take`), so the refusal ends in a disclosure, never a dropped edge.
+    static R1657_REFUSED: std::cell::RefCell<std::collections::BTreeSet<String>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+/// SOUNDNESS R1652/R1657 — take (and clear) the refusals recorded since the last call (see `R1657_REFUSED`).
+pub(crate) fn r1657_take() -> std::collections::BTreeSet<String> {
+    R1657_REFUSED.with(|r| std::mem::take(&mut *r.borrow_mut()))
 }
 
 /// The methods that return a DIFFERENT type from their receiver, so a chain must NOT be walked through
@@ -1446,9 +1455,16 @@ impl<'a> CallCollector<'a> {
         // `Backend::new().go()` charged the inactive arm (executed: `['Env']` over a body that writes,
         // `deny Fs` 0). The parameter route has unioned the arms since R369; this is the same rule.
         let head = ctor_written_head(expr);
-        let res = match head {
-            Some(h) => self.union_over_arms(&h, ty, |u| ctor_type(expr, u, self.returns)),
+        let res = match &head {
+            Some(h) => self.union_over_arms(h, ty, |u| ctor_type(expr, u, self.returns)),
             None => ty,
+        };
+        // SOUNDNESS R1652/R1657 — a construction WRITTEN with a bare name this module declares (`Holder { .. }`,
+        // `Holder::new()`, `Holder(..)`) is of that declaration: qualified at its origin, as a written type is in
+        // `lang::type_path_b`. Only where the answer IS the written head; an answer read from another fact keeps its spelling.
+        let res = match (head.as_deref() == Some(res.as_str())).then(|| crate::lang::anchor_origin(&res, &self.uses)).flatten() {
+            Some(q) => q,
+            None => res,
         };
         // SOUNDNESS R1608 — the root reading above survived every refusal; a local chain replaces it with what its steps
         // declare. Asked LAST, so every refusal above (a const-shadowed caps leaf, a generic turbofish, …) still answers
@@ -5234,6 +5250,26 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1652/R1657 — record a refused ambiguous-leaf field pick as an `ambiguous:` reason for this body.
+    fn r1657_refuse(&self, base: &str, key: &str, elem: bool) {
+        let leaf = base.rsplit("::").next().unwrap_or(base);
+        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+            eprintln!("R1657REFUSE\t{}\t{base}\t{key}\t{}", if elem { "elem" } else { "field" }, self.modpath); // §E1 REACH
+        }
+        let why = format!("ambiguous:same-name types `{leaf}` declare field `{key}` differently").replace('.', "_");
+        R1657_REFUSED.with(|r| {
+            r.borrow_mut().insert(why);
+        });
+    }
+
+    /// SOUNDNESS R1652/R1657 — whether the same-leaf twins' `field_elem` entries for `leaf.key` DIFFER (scan.rs files the
+    /// `\u{1c}elem` marker: differing values, or one twin with an entry and another without). Twins in ONE file (`leaf.*`)
+    /// are not compared there, so they read as differing.
+    fn r1657_elem_disagrees(&self, leaf: &str, key: &str) -> bool {
+        self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}{key}\u{1c}elem"))
+            || self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}*"))
+    }
+
     fn field_ambiguous(&self, base: &str, member: &syn::Member) -> bool {
         let leaf = base.rsplit("::").next().unwrap_or(base);
         let key = match member {
@@ -5849,6 +5885,17 @@ impl<'a> CallCollector<'a> {
                         let kind = if is_self { "self" } else if base.starts_with("crate::") { "anchored" } else { "other" };
                         eprintln!("R1624PICK\t{kind}\t{base}\t{}", self.modpath); // §E1 — the residual leaf pick
                     }
+                    // SOUNDNESS R1652/R1657 — THE AMBIGUOUS-LEAF PICK IS RETIRED. Same-leaf twins declare this field with
+                    // types of different leaves, and the owner's own path is not proven (`owner_qual`), so the leaf-keyed
+                    // entry is whichever twin merged LAST: executed, it typed `h.inner` as the other module's field and the
+                    // caller read ABSENT over a write (`deny Fs` 0) or charged a pure caller (1). Refused, as `type_of`
+                    // already refuses, and the refusal is disclosed (`r1657_refuse`). A UNIQUE leaf keeps its entry below.
+                    // A PROVEN owner whose own declaration does not answer here (`qual_field_in` None: a tombstoned or
+                    // trait-object field) keeps R1624's reading; only an unproven owner is refused.
+                    if self.owner_qual(&f.base, &base).is_none() && !candor_report::env::switch("CANDOR_R1657_OFF") {
+                        self.r1657_refuse(&base, &key, false);
+                        return None;
+                    }
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                 // SOUNDNESS R897 — the `fields` entry of an UNBOUNDED generic field is the struct
@@ -6356,6 +6403,23 @@ impl<'a> CallCollector<'a> {
                     return Some(l);
                 }
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                // SOUNDNESS R1652/R1657 — the element half of the retired ambiguous-leaf pick (see the receiver arm). Only
+                // where the twins disagree on THIS index's entry: `field_ambiguous` is keyed per field, not per index, so
+                // a field whose element agrees across twins keeps its entry.
+                if self.field_ambiguous(&base, &f.member)
+                    && self.r1657_elem_disagrees(base_leaf, &key)
+                    && !candor_report::env::switch("CANDOR_R1657_OFF")
+                {
+                    match self.owner_qual(&f.base, &base) {
+                        // A proven owner that DECLARES this field and filed no element for it: it has none.
+                        Some((qi, q)) if qi.fields.get(&q).is_some_and(|m| m.contains_key(&key)) && !qi.field_elem.get(&q).is_some_and(|m| m.contains_key(&key)) => return None,
+                        Some(_) => {}
+                        None => {
+                            self.r1657_refuse(&base, &key, true);
+                            return None;
+                        }
+                    }
+                }
                 self.field_elem.get(base_leaf)?.get(&key).cloned()
             }
             // An element-PRESERVING iterator adapter (`xs.iter()`, `xs.into_iter()`, `&xs.iter_mut()`,
@@ -9985,6 +10049,16 @@ impl<'a> CallCollector<'a> {
         // An owner's own type parameter (`io: DontDrop<T>`) names no type here either: that is a dispatch question.
         let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner);
         if self.returns.get(&crate::model::type_params_key(owner_leaf)).is_some_and(|ps| ps.split(',').any(|p| p == arg)) {
+            return None;
+        }
+        // SOUNDNESS R1652/R1657 — …and by the owner's OWN parameter list where its path is proven: `owner_field_args` reads
+        // the proven owner's qualified arguments, so the parameter test must not fall back to the leaf-keyed fact, which a
+        // same-leaf twin in another file WITHDRAWS. Measured: regex-automata's `Lazy::get(this) { this.0.get() }` (`Lazy<T,
+        // F>(lazy::Lazy<T, F>)`, beside `hybrid::dfa::Lazy<'i, 'c>`) read the argument `T` as a type, formed `T::get` and
+        // went pure over an `Unknown`-only callee once origin qualification proved `this`'s owner.
+        if !candor_report::env::switch("CANDOR_R1657_OFF")
+            && self.owner_qual(&fe.base, &owner).is_some_and(|(qi, q)| qi.params.get(&q).is_some_and(|ps| ps.iter().any(|p| p == arg)))
+        {
             return None;
         }
         if candor_report::env::trace("CANDOR_R1630_INSTR") {
