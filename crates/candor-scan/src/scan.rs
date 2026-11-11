@@ -6995,6 +6995,35 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // and must stay one. Each condition below NARROWS that over-approximation on a named,
             // measured fact, which is the denylist direction; neither is an allowlist of shapes
             // permitted to hedge.
+            // SOUNDNESS R1657 stage 1b (R1674) — A GUESSED HOP THAT NAMES THE CALLER ITSELF. `self.forward().reset_cache(c)` inside
+            // `Regex::reset_cache`, with `forward` DECLARED `-> &DFA` (regex-automata 0.4 `hybrid::regex`): the walk typed the tail on
+            // the receiver's own type, `Regex::reset_cache` — the caller — and a self-edge adds nothing, so the real callee
+            // (`DFA::reset_cache`, `Log`) was neither edged nor disclosed. Before 1b an `ambiguous:` hedge on the contested
+            // `Regex::forward` happened to cover the site; once `self` is typed that step resolves and the silence is exposed (MIR
+            // checker COVER-MISS). The site goes to the R1095 judge as an untyped receiver of its method, as R1663's miss does.
+            if !c.is_macro && c.method && c.typed && !candor_report::env::switch("CANDOR_R1657B_OFF") {
+                if let Some(t2) = tail2(&c.path) {
+                    let guessed = f.untyped_methods.iter().any(|m| {
+                        m.strip_prefix(crate::lazy::HOP_GUESS_PREFIX) == Some(t2.as_str())
+                            || m.strip_prefix(crate::lazy::GUESS_TAIL_PREFIX) == Some(t2.as_str())
+                    });
+                    // A receiver typed through a transparent accessor the type itself declares (`self.get_mut().read_buf(buf)`,
+                    // `get_mut -> &mut T`, tokio-io's `FramedWrite`) is flagged by the collector too (`GUESS_TAIL_PREFIX`).
+                    // Settled on the caller by the single claimant, or by the exact pass among twins (time 0.3's
+                    // `self.date().monday_based_week()` on `crate::offset_date_time::OffsetDateTime`).
+                    if guessed
+                        && (by_tail2.get(&t2).is_some_and(|v| v.iter().all(|q| q == &f.qual))
+                            || arm_exact_target(&c.path, &by_tail2).is_some_and(|t| t == &f.qual))
+                    {
+                        if let Some(cands) = self_methods_by_leaf.get(c.leaf.as_str()) {
+                            if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                                eprintln!("R1657SELFHOP\t{}\t{t2}\tguessed={guessed}", f.qual); // §E1 REACH COUNTER
+                            }
+                            untyped_contested.push((f.qual.clone(), c.leaf.clone(), cands.clone(), true));
+                        }
+                    }
+                }
+            }
             if !c.is_macro && c.method && c.typed && !already_handled {
                 if let Some(t2) = tail2(&c.path) {
                     let ty = t2.split("::").next().unwrap_or("").to_string();

@@ -13799,6 +13799,46 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         }
                     }
                 }
+                // (std-named leaves included: `self.get_mut().read_buf(buf)` with `get_mut -> &mut T`, tokio-io's `FramedWrite`, settled
+                // to the caller itself just the same.)
+                if let Some((steps, base)) = &strict {
+                    let bl = base.rsplit("::").next().unwrap_or(base);
+                    // SOUNDNESS R1657 stage 1b — a tail the walk typed on a step whose declared return does not back it (not
+                    // filed, or filed as another type) is a GUESS even where it names a unit. Once `self` carries its
+                    // origin-qualified type, `self.date().monday_based_week()` (time 0.3: `date` declared `-> Date`, which the
+                    // walk could not use) formed `crate::offset_date_time::OffsetDateTime::monday_based_week`, which the exact
+                    // pass settled to the CALLER ITSELF, dropping the `ambiguous:` hedge over `Date::monday_based_week`'s
+                    // `Unknown` (MIR checker COVER-MISS). Filed for `scan.rs`; kill switch `CANDOR_R1657B_OFF`.
+                    if *base == ty
+                        && !steps.is_empty()
+                        && !candor_report::env::switch("CANDOR_R1657B_OFF")
+                        && steps.iter().any(|st| {
+                            !self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| r == base || r.rsplit("::").next() == Some(bl))
+                        })
+                    {
+                        self.untyped_methods.insert(format!("{}{bl}::{leaf}", crate::lazy::GUESS_TAIL_PREFIX));
+                    }
+                } else if !candor_report::env::switch("CANDOR_R1657B_OFF") {
+                    // …and a TRANSPARENT accessor (`get_mut`/`get_ref`/`as_ref`, peeled as a wrapper's) called on a crate type that
+                    // DECLARES it to return something else: `self.get_mut().read_buf(buf)` with `FramedWrite::get_mut -> &mut T`
+                    // (tokio-io 0.1) was typed `FramedWrite::read_buf`, the caller itself.
+                    if let syn::Expr::MethodCall(acc) = peel_recv(&node.receiver) {
+                        let an = acc.method.to_string();
+                        if crate::lang::is_any_wrapper_accessor(&an) {
+                            if let Some(b) = self.resolve_recv_type(&acc.receiver).filter(|b| *b == ty) {
+                                let bl = b.rsplit("::").next().unwrap_or(&b).to_string();
+                                // the type DECLARES the accessor, and its declared return is not positively the type itself
+                                // a declared return that is another type, a withdrawn one, or one of the impl's type PARAMETERS
+                                if self.returns.get(&crate::model::impl_ret_key(&bl, &an)).is_some_and(|r| r != &b && r.rsplit("::").next() != Some(bl.as_str()))
+                                    || self.returns.contains_key(&crate::model::withdrawn_impl_ret_key(&bl, &an))
+                                    || self.returns.get(&crate::model::impl_retgen_key(&bl, &an)).is_some_and(|p| p.parse::<usize>().is_ok())
+                                {
+                                    self.untyped_methods.insert(format!("{}{bl}::{leaf}", crate::lazy::GUESS_TAIL_PREFIX));
+                                }
+                            }
+                        }
+                    }
+                }
                 let guess = strict.clone()
                     .or_else(|| {
                         (!candor_report::env::switch("CANDOR_R1617H_OFF"))

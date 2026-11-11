@@ -186,3 +186,24 @@ fn r1657b_a_blanket_impl_over_a_parameter_named_like_a_declared_struct_keeps_its
     assert_eq!(inferred(&v, "m::T::go"), vec!["Env", "Fs"], "the bound dispatch reaches `Eff::run`:\n{v:#}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn r1657b_a_guessed_hop_that_settles_on_the_caller_is_disclosed() {
+    // Fixture `h1` (regex-automata 0.4 `hybrid::regex::Regex::reset_cache`'s shape): `self.forward().reset_cache()` with
+    // `forward` DECLARED `-> &DFA`, a same-leaf `Regex` elsewhere. The chain walk typed the tail on `Regex` itself; before
+    // 1b the contested `Regex::forward` hedged the site, the first 1b cut settled the tail on the CALLER and the unit went
+    // ABSENT over a write (executed). It now discloses the untyped receiver, naming `DFA::reset_cache`.
+    let d = fixture(
+        "selfhop",
+        &[(
+            "main.rs",
+            &format!("mod hy {{\n    pub mod dfa {{\n        pub struct DFA;\n        impl DFA {{ pub fn reset_cache(&self) {{ {W} }} }}\n    }}\n    pub mod regex {{\n        use super::dfa::DFA;\n        pub struct Regex {{ pub forward: DFA }}\n        impl Regex {{\n            pub fn forward(&self) -> &DFA {{ &self.forward }}\n            pub fn reset_cache(&self) {{ self.forward().reset_cache(); }}\n        }}\n    }}\n}}\nmod meta {{\n    pub struct Regex;\n    impl Regex {{ pub fn forward(&self) -> u8 {{ 0 }} }}\n}}\nfn main() {{}}\n"),
+        )],
+    );
+    let (_, v) = scan(&d, None, false);
+    assert_eq!(inferred(&v, "hy::regex::Regex::reset_cache"), vec!["Unknown"], "disclosed, never absent:\n{v:#}");
+    assert!(why(&v, "hy::regex::Regex::reset_cache").iter().any(|w| w.contains("DFA::reset_cache")), "names the lost callee:\n{v:#}");
+    let (code, _) = scan(&d, Some("deny Unknown hy::regex::Regex::reset_cache"), false);
+    assert_eq!(code, 1);
+    let _ = std::fs::remove_dir_all(&d);
+}

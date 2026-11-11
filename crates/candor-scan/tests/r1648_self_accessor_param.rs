@@ -30,8 +30,11 @@ fn run(dir: &Path, off: bool, policy: Option<&Path>) -> (i32, serde_json::Value)
         cmd.arg("--policy").arg(p);
     }
     cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env_remove("CANDOR_R1648_OFF");
+    cmd.env_remove("CANDOR_R1657B_OFF");
     if off {
-        cmd.env("CANDOR_R1648_OFF", "1");
+        // R1657 stage 1b's guessed-hop floor (`GUESS_TAIL_PREFIX`) discloses the generic spellings independently (an accessor
+        // declared to return an impl parameter, settled on the caller itself), so the pre-fix silence needs both switches.
+        cmd.env("CANDOR_R1648_OFF", "1").env("CANDOR_R1657B_OFF", "1");
     }
     let o = cmd.output().expect("run candor-scan");
     let code = o.status.code().unwrap_or(-1);
@@ -239,6 +242,16 @@ fn r1648_kill_switch_restores_the_silence() {
         assert!(row(&v, f).is_none(), "{f}");
     }
     assert_eq!(inferred(&v, "v13::Enc::trailer"), vec!["Unknown"], "V13 reads the same with the switch off");
+    // With CANDOR_R1648_OFF alone, R1657 stage 1b's floor still discloses V1 (`self.as_file_mut().read(..)`, the accessor
+    // declared to return the impl parameter): never the silence.
+    let mut cmd = Command::new(bin());
+    cmd.arg(d.to_string_lossy().as_ref()).arg("--json");
+    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1657B_OFF"] {
+        cmd.env_remove(k);
+    }
+    let o = cmd.env("CANDOR_R1648_OFF", "1").output().expect("run candor-scan");
+    let v1: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(inferred(&v1, "v1::NtA::read"), vec!["Unknown"], "R1648 off, R1657b on: disclosed:\n{v1:#}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
