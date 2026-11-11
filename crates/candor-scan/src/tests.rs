@@ -18449,6 +18449,8 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // rustagent-r1648 (R1648) bumped it to rev162 (`impl_retgen_tpos_key`; `self.acc().m()` typed through the impl).
         // rustagent-stage1a (R1652/R1657) bumped it to rev169 (origin-qualified bare nominal types; refused ambiguous field picks).
         // rustagent-r1537c (R1537 (c)) bumped it to rev170 (Pass B's `FnInfo::impl_kind/impl_trait/impl_flags` and `Call::cside`).
+        // rustagent-stage1b (R1657 stage 1b) bumped it to rev172 (`self` typed by the impl's origin-qualified self type; rev171 is R1673's).
+        // rustagent-r1682 (R1682) bumped it to rev173 (every module's `#[cfg]`-duplicated `use` arm set rides `mod_aliases`).
         // rustagent-v057 (R1167) bumped it to rev108.
         // rustagent-r1165 (R1165) bumped it to rev107.
         // rustagent-v055 (R1164) bumped it to rev106.
@@ -18492,7 +18494,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18503,7 +18505,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev170/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev173/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -20848,14 +20850,22 @@ pub struct Inner<'x> { pub g: &'x crate::G }
             pub fn uniq(u: &crate::sys::Uniq) { u.only(); }\n");
         assert!(effs(fn_entry(&v, "direct_spawn")).contains(&"Exec".to_string()),
                 "CALIBRATION: a fixture whose control fails proves nothing:\n{v:#}");
-        assert_eq!(effs(fn_entry(&v, "amb")), vec!["Unknown".to_string()],
-                   "R452: a receiver-typed call onto a tail several local definitions claim must \
-                    DISCLOSE — one of the claimants really spawns, and this engine saw both:\n{v:#}");
-        let why: Vec<String> = fn_entry(&v, "amb")["unknownWhy"].as_array().into_iter().flatten()
-            .filter_map(|w| w.as_str().map(String::from)).collect();
-        assert!(why.iter().any(|w| w == "ambiguous:same-name local methods"),
-                "R452: the reason must say WHICH state this is — candor saw the definitions and \
-                 declined to choose, which is what `ambiguous:` means:\n{v:#}");
+        // SOUNDNESS R1682 — `sys::Sel` is a `#[cfg]` arm set, and a type written through it from another module now names
+        // EVERY arm (the ⟨0.38⟩ union for an undecidable `target_os`), so the spawning claimant is CHARGED rather than
+        // disclosed. R452's rule (never vanish, never pick ONE claimant) is what this keeps; with R1682 off the hedge returns.
+        if candor_report::env::switch("CANDOR_R1682_OFF") {
+            assert_eq!(effs(fn_entry(&v, "amb")), vec!["Unknown".to_string()],
+                       "R452: a receiver-typed call onto a tail several local definitions claim must \
+                        DISCLOSE — one of the claimants really spawns, and this engine saw both:\n{v:#}");
+            let why: Vec<String> = fn_entry(&v, "amb")["unknownWhy"].as_array().into_iter().flatten()
+                .filter_map(|w| w.as_str().map(String::from)).collect();
+            assert!(why.iter().any(|w| w == "ambiguous:same-name local methods"),
+                    "R452: the reason must say WHICH state this is — candor saw the definitions and \
+                     declined to choose, which is what `ambiguous:` means:\n{v:#}");
+        } else {
+            assert!(effs(fn_entry(&v, "amb")).contains(&"Exec".to_string()),
+                    "R1682: the arm set reaches the spawning claimant:\n{v:#}");
+        }
         assert!(effs_opt(&v, "uniq").is_empty(),
                 "the over-disclosure control: a UNIQUELY claimed tail resolves and stays pure:\n{v:#}");
     }
@@ -29284,8 +29294,15 @@ fn veina_the_unanchorable_contest_discloses_only_where_it_could_matter() {
         pub fn k_e_reexport_arm(p: &str) { e_reexport_arm(p) }\n\
         pub fn p_reexport_pure(p: &str) { crate::pz::Db::open(p) }\n\
         pub fn e_already_has(p: &str) { let _ = std::fs::write(p, \"y\"); crate::zi::Database::from_env(p) }\n");
+    // SOUNDNESS R1682 — the arm set is now RESOLVED, not hedged: `zi::Database` is bound under two `#[cfg]` arms, and a path
+    // written through it from another module edges EVERY arm (the union SPEC's ⟨0.38⟩ clause asks for an undecidable
+    // `unix`), so the writing arm's `Fs` is charged where the residue used to disclose `Unknown`.
     for f in ["e_reexport_arm", "k_e_reexport_arm"] {
-        assert!(veina_row_effs(&v, f).contains(&"Unknown".to_string()), "`{f}` must disclose:\n{v:#}");
+        let e = veina_row_effs(&v, f);
+        assert!(e.contains(&"Fs".to_string()) || e.contains(&"Unknown".to_string()), "`{f}` must charge or disclose:\n{v:#}");
+        if !candor_report::env::switch("CANDOR_R1682_OFF") {
+            assert!(e.contains(&"Fs".to_string()), "R1682: `{f}` reaches the writing arm:\n{v:#}");
+        }
     }
     assert!(veina_row_effs(&v, "p_reexport_pure").is_empty(), "every claimant is pure — no hedge:\n{v:#}");
     assert_eq!(veina_row_effs(&v, "e_already_has"), vec!["Fs".to_string()],
@@ -33219,7 +33236,11 @@ fn main() {
         for f in ["ctl_auto", "ctl_solo", "ctl_over", "ctl_both"] {
             assert!(!fs(v, f), "R1171 control `{f}` is pure of Fs (executed):\n{v:#}");
         }
-        assert!(fs(v, "ox_twinself"), "R1171 pinned over-charge (bare self in the overriding twin) moved — decide it:\n{v:#}");
+        // DECIDED by R1657 stage 1b (rustagent-stage1b): `self` in `impl Shut4 for auto::Connection` is now typed
+        // `crate::auto::Connection`, the overriding block's own written path, so R1171 withholds the default edge and the
+        // pinned over-charge is gone. Ground truth (`ox_twinself` arm, executed): `auto::Connection::d4` is `{}` — no file.
+        // Under `CANDOR_R1657B_OFF` the bare `self` brings the over-charge back (the switch's own test pins that).
+        assert!(!fs(v, "ox_twinself"), "R1171 `ox_twinself` reaches only the overriding (pure) `d4` (executed):\n{v:#}");
     }
 }
 

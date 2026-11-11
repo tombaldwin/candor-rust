@@ -38,6 +38,11 @@ pub(crate) const HOP_GUESS_PREFIX: &str = "\u{1}hop:";
 /// SOUNDNESS R1665 — the prefix of an `untyped_methods` entry that is a method leaf called on a DEPENDENCY wrapper field whose written
 /// argument is a crate-local type declaring it; the judge counts an `Unknown`-only candidate for it, as for `HOP_GUESS_PREFIX`.
 pub(crate) const WRAP_PREFIX: &str = "\u{1}wrap:";
+/// SOUNDNESS R1657 stage 1b — the prefix of an `untyped_methods` entry naming a typed tail (`<base leaf>::<method>`) the chain
+/// walk formed by ASSUMING a step returns its receiver's type, where no step's declared return backs that. Where such a tail
+/// settles on the calling unit itself, `scan.rs` judges the site as an untyped receiver (the self-edge carries nothing). Not a
+/// method leaf; the leaf judge never matches it.
+pub(crate) const GUESS_TAIL_PREFIX: &str = "\u{1}gtail:";
 /// SOUNDNESS R1587 — a provenance segment: the value is a dependency FACTORY's return peeled by `unwrap`/`expect`
 /// (`let js = dep::f(c).unwrap()`), so the callee path names no function whose return the value IS. A chained `returns`
 /// lookup on it misses by construction and the consumer discloses; only `scan::r1578_resolve` reads the peel, from

@@ -2707,6 +2707,11 @@ fn expand_with(path: &str, uses: &HashMap<String, String>, anchor: bool, follow:
         // instead resolved at COLLECT time (its `use crate::name` re-bind, `collect_use`/`rebound`); the
         // only glob path handled HERE is a `crate::`-ROOTED call (below), which is definitively crate-local
         // and so safe to attribute to a re-export glob (iso_C: `crate::net::connect_tcp`).
+        if follow && segs.len() >= 2 {
+            if let Some(r) = local_glob_alias(&segs, uses) {
+                return r;
+            }
+        }
         return segs.join("::");
     }
     // CRATE-ROOTED resolution via the crate-ROOT re-exports (seeded under `crate::<name>` / `crate::` +
@@ -2883,6 +2888,68 @@ fn module_glob_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>
         return Some(format!("{target}::{}", segs[n..].join("::")));
     }
     None
+}
+
+/// SOUNDNESS R1684 — a MODULE ALIAS brought into scope by a CRATE-LOCAL glob (`use crate::*;` / `use crate::plat::*;` /
+/// `use super::*;`, then `sys::f()`). `glob_candidates_ext` leaves a local glob's names to `by_leaf`/`by_tail2`, which is
+/// right for an item the module DECLARES and names nothing for an alias it IMPORTS: `sys::f` has no unit, so the call
+/// formed no edge and no hedge (EXECUTED, both a one-armed and a `#[cfg]`-armed alias: ABSENT, `deny Fs` 0 over a file
+/// write). The alias is looked up under the crate-rooted key the glob's module publishes it at (`crate::<m>::<head>`,
+/// seeded from the root's `use` map and the module-qualified alias map), exactly as the written `crate::<m>::sys::f`
+/// spelling resolves. Only when EXACTLY ONE distinct answer comes back across the module's local globs, and only for a
+/// head this module neither binds nor declares (the caller's precondition, re-checked). `CANDOR_R1684_OFF`.
+fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<String> {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1684_OFF")) {
+        return None;
+    }
+    let head = segs[0];
+    if uses.contains_key(head) || module_declares(uses, head) == Some(true) {
+        return None;
+    }
+    let globs = uses.get(ALLGLOB_KEY)?;
+    let mut hits: Vec<&String> = Vec::new();
+    for g in globs.split('\u{1}').filter(|g| !g.is_empty()) {
+        let gs: Vec<&str> = g.split("::").collect();
+        let module: String = match gs[0] {
+            "crate" => gs[1..].join("::"),
+            "self" | "super" => {
+                let mut probe = gs.clone();
+                probe.push("_");
+                match absolutise(&probe, uses) {
+                    Some(a) => a.strip_suffix("::_").or_else(|| a.strip_suffix('_')).unwrap_or(&a).trim_end_matches("::").to_string(),
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        let key = if module.is_empty() { format!("crate::{head}") } else { format!("crate::{module}::{head}") };
+        if let Some(v) = uses.get(&key).filter(|v| !v.is_empty()) {
+            if !hits.contains(&v) {
+                hits.push(v);
+            }
+        }
+    }
+    if hits.len() != 1 {
+        return None;
+    }
+    // A LOCAL alias only (a module or item of this crate). A glob-imported EXTERNAL binding (`use crate::*;` over the root's
+    // `use core::fmt;`, then `W: fmt::Write`) is the extern-prelude question `glob_candidates_ext` owns, and resolving it here
+    // moved a measured disclosure (writeable 0.5.5 `CoreWriteAsPartsWrite::write_char`'s `dispatch:Write.write_char`) without
+    // that route's precedence rules.
+    let deps = uses.get(DEPS_KEY).map(String::as_str).unwrap_or("");
+    let external = |a: &str| {
+        let h = a.split("::").next().unwrap_or(a);
+        h != "crate" && (matches!(h, "std" | "core" | "alloc") || deps.split('\u{1}').any(|d| d == h) || !a.contains("::") && h.is_empty())
+    };
+    if hits[0].split(crate::decls::ALIAS_ALT_SEP).any(external) {
+        return None;
+    }
+    let r = alias_join(hits[0], &segs[1..]);
+    if candor_report::env::trace("CANDOR_R1684_INSTR") {
+        eprintln!("R1684GLOB\t{}\t{}", segs.join("::"), r.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH COUNTER
+    }
+    Some(r)
 }
 
 /// R105 — append a caller's trailing segments to an alias target that may carry SEVERAL `#[cfg]`-duplicated
@@ -6277,9 +6344,25 @@ pub(crate) fn collect_item_uses(
     // map is its parent's, via `submodule_uses`) is being SHADOWED, not alternated with.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut off: HashMap<String, String> = HashMap::new();
-    for it in items {
-        if let syn::Item::Use(u) = it {
+    // SOUNDNESS R1682 — the `use` items an item-position `cfg_if!` arm writes are bindings of this scope (every arm: the
+    // conditions are undecidable to a source scan, R140), and `syn` leaves the macro opaque, so they were never read:
+    // `cfg_if! { if #[cfg(unix)] { use crate::unix as sys; } else { use crate::windows as sys; } }` left `sys` unbound
+    // and every `sys::f()` named nothing (EXECUTED: ABSENT, `deny Fs` 0 over a file write). Each counts as cfg-gated.
+    let lifted = if r1682_off() { Vec::new() } else { cfg_if_use_items(items) };
+    // …and which names are bound ONLY by cfg-gated items: the arm sets that `cfg_arm_key` carries to child scopes.
+    let mut ungated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let lifted_items: Vec<&syn::ItemUse> = lifted.iter().collect();
+    let real = items.iter().filter_map(|it| if let syn::Item::Use(u) = it { Some(u) } else { None });
+    for u in real.chain(lifted_items.iter().copied()) {
+        {
+            let is_lifted = lifted_items.iter().any(|l| std::ptr::eq(*l, u));
             if use_item_applies(u, include_tests) {
+                if !is_lifted && !has_cfg(&u.attrs) {
+                    let mut scratch = HashMap::new();
+                    let (mut a2, mut s2) = (HashMap::new(), std::collections::HashSet::new());
+                    collect_use(&u.tree, String::new(), &mut scratch, &mut a2, &mut s2);
+                    ungated.extend(scratch.into_keys());
+                }
                 collect_use(&u.tree, String::new(), out, alts, &mut seen);
             } else if (include_tests || !is_cfg_test(&u.attrs)) && is_cfg_inactive(&u.attrs) {
                 // R982 — kept aside, under `CFG_OFF_USE_PREFIX`, for `expand` inside a `CfgOffScope`.
@@ -6294,6 +6377,94 @@ pub(crate) fn collect_item_uses(
             out.entry(format!("{CFG_OFF_USE_PREFIX}{k}")).or_insert(v);
         }
     }
+    // SOUNDNESS R1682 — a name this item list binds under SEVERAL `#[cfg]` arms keeps its single `out` value (the arm
+    // written last; this scope's own calls union through `alts`, R140/R1474), and the whole arm set is recorded beside
+    // it under `cfg_arm_key`, which `decls::submodule_uses` turns into the inline child's binding — the route a child's
+    // `use super::sys` / inherited `sys::f()` reads. Without it the child took the LAST arm only: written windows-last,
+    // the unix call (the one that runs here) had no edge. A name any UNGATED item binds is a namespace pair (R370's
+    // `format` module + macro), not an arm set, and is left alone.
+    if !r1682_off() {
+        for (k, arms) in alts.iter() {
+            if ungated.contains(k) {
+                continue;
+            }
+            let mut a: Vec<&str> = arms.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+            a.sort_unstable();
+            a.dedup();
+            // …and only a set with a LOCAL arm (the R1682 class: a platform module pair). An all-external set (flate2's
+            // `#[cfg(..)] use {alloc::io, ..}` / `use std::{error, io}`) types BOUNDS and fields through this map, and a
+            // joined value there withdrew a measured `dispatch:Read.read` disclosure without adding an edge.
+            let local = |v: &str| {
+                v.starts_with("crate::") || v.starts_with("self::") || v.starts_with("super::")
+                    || module_declares(out, v.split("::").next().unwrap_or(v)) == Some(true)
+            };
+            if a.len() >= 2 && a.iter().any(|v| local(v)) {
+                out.insert(cfg_arm_key(k), a.join(&crate::decls::ALIAS_ALT_SEP.to_string()));
+            }
+        }
+    }
+}
+
+/// SOUNDNESS R1682 — the reserved `uses` key carrying a `#[cfg]`-duplicated binding's whole arm set (see
+/// `collect_item_uses`). `*` cannot begin a path segment, so no import can bind it.
+pub(crate) const CFG_ARMS_PREFIX: &str = "*cfgarms:";
+pub(crate) fn cfg_arm_key(name: &str) -> String {
+    format!("{CFG_ARMS_PREFIX}{name}")
+}
+
+/// SOUNDNESS R1682 — the kill switch for every cross-scope route of a `#[cfg]`-duplicated binding's arm set.
+pub(crate) fn r1682_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1682_OFF"))
+}
+
+/// Whether a `use` tree contains a glob leaf anywhere.
+fn use_tree_has_glob(t: &syn::UseTree) -> bool {
+    match t {
+        syn::UseTree::Path(p) => use_tree_has_glob(&p.tree),
+        syn::UseTree::Group(g) => g.items.iter().any(use_tree_has_glob),
+        syn::UseTree::Glob(_) => true,
+        _ => false,
+    }
+}
+
+/// SOUNDNESS R1682 — the `use` items written inside an item-position `cfg_if!` (bare or `cfg_if::cfg_if!`), every arm,
+/// nested `cfg_if!` arms included, each given a synthetic `#[cfg(..)]` so it is read as one arm of a cfg-gated set. An
+/// arm body the `CfgIfArms` grammar does not accept contributes nothing (today's reading).
+pub(crate) fn cfg_if_use_items(items: &[syn::Item]) -> Vec<syn::ItemUse> {
+    fn walk(items: &[syn::Item], depth: usize, out: &mut Vec<syn::ItemUse>) {
+        for it in items {
+            let syn::Item::Macro(m) = it else { continue };
+            if m.ident.is_some() || m.mac.path.segments.last().is_none_or(|s| s.ident != "cfg_if") || depth > 8 {
+                continue;
+            }
+            let Ok(arms) = syn::parse2::<crate::collector::CfgIfArms>(crate::model::respan_call_site(m.mac.tokens.clone())) else {
+                continue;
+            };
+            for b in &arms.0 {
+                let inner: Vec<syn::Item> =
+                    b.stmts.iter().filter_map(|st| if let syn::Stmt::Item(i) = st { Some(i.clone()) } else { None }).collect();
+                for i in &inner {
+                    // A GLOB arm (`pub use vxworks::*;`, libc's platform `cfg_if!`) is not a name binding and is left out: a
+                    // glob in a `use` map is read as an EXTERNAL attribution unless it is written crate-rooted, and lifting it
+                    // attributed libc's `crate::pread` to `vxworks::pread` on every platform (first-cut A/B: emscripten
+                    // `lfs64::pread64` lost its `native:extern fn` disclosure for a wrong edge).
+                    if let syn::Item::Use(u) = i.clone() {
+                        if use_tree_has_glob(&u.tree) {
+                            continue;
+                        }
+                        let mut u = u;
+                        u.attrs.push(syn::parse_quote!(#[cfg(candor_cfg_if_arm)]));
+                        out.push(u);
+                    }
+                }
+                walk(&inner, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(items, 0, &mut out);
+    out
 }
 
 /// SOUNDNESS R128 — the MODULES whose item list this scan could not read in full, because an

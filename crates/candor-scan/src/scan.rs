@@ -2938,6 +2938,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // The surviving declaration units, for the report's `declaration` key (R894).
     let decl_quals: std::collections::HashSet<String> =
         fns.iter().filter(|f| f.extern_decl).map(|f| f.qual.clone()).collect();
+    // SOUNDNESS R1675 — every module path the scan's own quals sit under (each proper prefix of a unit qual).
+    let qual_mods: HashSet<String> = fns
+        .iter()
+        .flat_map(|f| {
+            let segs: Vec<&str> = f.qual.split("::").collect();
+            (1..segs.len()).map(move |i| segs[..i].join("::")).collect::<Vec<_>>()
+        })
+        .collect();
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
     // SOUNDNESS R1157 — macro-made primitive operator impl units by tail2 (`FnInfo::mbe_prim_op`).
@@ -4305,6 +4313,50 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 }
                                 Some(vec![t.clone()])
                             });
+                    // SOUNDNESS R1682 — a LOCAL arm none of the three routes placed. R1682 makes a `#[cfg]` arm set reach
+                    // other modules, and its arms name the item where the arm's `use` names it — `sys::unix::TcpListener`
+                    // for mio's `#[cfg(unix)] pub use self::unix::{TcpListener, ..}` — while the definition sits one module
+                    // deeper (`sys::unix::tcp::TcpListener`, re-exported by `unix/mod.rs`). The tail is many-way, the exact
+                    // qual names no unit, and this branch `continue`s: the call had NO trace, where before R1682 it reached
+                    // the ordinary route's `ambiguous:same-name local methods` (measured, mio 0.6.23
+                    // `TcpListener::accept_std`: `Unknown` on 81f7200d, `[]` on the first cut over `sys::unix`'s `accept`).
+                    // So (1) the claimants of the tail that live UNDER the arm's own module are its definitions — the
+                    // module re-exports them — and are edged, all of them (the union); (2) a local arm with claimants and
+                    // none under its module is disclosed exactly as the ordinary route discloses it. An arm whose tail has
+                    // no claimant at all names nothing local and adds nothing, as before.
+                    let targets = targets.or_else(|| {
+                        if crate::lang::r1682_off() {
+                            return None;
+                        }
+                        let t2 = tail2(alt)?;
+                        let cl = by_tail2.get(&t2)?;
+                        let local = alt.strip_prefix("crate::").unwrap_or(alt);
+                        let n = local.split("::").count();
+                        if n < 3 {
+                            return None;
+                        }
+                        let module = local.split("::").take(n - 2).collect::<Vec<_>>().join("::");
+                        let under: Vec<String> =
+                            cl.iter().filter(|q| q.starts_with(&format!("{module}::")) && *q != &f.qual).cloned().collect();
+                        if under.is_empty() {
+                            let head = local.split("::").next().unwrap_or("");
+                            let local_head = !deps.contains(head)
+                                && !deps_idx.crates.contains(dep_renames.get(head).map(String::as_str).unwrap_or(head))
+                                && !matches!(head, "std" | "core" | "alloc");
+                            if local_head && cl.iter().any(|q| q != &f.qual) {
+                                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:same-name local methods".to_string());
+                                if candor_report::env::trace("CANDOR_R1682_INSTR") {
+                                    eprintln!("R1682ARMHEDGE\t{}\t{alt}", f.qual); // §E1 REACH COUNTER
+                                }
+                            }
+                            return None;
+                        }
+                        if candor_report::env::trace("CANDOR_R1682_INSTR") {
+                            eprintln!("R1682ARMSUB\t{}\t{alt}\t{}", f.qual, under.join("|")); // §E1 REACH COUNTER
+                        }
+                        Some(under)
+                    });
                     if let Some(targets) = targets {
                         for t in &targets {
                             if t != &f.qual {
@@ -5429,7 +5481,40 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if t != &f.qual {
                         calls.entry(f.qual.clone()).or_default().insert(t.clone());
                     }
-                } else if let Some(t) = arm_exact_target(&c.path, &by_tail2) {
+                } else if let Some(t) = arm_exact_target(&c.path, &by_tail2).filter(|t| {
+                    // SOUNDNESS R1675 — a claimant that accounts for only a TAIL of the written path, where the head the source
+                    // wrote before it names no module of this scan. polling 3.x: `self.poller: sys::Poller`, `sys` bound by
+                    // `use kqueue as sys` inside `cfg_if!` (hidden from the scan), formed `sys::Poller::wait_deadline`, and the
+                    // ranked pass settled it on the ROOT `Poller::wait_deadline` (the public wrapper, a cycle) — never the
+                    // platform arm that performs the syscall. The written head says the callee is elsewhere; the scan cannot
+                    // say where, so the tail keeps its refusal and `ambiguous:` hedge. Kill switch `CANDOR_R1675_OFF`.
+                    if candor_report::env::switch("CANDOR_R1675_OFF") {
+                        return true;
+                    }
+                    let mut rel = c.path.as_str();
+                    while let Some(r) = rel.strip_prefix("crate::").or_else(|| rel.strip_prefix("self::")).or_else(|| rel.strip_prefix("super::")) {
+                        rel = r;
+                    }
+                    match rel.strip_suffix(t.as_str()).and_then(|h| h.strip_suffix("::")) {
+                        Some(head)
+                            if !head.is_empty()
+                                && !t.ends_with(&format!("::{rel}"))
+                                && !qual_mods.contains(head)
+                                // an EXTERNAL head (`proc_macro::Span::start`, a dependency's path) is not this rule's: the
+                                // claimant was never the callee, and the hedge would be a false `ambiguous:` (measured: 3,200
+                                // refusals over 83 entries, proc-macro2's `proc_macro::*` wrappers the bulk of them).
+                                && !head.split("::").next().is_some_and(|r| {
+                                    manifest_deps.contains(r) || matches!(r, "std" | "core" | "alloc" | "proc_macro" | "test")
+                                }) =>
+                        {
+                            if candor_report::env::trace("CANDOR_R1675_INSTR") {
+                                eprintln!("R1675REFUSE\t{}\t{}\t{t}", f.qual, c.path); // §E1 REACH COUNTER
+                            }
+                            false
+                        }
+                        _ => true,
+                    }
+                }) {
                     // SOUNDNESS R452 (a) — THE WRITTEN PATH NAMES ONE OF THE CLAIMANTS, so the tail's
                     // ambiguity is this INDEX's, not the program's. `resolve_target` keys on the
                     // 2-segment tail and refuses a tail several definitions claim, because linking a
@@ -5448,6 +5533,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // that names exactly one claimant — those become an EDGE here rather than the hedge
                     // below, which is the better answer for every one of them.
                     resolved_local = true;
+                    // SOUNDNESS R1657 stage 1b × R1537 (c) — a co-path claimant here is proved to one member by the same rule
+                    // `resolve_target`'s branch applies. Once `self` carries its origin-qualified type, a twin's `self.m()`
+                    // reaches this branch instead of being refused, and without the rule the trait member delegating to the
+                    // inherent one (`impl Ld for Font { fn name(&self) { self.name() } }`) edged the union, itself included.
+                    let t = match copath.get(t.as_str()).and_then(|cp| copath_member(cp, c, &f.qual)) {
+                        Some(m) if !candor_report::env::switch("CANDOR_R1657B_OFF") => m,
+                        _ => t,
+                    };
                     if t != &f.qual {
                         calls.entry(f.qual.clone()).or_default().insert(t.clone());
                     }
@@ -6987,6 +7080,49 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // and must stay one. Each condition below NARROWS that over-approximation on a named,
             // measured fact, which is the denylist direction; neither is an allowlist of shapes
             // permitted to hedge.
+            // SOUNDNESS R1657 stage 1b (R1674) — A GUESSED HOP THAT NAMES THE CALLER ITSELF. `self.forward().reset_cache(c)` inside
+            // `Regex::reset_cache`, with `forward` DECLARED `-> &DFA` (regex-automata 0.4 `hybrid::regex`): the walk typed the tail on
+            // the receiver's own type, `Regex::reset_cache` — the caller — and a self-edge adds nothing, so the real callee
+            // (`DFA::reset_cache`, `Log`) was neither edged nor disclosed. Before 1b an `ambiguous:` hedge on the contested
+            // `Regex::forward` happened to cover the site; once `self` is typed that step resolves and the silence is exposed (MIR
+            // checker COVER-MISS). The site goes to the R1095 judge as an untyped receiver of its method, as R1663's miss does.
+            if !c.is_macro && c.method && c.typed && !candor_report::env::switch("CANDOR_R1657B_OFF") {
+                if let Some(t2) = tail2(&c.path) {
+                    let guessed = f.untyped_methods.iter().any(|m| {
+                        m.strip_prefix(crate::lazy::HOP_GUESS_PREFIX) == Some(t2.as_str())
+                            || m.strip_prefix(crate::lazy::GUESS_TAIL_PREFIX) == Some(t2.as_str())
+                    });
+                    // A receiver typed through a transparent accessor the type itself declares (`self.get_mut().read_buf(buf)`,
+                    // `get_mut -> &mut T`, tokio-io's `FramedWrite`) is flagged by the collector too (`GUESS_TAIL_PREFIX`).
+                    // Settled on the caller by the single claimant, or by the exact pass among twins (time 0.3's
+                    // `self.date().monday_based_week()` on `crate::offset_date_time::OffsetDateTime`).
+                    if guessed
+                        && (by_tail2.get(&t2).is_some_and(|v| v.iter().all(|q| q == &f.qual))
+                            || arm_exact_target(&c.path, &by_tail2).is_some_and(|t| t == &f.qual))
+                    {
+                        if let Some(cands) = self_methods_by_leaf.get(c.leaf.as_str()) {
+                            if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                                eprintln!("R1657SELFHOP\t{}\t{t2}\tguessed={guessed}", f.qual); // §E1 REACH COUNTER
+                            }
+                            untyped_contested.push((f.qual.clone(), c.leaf.clone(), cands.clone(), true));
+                        }
+                        // …and where a step's DECLARED return is another type (R1663's `HOP_GUESS_PREFIX`: arc-swap 1.x
+                        // `self.load().serialize(s)` with `load -> Guard<T, S>`, `Guard: Deref<Target = T>`, `T: Serialize`), the
+                        // callee is that type's (or its deref target's) member, which may be the CALLER's type parameter: the judge
+                        // above finds no crate-local candidate with an effect and would leave the site silent. Disclosed here.
+                        if f.untyped_methods.iter().any(|m| m.strip_prefix(crate::lazy::HOP_GUESS_PREFIX) == Some(t2.as_str())) {
+                            if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                                eprintln!("R1657SELFHOPMOVED\t{}\t{t2}", f.qual); // §E1 REACH COUNTER
+                            }
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(format!(
+                                "dispatch:untyped receiver of `{}` (a chained step is declared to return another type)",
+                                c.leaf
+                            ));
+                        }
+                    }
+                }
+            }
             if !c.is_macro && c.method && c.typed && !already_handled {
                 if let Some(t2) = tail2(&c.path) {
                     let ty = t2.split("::").next().unwrap_or("").to_string();

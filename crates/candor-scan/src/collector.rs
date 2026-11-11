@@ -4512,7 +4512,12 @@ impl<'a> CallCollector<'a> {
         let candidate = args.iter().any(|a| {
             a != "_" && a != "'" && !a.is_empty() && {
                 let al = a.rsplit("::").next().unwrap_or(a);
-                std_io_handle(a).is_some() || self.returns.contains_key(&crate::model::impl_fn_key(al, outer))
+                std_io_handle(a).is_some()
+                    || self.returns.contains_key(&crate::model::impl_fn_key(al, outer))
+                    // SOUNDNESS R1657 stage 1b (UFCS deref; row ID to be assigned) — or a BOUNDED type parameter of this impl/fn: the instantiation is the caller's type, so
+                    // `outer` dispatches through its bound (dashmap `serialize_impl!` over `V: Serialize`, a twin `Ref`).
+                    || (!candor_report::env::switch("CANDOR_R1657B_OFF")
+                        && self.generic_bounds.get(a).or_else(|| self.impl_generic_bounds.get(a)).is_some_and(|b| !b.is_empty()))
             }
         });
         if !candidate {
@@ -5200,7 +5205,24 @@ impl<'a> CallCollector<'a> {
                 if v == crate::cache::QUAL_TOMB || crate::lang::dyn_alias_leaves_str(v).is_some() {
                     return None;
                 }
-                legacy.get(leaf)?.get(key)?;
+                if legacy.get(leaf).and_then(|m| m.get(key)).is_none() {
+                    // SOUNDNESS R1657 stage 1b (F1) — the leaf-keyed entry is gone because R476 moved it to `trait_fields`: a
+                    // same-leaf TWIN declares this field as its own type PARAMETER (futures-lite `io::Chain { #[pin] first: R1 }`
+                    // beside `stream::Chain { #[pin] first: Fuse<S> }`). The proven owner's own declaration is CONCRETE, so it
+                    // answers: without this `this.first` (`let mut this = self.project();`) typed to nothing, the R1624 trait
+                    // route answered "concrete, no bounds", and `this.first.as_mut().poll_next(cx)` lost both its edge to
+                    // `Fuse::poll_next` and the `Stream::poll_next` key the published arm carried (EXECUTED fixture `f1`).
+                    // Only a value that names no parameter of the owner and no trait object. Kill switch `CANDOR_R1657F1_OFF`.
+                    let moved = !elem
+                        && !candor_report::env::switch("CANDOR_R1657F1_OFF")
+                        && !qi.names_param(&qual, v)
+                        && self.trait_fields.get(leaf).is_some_and(|m| m.contains_key(key));
+                    if !moved {
+                        return None;
+                    }
+                    instr("moved-concrete", v);
+                    return Some(Some(v.clone()));
+                }
                 // SOUNDNESS R1624 (twin element) — the owner's own ELEMENT is one of its type PARAMETERS (`m: RefCell<HashMap<K, C>>` in
                 // `struct ClusterConnection<C>`): that names no type, so it is not a concrete answer — and the leaf entry is a
                 // twin's, so it must not answer either. The bound route answers it (`qual_trait_field_in`). Measured: redis
@@ -5253,13 +5275,24 @@ impl<'a> CallCollector<'a> {
             None => {
                 // SOUNDNESS R1624 (twin element) — an element typed by the owner's own parameter: its bounds HERE, mapped by position
                 // (`payload_decision`), as the leaf-keyed index's R476 join would have filed them for a non-twin.
-                if elem && !candor_report::env::switch("CANDOR_R1624ELEM_OFF") {
+                // SOUNDNESS R1657 stage 1b — and for the FIELD query too (`elem == false`): the leaf-keyed `trait_fields` this
+                // replaces carried the element parameter's bounds for `context: Option<C>` (R476's join), and the walk over
+                // `context.take().expect(..)` asks the field, not the element (snafu `Context::poll`, fixture `s1`).
+                if (elem || !candor_report::env::switch("CANDOR_R1657B_OFF")) && !candor_report::env::switch("CANDOR_R1624ELEM_OFF") {
                     if let Some(p) = qi.field_elem.get(&qual).and_then(|m| m.get(key)).filter(|v| qi.names_param(&qual, v)) {
                         // By the owner's OWN parameter list (`qi.params`): the leaf-keyed `type_params_key` fact
                         // `payload_decision` reads is withdrawn when a same-leaf twin declares different parameters.
                         let t = crate::lang::strip_wrapped(p).to_string();
                         let pos = qi.params.get(&qual).and_then(|ps| ps.iter().position(|x| *x == t));
-                        if let (Some(pos), Some((ev_leaf, args))) = (pos, self.scrut_evidence(base_expr)) {
+                        // SOUNDNESS R1657 stage 1b — a value whose type is the impl's own proven self type (`let this =
+                        // self.project();`) has no written instantiation of its own; the impl header's is the evidence, as
+                        // for `self` (snafu `Context::poll`, EXECUTED fixture `s1`). Kill switch `CANDOR_R1657B_OFF`.
+                        let evidence = self.scrut_evidence(base_expr).or_else(|| {
+                            (!candor_report::env::switch("CANDOR_R1657B_OFF") && self.vars.get("self").map(String::as_str) == Some(base))
+                                .then(|| self.scrut_evidence(&syn::parse_quote!(self)))
+                                .flatten()
+                        });
+                        if let (Some(pos), Some((ev_leaf, args))) = (pos, evidence) {
                             if ev_leaf == leaf {
                                 if let Some(arg) = args.get(pos) {
                                     let mut b: Vec<String> = Vec::new();
@@ -9597,6 +9630,30 @@ impl<'a> CallCollector<'a> {
     /// Does local trait `tr` declare `leaf`, or INHERIT it from a (transitive, local) supertrait?
     /// (`trait Sub: Super` — a `Super` method is callable on a `Sub` receiver.) Bounded depth guards a
     /// cyclic/deep hierarchy; an external supertrait resolves to nothing (documented miss).
+    /// SOUNDNESS R1685 — `leaf` is a member of local trait `tr` that the trait's own item list does not show, because an
+    /// item-position MACRO declares it (time 0.3.53–0.3.55 `trait ComponentProvider { unimplemented_methods! { ..
+    /// ("time") period => Period; .. } }`), proven by a local `impl <tr> for <T>` block declaring it: rustc rejects an impl
+    /// method its trait lacks (E0407), so R598's `impl_members` entry is the evidence. Without it the PATH spelling
+    /// `ComponentProvider::period(time, &mut ())` — and `Tr::m(&t, ..)` over a TYPED `t` — reached no dispatch decision and
+    /// formed no edge and no hedge on every arm (EXECUTED fixture `f2`: `deny Fs` 0 over a file write). Asked by the PATH
+    /// routes only (`route_trait_member_path`, `dispatch_trait_member` with `assoc`). Kill switch `CANDOR_R1685_OFF`.
+    fn r1685_impl_declared(&self, tr: &str, leaf: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1685_OFF") {
+            return false;
+        }
+        let (pre, suf) = (format!("{tr}\u{1f}"), format!("\u{1f}{leaf}"));
+        let hit = self.impl_members.iter().any(|k| {
+            k.len() > pre.len() + suf.len()
+                && k.starts_with(&pre)
+                && k.ends_with(&suf)
+                && !k[pre.len()..k.len() - suf.len()].contains('\u{1f}')
+        });
+        if hit && candor_report::env::trace("CANDOR_R1685_INSTR") {
+            eprintln!("R1685MEMBER\t{tr}::{leaf}"); // §E1 REACH COUNTER
+        }
+        hit
+    }
+
     fn trait_declares_method(&self, tr: &str, leaf: &str, depth: usize) -> bool {
         if depth > 16 {
             return false;
@@ -10726,7 +10783,7 @@ impl<'a> CallCollector<'a> {
         // The leaf must be a method the trait declares OR INHERITS from a (local) SUPERTRAIT — a `Super`
         // method is callable on a `Sub`-bound/`dyn Sub` receiver (or passed as `Sub::base_method`), and
         // the sub's impls (which provide the super method) resolve it via `trait_impls[tr]` below.
-        if !(self.trait_declares_method(tr, leaf, 0) || (assoc && lt.assoc.contains(leaf))) {
+        if !(self.trait_declares_method(tr, leaf, 0) || (assoc && lt.assoc.contains(leaf)) || (assoc && self.r1685_impl_declared(tr, leaf))) {
             // SOUNDNESS R1347 (sea-query half, rustagent-0415) — …UNLESS a STD supertrait declares it. `pub trait
             // SqlWriter: Write + ..` (`std::fmt::Write`) and `fn prepare_column_type(.., sql: &mut impl SqlWriter) {
             // write!(sql, ..) }`: the member that runs is the IMPLEMENTOR's `fmt::Write::write_str`, and a `pub` trait's
@@ -11330,7 +11387,7 @@ impl<'a> CallCollector<'a> {
                 continue;
             }
             let Some(lt) = self.local_traits.get(&tr) else { continue };
-            let is_method = self.trait_declares_method(&tr, leaf, 0);
+            let is_method = self.trait_declares_method(&tr, leaf, 0) || self.r1685_impl_declared(&tr, leaf);
             let is_assoc = lt.assoc.contains(leaf);
             if !is_method && !is_assoc {
                 continue; // not this trait's member — a blanket/unrelated name, left as it was
@@ -12655,7 +12712,44 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // own generics are already installed in `generic_bounds` above.
         let outer_ts = self.trait_self.take();
         let outer_ig = std::mem::take(&mut self.impl_generic_bounds);
+        // SOUNDNESS R1657 stage 1b (F4) — …and the VALUE `self`. A nested impl's methods are walked inside the enclosing
+        // unit's body, and `self` there still held the ENCLOSING impl's type: tokio's broadcast `Receiver::drop` declares
+        // `struct NotifyGuard<'a, T> { rx: &'a mut Receiver<T>, .. }` and `impl Drop for NotifyGuard { fn drop(&mut self) {
+        // self.rx.shared.notify_last_rx_drop.notify_waiters(); } }` in its body, and `self.rx` was read as a field of
+        // `Receiver`. Before stage 1b that bare leaf picked some twin's `rx` and reached `Notify::notify_waiters` by luck;
+        // once `self` was origin-qualified the proven owner `broadcast::Receiver` has no `rx` and the read was refused
+        // (the edge and its `Log` lost, hedged). The nested impl's own self type is the answer, by its written name (a
+        // body-local struct's fields are this block's variant, `block_field_variants`). Only a plain nominal name with no
+        // generic parameter of the nested impl; otherwise `self` is UNBOUND inside it rather than the outer type, so a
+        // read through it refuses instead of borrowing the enclosing impl's fields. Kill switch `CANDOR_R1657F4_OFF`.
+        let f4 = !candor_report::env::switch("CANDOR_R1657F4_OFF");
+        let saved_self = f4.then(|| (self.vars.remove("self"), self.trait_vars.remove("self")));
+        if f4 {
+            if let Some(n) = crate::lang::impl_type_name(&node.self_ty)
+                .filter(|n| !n.contains("::") && !node.generics.type_params().any(|t| t.ident == n.as_str()))
+            {
+                // Spelled as a binder of the same type is (`let g = NotifyGuard { .. }` types `g` through this scope's `use`
+                // map, which names a body-local struct by `ITEM_SENTINEL`), so the two read one field index.
+                self.vars.insert("self".to_string(), crate::lang::expand(&n, &self.uses));
+            }
+        }
+        if f4 {
+            NESTED_IMPL_DEPTH.with(|d| d.set(d.get() + 1));
+        }
         syn::visit::visit_item_impl(self, node);
+        if f4 {
+            NESTED_IMPL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+        if let Some((v, tv)) = saved_self {
+            self.vars.remove("self");
+            self.trait_vars.remove("self");
+            if let Some(v) = v {
+                self.vars.insert("self".to_string(), v);
+            }
+            if let Some(tv) = tv {
+                self.trait_vars.insert("self".to_string(), tv);
+            }
+        }
         self.trait_self = outer_ts;
         self.impl_generic_bounds = outer_ig;
         self.restore_self(outer_self);
@@ -13234,6 +13328,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        // SOUNDNESS R1657 stage 1b (UFCS deref; row ID to be assigned) — `Deref::deref(x).m()` / `DerefMut::deref_mut(x).m()` is `x.deref().m()`: the UFCS spelling left the
+        // receiver untyped, so a method on a deref target that is an impl type PARAMETER formed no bound dispatch and no
+        // disclosure (dashmap's `serialize_impl!`: `std::ops::Deref::deref(self).serialize(serializer)` under `V: Serialize`
+        // read ABSENT with no `dispatchesOn` key on every arm, while `self.deref().serialize(s)` carried
+        // `serde#Serialize::serialize`). The call is visited in the method spelling. Kill switch `CANDOR_R1657B_OFF`.
+        if let Some(m) = ufcs_deref_as_method(node).filter(|_| !candor_report::env::switch("CANDOR_R1657B_OFF")) {
+            if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                eprintln!("R1657UFCSDEREF\t{}\t.{}", self.modpath, node.method); // §E1 REACH COUNTER
+            }
+            let leaked: &'ast syn::ExprMethodCall = Box::leak(Box::new(m));
+            return self.visit_expr_method_call(leaked);
+        }
         let self_disp_start = self.calls.len(); // SOUNDNESS R1420(a) — see `self_disp`
         self.note_container_release(node); // SOUNDNESS R1118
         let fd_site = fd_prov_site(); // F3 — this call site, for the provenance of every key it mints
@@ -13607,6 +13713,36 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if matches!(payload, PayloadTy::Hedge) {
             self.mark_unresolved(format!("dispatch:generic payload receiver of `{leaf}`"));
         }
+        // SOUNDNESS R1657 stage 1b (F4, the (c'') leg) — a FORMATTER call on a caller-chosen generic value inside a BODY-LOCAL
+        // impl. tokio's `TaskLocalFuture::fmt` declares `struct TransparentOption<'a, T> { value: &'a Option<T> }` and formats
+        // `value` (a `T: Debug`) in a nested `impl Debug`; once F4 typed that impl's `self`, the call became a std-trait
+        // dispatch on a caller-chosen `T` and the row read pure, where the published engine carried a (wrong-reason) hedge.
+        // A LIVE chained consumer (real tokio 1.36 report, pub beside tip, join proven by a control probe) whose `T` writes a
+        // file in `Debug::fmt` was charged `Unknown` through pub's hedge and read ABSENT on the tip, over an EXECUTED write: no
+        // consumer-side route answers a dependency wrapper formatting the consumer's `T` (the R1165 forwarded-`T` residual).
+        // The true reason is the dispatch itself: `dispatch:Debug.fmt` (or `Display`), disclosed on exactly these units.
+        if NESTED_IMPL_DEPTH.with(|d| d.get()) > 0 && leaf == "fmt" && !candor_report::env::switch("CANDOR_R1657F4_OFF") {
+            // The value is typed by the nested impl's own type-parameter NAME (`T`, read off `value: &'a Option<T>`), which
+            // names no type: its bounds in this scope are the dispatch.
+            let generic = match &payload {
+                PayloadTy::Dispatch(l) => Some(l.clone()),
+                _ => match recv_ty.as_deref() {
+                    None => Some(self.resolve_recv_traits(&node.receiver)),
+                    Some(t) if !t.contains("::") => {
+                        self.generic_bounds.get(t).or_else(|| self.impl_generic_bounds.get(t)).cloned()
+                    }
+                    Some(_) => None,
+                },
+            };
+            if let Some(tr) = generic.and_then(|l| {
+                l.into_iter().find(|t| matches!(t.as_str(), "Debug" | "Display" | "LowerHex" | "UpperHex" | "Octal" | "Binary" | "LowerExp" | "UpperExp" | "Pointer"))
+            }) {
+                if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                    eprintln!("R1657F4FMT\t{tr}"); // §E1 REACH COUNTER
+                }
+                self.mark_unresolved(format!("dispatch:{tr}.fmt"));
+            }
+        }
         if let Some(ty) = recv_ty.filter(|_| matches!(payload, PayloadTy::Old)) {
             // SOUNDNESS R1160 — a receiver std CONSTRUCTED as a `String` is std's, whatever a glob in scope exports. Only
             // where the typer answered `String`: any other answer (a builder-chain guess) keeps its glob handling as before.
@@ -13796,6 +13932,46 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 eprintln!("R1663HOP\t{bl}.{}\t.{leaf}", moved.map_or("", |m| m.as_str())); // §E1 REACH COUNTER
                             }
                             self.untyped_methods.insert(format!("{}{bl}::{leaf}", crate::lazy::HOP_GUESS_PREFIX));
+                        }
+                    }
+                }
+                // (std-named leaves included: `self.get_mut().read_buf(buf)` with `get_mut -> &mut T`, tokio-io's `FramedWrite`, settled
+                // to the caller itself just the same.)
+                if let Some((steps, base)) = &strict {
+                    let bl = base.rsplit("::").next().unwrap_or(base);
+                    // SOUNDNESS R1657 stage 1b — a tail the walk typed on a step whose declared return does not back it (not
+                    // filed, or filed as another type) is a GUESS even where it names a unit. Once `self` carries its
+                    // origin-qualified type, `self.date().monday_based_week()` (time 0.3: `date` declared `-> Date`, which the
+                    // walk could not use) formed `crate::offset_date_time::OffsetDateTime::monday_based_week`, which the exact
+                    // pass settled to the CALLER ITSELF, dropping the `ambiguous:` hedge over `Date::monday_based_week`'s
+                    // `Unknown` (MIR checker COVER-MISS). Filed for `scan.rs`; kill switch `CANDOR_R1657B_OFF`.
+                    if *base == ty
+                        && !steps.is_empty()
+                        && !candor_report::env::switch("CANDOR_R1657B_OFF")
+                        && steps.iter().any(|st| {
+                            !self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| r == base || r.rsplit("::").next() == Some(bl))
+                        })
+                    {
+                        self.untyped_methods.insert(format!("{}{bl}::{leaf}", crate::lazy::GUESS_TAIL_PREFIX));
+                    }
+                } else if !candor_report::env::switch("CANDOR_R1657B_OFF") {
+                    // …and a TRANSPARENT accessor (`get_mut`/`get_ref`/`as_ref`, peeled as a wrapper's) called on a crate type that
+                    // DECLARES it to return something else: `self.get_mut().read_buf(buf)` with `FramedWrite::get_mut -> &mut T`
+                    // (tokio-io 0.1) was typed `FramedWrite::read_buf`, the caller itself.
+                    if let syn::Expr::MethodCall(acc) = peel_recv(&node.receiver) {
+                        let an = acc.method.to_string();
+                        if crate::lang::is_any_wrapper_accessor(&an) {
+                            if let Some(b) = self.resolve_recv_type(&acc.receiver).filter(|b| *b == ty) {
+                                let bl = b.rsplit("::").next().unwrap_or(&b).to_string();
+                                // the type DECLARES the accessor, and its declared return is not positively the type itself
+                                // a declared return that is another type, a withdrawn one, or one of the impl's type PARAMETERS
+                                if self.returns.get(&crate::model::impl_ret_key(&bl, &an)).is_some_and(|r| r != &b && r.rsplit("::").next() != Some(bl.as_str()))
+                                    || self.returns.contains_key(&crate::model::withdrawn_impl_ret_key(&bl, &an))
+                                    || self.returns.get(&crate::model::impl_retgen_key(&bl, &an)).is_some_and(|p| p.parse::<usize>().is_ok())
+                                {
+                                    self.untyped_methods.insert(format!("{}{bl}::{leaf}", crate::lazy::GUESS_TAIL_PREFIX));
+                                }
+                            }
                         }
                     }
                 }
@@ -17390,6 +17566,36 @@ thread_local! {
 /// EXACT-FIRST — the typer's answer as a definition qual, when it is one: crate-ANCHORED (`crate::fallback::Ident`, so
 /// measured from the crate root, the property `arm_exact_target`'s exact pass rests on), a plain run of identifiers
 /// (no generic arguments, no `#[cfg]` alias arms, no body-item sentinel). Returns it with `crate::` stripped.
+/// SOUNDNESS R1657 stage 1b (UFCS deref; row ID to be assigned) — `node` with a UFCS `Deref::deref(x)` / `DerefMut::deref_mut(x)` receiver rewritten to `(x).deref()` /
+/// `(x).deref_mut()`, or `None` when the receiver is not that spelling.
+fn ufcs_deref_as_method(node: &syn::ExprMethodCall) -> Option<syn::ExprMethodCall> {
+    let syn::Expr::Call(c) = peel_recv(&node.receiver) else { return None };
+    let syn::Expr::Path(p) = &*c.func else { return None };
+    if p.qself.is_some() || c.args.len() != 1 {
+        return None;
+    }
+    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    let n = segs.len();
+    let m = match (n >= 2).then(|| (segs[n - 2].as_str(), segs[n - 1].as_str())) {
+        Some(("Deref", "deref")) => "deref",
+        Some(("DerefMut", "deref_mut")) => "deref_mut",
+        _ => return None,
+    };
+    let arg = c.args.first()?.clone();
+    let recv = syn::Expr::MethodCall(syn::ExprMethodCall {
+        attrs: Vec::new(),
+        receiver: Box::new(syn::Expr::Paren(syn::ExprParen { attrs: Vec::new(), paren_token: Default::default(), expr: Box::new(arg) })),
+        dot_token: Default::default(),
+        method: syn::Ident::new(m, p.path.segments.last()?.ident.span()),
+        turbofish: None,
+        paren_token: Default::default(),
+        args: Default::default(),
+    });
+    let mut out = node.clone();
+    out.receiver = Box::new(recv);
+    Some(out)
+}
+
 pub(crate) fn exact_anchored_ty(ty: &str) -> Option<&str> {
     let q = ty.strip_prefix("crate::")?;
     let ident = |s: &str| {
@@ -18417,3 +18623,10 @@ pub(crate) fn r1578_join(path: &str, prov: Option<&str>) -> String {
         None => path.to_string(),
     }
 }
+
+thread_local! {
+    /// SOUNDNESS R1657 stage 1b (F4) — how many body-local `impl` blocks enclose the code being walked (`visit_item_impl`
+    /// with F4 active). Read only by the formatter-dispatch disclosure in `visit_expr_method_call`.
+    static NESTED_IMPL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
