@@ -439,6 +439,18 @@ pub(crate) fn submodule_uses(
     include_tests: bool,
 ) -> HashMap<String, String> {
     let mut subuses = uses.clone();
+    // SOUNDNESS R1682 — the parent's `#[cfg]`-duplicated bindings reach the child as their WHOLE arm set, not the arm the
+    // parent's map happens to hold (the one written last). See `lang::collect_item_uses`. The reserved keys are the
+    // parent scope's fact and do not travel further; the child's own `use` items record its own.
+    let arm_keys: Vec<String> = subuses.keys().filter(|k| k.starts_with(crate::lang::CFG_ARMS_PREFIX)).cloned().collect();
+    for k in arm_keys {
+        if let Some(v) = subuses.remove(&k) {
+            let name = &k[crate::lang::CFG_ARMS_PREFIX.len()..];
+            if subuses.contains_key(name) {
+                subuses.insert(name.to_string(), v);
+            }
+        }
+    }
     for it in inner {
         if let Some(name) = declared_item_name(it, include_tests) {
             subuses.remove(&name);
@@ -2003,6 +2015,97 @@ pub(crate) fn collect_static_types(
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R1682 — every module scope's `#[cfg]`-DUPLICATED `use` binding (private or `pub`, `cfg_if!` arms included),
+/// recorded crate-wide under its module-qualified name with EVERY arm, so a path written through it from ANOTHER
+/// module names the whole arm set: `use crate::sys;` / `crate::plat::sys::f()` / `use crate::plat::sys` from a sibling
+/// file. `seed_mod_aliases` seeds it into each file's map and `expand` distributes the caller's suffix over the arms
+/// (`alias_join`); scan.rs's R105/R438 branch then edges every LOCAL arm and charges every classified one.
+///
+/// THE DEFECT. Only the crate root's bindings travelled (`collect_root_reexports`, one value per name — the arm written
+/// LAST), and a non-root module's bindings did not travel at all unless they were a `pub use` of an EXTERNAL item:
+/// fslock 0.2.1 (`#[cfg(unix)] use crate::unix as sys; #[cfg(windows)] use crate::windows as sys;` in lib.rs, `use
+/// crate::sys;` in fmt.rs) edged only `windows::fsync` and `Adapter::drop`'s real `unix::fsync` (`Fs`) was silent; a
+/// `pub mod plat { #[cfg(unix)] pub use crate::unix as sys; .. }` read from outside named NOTHING (ABSENT, no hedge).
+///
+/// Only names bound by ≥2 cfg-gated leaves with ≥2 DISTINCT targets, and never one an ungated `use` of the same scope
+/// also binds (a namespace pair, R370). A one-armed binding is untouched: recording it here would make its key
+/// `aliased` and skip the local resolution it gets today (R438's measured trap). Globs are not names and are left to
+/// `collect_module_glob`. A target names no local module ⇒ it is kept as written (an external arm).
+pub(crate) fn collect_cfg_arm_aliases(
+    items: &[syn::Item],
+    modpath: &str,
+    dir: &Path,
+    include_tests: bool,
+    aliases: &mut HashMap<String, String>,
+) {
+    if crate::lang::r1682_off() {
+        return;
+    }
+    let mods = mod_targets(items, modpath, dir, include_tests);
+    let lifted = crate::lang::cfg_if_use_items(items);
+    let mut gated: HashMap<String, Vec<String>> = HashMap::new();
+    let mut ungated: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let real = items.iter().filter_map(|it| if let syn::Item::Use(u) = it { Some(u) } else { None });
+    for u in real.chain(lifted.iter()) {
+        if !crate::lang::use_item_applies(u, include_tests) {
+            continue;
+        }
+        let mut leaves = Vec::new();
+        use_leaves(&u.tree, Vec::new(), &mut leaves);
+        for (segs, name, alias) in leaves {
+            if name == "*" {
+                continue;
+            }
+            if !has_cfg(&u.attrs) {
+                ungated.insert(alias);
+                continue;
+            }
+            let bases = resolve_use_base(&segs, modpath, &mods);
+            let targets: Vec<String> = if segs.is_empty() {
+                // `use tu as sys;` — a one-segment target: this module's own `mod tu` (Rust 2018 uniform path), every
+                // `#[path]` arm of it, else an extern crate of that name.
+                match mods.get(&name) {
+                    Some(t) => t.clone(),
+                    None => vec![name.clone()],
+                }
+            } else if !bases.is_empty() {
+                bases.iter().map(|b| qualify(b, &name)).collect()
+            } else if segs.first().is_some_and(|h| matches!(h.as_str(), "crate" | "self" | "super")) {
+                continue; // a local path this walk cannot place: no arm is better than a wrong one
+            } else {
+                vec![format!("{}::{name}", segs.join("::"))]
+            };
+            let e = gated.entry(alias).or_default();
+            for t in targets {
+                if !e.contains(&t) {
+                    e.push(t);
+                }
+            }
+        }
+    }
+    for (alias, targets) in gated {
+        if targets.len() < 2 || ungated.contains(&alias) {
+            continue;
+        }
+        if candor_report::env::trace("CANDOR_R1682_INSTR") {
+            eprintln!("R1682ARMS\t{}\t{}", qualify(modpath, &alias), targets.join("|")); // §E1 REACH COUNTER
+        }
+        for t in targets {
+            record_alias(aliases, qualify(modpath, &alias), t);
+        }
+    }
+    for it in items {
+        let syn::Item::Mod(m) = it else { continue };
+        if !include_tests && is_cfg_test(&m.attrs) {
+            continue;
+        }
+        if let Some((_, inner)) = &m.content {
+            let name = m.ident.to_string();
+            collect_cfg_arm_aliases(inner, &qualify(modpath, &name), &dir.join(&name), include_tests, aliases);
         }
     }
 }
