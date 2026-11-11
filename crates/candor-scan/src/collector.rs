@@ -5258,13 +5258,24 @@ impl<'a> CallCollector<'a> {
             None => {
                 // SOUNDNESS R1624 (twin element) — an element typed by the owner's own parameter: its bounds HERE, mapped by position
                 // (`payload_decision`), as the leaf-keyed index's R476 join would have filed them for a non-twin.
-                if elem && !candor_report::env::switch("CANDOR_R1624ELEM_OFF") {
+                // SOUNDNESS R1657 stage 1b — and for the FIELD query too (`elem == false`): the leaf-keyed `trait_fields` this
+                // replaces carried the element parameter's bounds for `context: Option<C>` (R476's join), and the walk over
+                // `context.take().expect(..)` asks the field, not the element (snafu `Context::poll`, fixture `s1`).
+                if (elem || !candor_report::env::switch("CANDOR_R1657B_OFF")) && !candor_report::env::switch("CANDOR_R1624ELEM_OFF") {
                     if let Some(p) = qi.field_elem.get(&qual).and_then(|m| m.get(key)).filter(|v| qi.names_param(&qual, v)) {
                         // By the owner's OWN parameter list (`qi.params`): the leaf-keyed `type_params_key` fact
                         // `payload_decision` reads is withdrawn when a same-leaf twin declares different parameters.
                         let t = crate::lang::strip_wrapped(p).to_string();
                         let pos = qi.params.get(&qual).and_then(|ps| ps.iter().position(|x| *x == t));
-                        if let (Some(pos), Some((ev_leaf, args))) = (pos, self.scrut_evidence(base_expr)) {
+                        // SOUNDNESS R1657 stage 1b — a value whose type is the impl's own proven self type (`let this =
+                        // self.project();`) has no written instantiation of its own; the impl header's is the evidence, as
+                        // for `self` (snafu `Context::poll`, EXECUTED fixture `s1`). Kill switch `CANDOR_R1657B_OFF`.
+                        let evidence = self.scrut_evidence(base_expr).or_else(|| {
+                            (!candor_report::env::switch("CANDOR_R1657B_OFF") && self.vars.get("self").map(String::as_str) == Some(base))
+                                .then(|| self.scrut_evidence(&syn::parse_quote!(self)))
+                                .flatten()
+                        });
+                        if let (Some(pos), Some((ev_leaf, args))) = (pos, evidence) {
                             if ev_leaf == leaf {
                                 if let Some(arg) = args.get(pos) {
                                     let mut b: Vec<String> = Vec::new();

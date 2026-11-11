@@ -247,3 +247,26 @@ fn r1657b_a_ufcs_deref_receiver_dispatches_through_the_bound() {
     assert!(inferred(&off, "via_solo").is_empty(), "OFF: the pre-fix silence:\n{off:#}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn r1657b_a_self_projection_keeps_the_element_parameters_bound_dispatch() {
+    // Fixture `s1` (snafu 0.9 `futures::try_future::Context::poll`'s shape): `let this = self.project();` where `project` is a
+    // method the scan cannot see (pin_project's generated one; here a dependency's blanket extension trait), then
+    // `this.context.take().expect(..).into_error()` under `C: IntoError`, with a twin `Context` elsewhere. 0.41.3 charged the
+    // dispatch (`deny Fs drive` 1, executed); the first 1b cut proved the owner, whose field query answered "no trait", and the
+    // dispatch and its `dispatchesOn` key were lost.
+    let d = fixture(
+        "selfproj",
+        &[(
+            "main.rs",
+            &format!("use pp::ProjExt;\npub trait IntoError {{ fn into_error(self) -> u8; }}\npub trait Go {{ fn go(&mut self) -> u8; }}\npub mod f {{\n    use super::*;\n    pub struct Context<C> {{ pub context: Option<C> }}\n    impl<C: IntoError> Go for Context<C> {{\n        fn go(&mut self) -> u8 {{ let this = self.project(); let context = &mut this.context; context.take().expect(\"once\").into_error() }}\n    }}\n}}\npub mod s {{ pub struct Context<St> {{ pub context: St }} }}\npub struct Loud;\nimpl IntoError for Loud {{ fn into_error(self) -> u8 {{ {W} 1 }} }}\npub fn drive(c: &mut f::Context<Loud>) -> u8 {{ c.go() }}\nfn main() {{}}\n"),
+        )],
+    );
+    std::fs::create_dir_all(d.join("pp/src")).unwrap();
+    std::fs::write(d.join("pp/Cargo.toml"), "[package]\nname = \"pp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(d.join("pp/src/lib.rs"), "pub trait ProjExt { fn project(&mut self) -> &mut Self { self } }\nimpl<T> ProjExt for T {}\n").unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n[dependencies]\npp = { path = \"pp\" }\n").unwrap();
+    let (_, v) = scan(&d, None, false);
+    assert!(inferred(&v, "drive").contains(&"Fs".to_string()), "the bound dispatch charges the write:\n{v:#}");
+    let _ = std::fs::remove_dir_all(&d);
+}
