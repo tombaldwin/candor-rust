@@ -16798,6 +16798,8 @@ trait G {
             // `pub use self::platform::*` in a SUBMODULE — a call `imp::doit()` in ANOTHER file resolves
             // through it, so a change to the edge set re-resolves that file's calls.
             reexports => |m| { m.reexports.push(Reexport { module: "imp".into(), from: vec!["imp::platform".into()], name: "*".into(), alias: "*".into(), cfg_gated: false }); },
+            // SOUNDNESS R1657 stage 2 (R1689) — the private local bindings steer the re-export table's answers.
+            private_uses => |m| { m.private_uses.push(Reexport { module: "plat".into(), from: vec!["".into()], name: "tu".into(), alias: "sys".into(), cfg_gated: false }); },
             // R99: `mod facade { pub use std::process::Command; }` / `pub type Cmd = …` — seeded into
             // EVERY file's `use` map, so a change re-resolves `facade::Command::new` in other files.
             mod_aliases => |m| { m.mod_aliases.insert("facade::Command".into(), "std::process::Command".into()); },
