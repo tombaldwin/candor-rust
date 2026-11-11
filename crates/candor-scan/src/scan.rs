@@ -2938,6 +2938,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // The surviving declaration units, for the report's `declaration` key (R894).
     let decl_quals: std::collections::HashSet<String> =
         fns.iter().filter(|f| f.extern_decl).map(|f| f.qual.clone()).collect();
+    // SOUNDNESS R1675 — every module path the scan's own quals sit under (each proper prefix of a unit qual).
+    let qual_mods: HashSet<String> = fns
+        .iter()
+        .flat_map(|f| {
+            let segs: Vec<&str> = f.qual.split("::").collect();
+            (1..segs.len()).map(move |i| segs[..i].join("::")).collect::<Vec<_>>()
+        })
+        .collect();
     let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
     let mut by_tail2: HashMap<String, Vec<String>> = HashMap::new();
     // SOUNDNESS R1157 — macro-made primitive operator impl units by tail2 (`FnInfo::mbe_prim_op`).
@@ -5429,7 +5437,40 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if t != &f.qual {
                         calls.entry(f.qual.clone()).or_default().insert(t.clone());
                     }
-                } else if let Some(t) = arm_exact_target(&c.path, &by_tail2) {
+                } else if let Some(t) = arm_exact_target(&c.path, &by_tail2).filter(|t| {
+                    // SOUNDNESS R1675 — a claimant that accounts for only a TAIL of the written path, where the head the source
+                    // wrote before it names no module of this scan. polling 3.x: `self.poller: sys::Poller`, `sys` bound by
+                    // `use kqueue as sys` inside `cfg_if!` (hidden from the scan), formed `sys::Poller::wait_deadline`, and the
+                    // ranked pass settled it on the ROOT `Poller::wait_deadline` (the public wrapper, a cycle) — never the
+                    // platform arm that performs the syscall. The written head says the callee is elsewhere; the scan cannot
+                    // say where, so the tail keeps its refusal and `ambiguous:` hedge. Kill switch `CANDOR_R1675_OFF`.
+                    if candor_report::env::switch("CANDOR_R1675_OFF") {
+                        return true;
+                    }
+                    let mut rel = c.path.as_str();
+                    while let Some(r) = rel.strip_prefix("crate::").or_else(|| rel.strip_prefix("self::")).or_else(|| rel.strip_prefix("super::")) {
+                        rel = r;
+                    }
+                    match rel.strip_suffix(t.as_str()).and_then(|h| h.strip_suffix("::")) {
+                        Some(head)
+                            if !head.is_empty()
+                                && !t.ends_with(&format!("::{rel}"))
+                                && !qual_mods.contains(head)
+                                // an EXTERNAL head (`proc_macro::Span::start`, a dependency's path) is not this rule's: the
+                                // claimant was never the callee, and the hedge would be a false `ambiguous:` (measured: 3,200
+                                // refusals over 83 entries, proc-macro2's `proc_macro::*` wrappers the bulk of them).
+                                && !head.split("::").next().is_some_and(|r| {
+                                    manifest_deps.contains(r) || matches!(r, "std" | "core" | "alloc" | "proc_macro" | "test")
+                                }) =>
+                        {
+                            if candor_report::env::trace("CANDOR_R1675_INSTR") {
+                                eprintln!("R1675REFUSE\t{}\t{}\t{t}", f.qual, c.path); // §E1 REACH COUNTER
+                            }
+                            false
+                        }
+                        _ => true,
+                    }
+                }) {
                     // SOUNDNESS R452 (a) — THE WRITTEN PATH NAMES ONE OF THE CLAIMANTS, so the tail's
                     // ambiguity is this INDEX's, not the program's. `resolve_target` keys on the
                     // 2-segment tail and refuses a tail several definitions claim, because linking a

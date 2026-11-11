@@ -4512,7 +4512,12 @@ impl<'a> CallCollector<'a> {
         let candidate = args.iter().any(|a| {
             a != "_" && a != "'" && !a.is_empty() && {
                 let al = a.rsplit("::").next().unwrap_or(a);
-                std_io_handle(a).is_some() || self.returns.contains_key(&crate::model::impl_fn_key(al, outer))
+                std_io_handle(a).is_some()
+                    || self.returns.contains_key(&crate::model::impl_fn_key(al, outer))
+                    // SOUNDNESS R1657 stage 1b (UFCS deref; row ID to be assigned) — or a BOUNDED type parameter of this impl/fn: the instantiation is the caller's type, so
+                    // `outer` dispatches through its bound (dashmap `serialize_impl!` over `V: Serialize`, a twin `Ref`).
+                    || (!candor_report::env::switch("CANDOR_R1657B_OFF")
+                        && self.generic_bounds.get(a).or_else(|| self.impl_generic_bounds.get(a)).is_some_and(|b| !b.is_empty()))
             }
         });
         if !candidate {
@@ -13234,6 +13239,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        // SOUNDNESS R1657 stage 1b (UFCS deref; row ID to be assigned) — `Deref::deref(x).m()` / `DerefMut::deref_mut(x).m()` is `x.deref().m()`: the UFCS spelling left the
+        // receiver untyped, so a method on a deref target that is an impl type PARAMETER formed no bound dispatch and no
+        // disclosure (dashmap's `serialize_impl!`: `std::ops::Deref::deref(self).serialize(serializer)` under `V: Serialize`
+        // read ABSENT with no `dispatchesOn` key on every arm, while `self.deref().serialize(s)` carried
+        // `serde#Serialize::serialize`). The call is visited in the method spelling. Kill switch `CANDOR_R1657B_OFF`.
+        if let Some(m) = ufcs_deref_as_method(node).filter(|_| !candor_report::env::switch("CANDOR_R1657B_OFF")) {
+            if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                eprintln!("R1657UFCSDEREF\t{}\t.{}", self.modpath, node.method); // §E1 REACH COUNTER
+            }
+            let leaked: &'ast syn::ExprMethodCall = Box::leak(Box::new(m));
+            return self.visit_expr_method_call(leaked);
+        }
         let self_disp_start = self.calls.len(); // SOUNDNESS R1420(a) — see `self_disp`
         self.note_container_release(node); // SOUNDNESS R1118
         let fd_site = fd_prov_site(); // F3 — this call site, for the provenance of every key it mints
@@ -17430,6 +17447,36 @@ thread_local! {
 /// EXACT-FIRST — the typer's answer as a definition qual, when it is one: crate-ANCHORED (`crate::fallback::Ident`, so
 /// measured from the crate root, the property `arm_exact_target`'s exact pass rests on), a plain run of identifiers
 /// (no generic arguments, no `#[cfg]` alias arms, no body-item sentinel). Returns it with `crate::` stripped.
+/// SOUNDNESS R1657 stage 1b (UFCS deref; row ID to be assigned) — `node` with a UFCS `Deref::deref(x)` / `DerefMut::deref_mut(x)` receiver rewritten to `(x).deref()` /
+/// `(x).deref_mut()`, or `None` when the receiver is not that spelling.
+fn ufcs_deref_as_method(node: &syn::ExprMethodCall) -> Option<syn::ExprMethodCall> {
+    let syn::Expr::Call(c) = peel_recv(&node.receiver) else { return None };
+    let syn::Expr::Path(p) = &*c.func else { return None };
+    if p.qself.is_some() || c.args.len() != 1 {
+        return None;
+    }
+    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    let n = segs.len();
+    let m = match (n >= 2).then(|| (segs[n - 2].as_str(), segs[n - 1].as_str())) {
+        Some(("Deref", "deref")) => "deref",
+        Some(("DerefMut", "deref_mut")) => "deref_mut",
+        _ => return None,
+    };
+    let arg = c.args.first()?.clone();
+    let recv = syn::Expr::MethodCall(syn::ExprMethodCall {
+        attrs: Vec::new(),
+        receiver: Box::new(syn::Expr::Paren(syn::ExprParen { attrs: Vec::new(), paren_token: Default::default(), expr: Box::new(arg) })),
+        dot_token: Default::default(),
+        method: syn::Ident::new(m, p.path.segments.last()?.ident.span()),
+        turbofish: None,
+        paren_token: Default::default(),
+        args: Default::default(),
+    });
+    let mut out = node.clone();
+    out.receiver = Box::new(recv);
+    Some(out)
+}
+
 pub(crate) fn exact_anchored_ty(ty: &str) -> Option<&str> {
     let q = ty.strip_prefix("crate::")?;
     let ident = |s: &str| {

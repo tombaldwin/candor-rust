@@ -40,7 +40,7 @@ fn scan(dir: &Path, policy: Option<&str>, off: bool) -> (i32, serde_json::Value)
         std::fs::write(&pf, p).unwrap();
         cmd.arg("--policy").arg(&pf);
     }
-    for v in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1657B_OFF", "CANDOR_R1657_OFF", "CANDOR_R1624_OFF"] {
+    for v in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1657B_OFF", "CANDOR_R1657_OFF", "CANDOR_R1624_OFF", "CANDOR_R1675_OFF"] {
         cmd.env_remove(v);
     }
     if off {
@@ -205,5 +205,45 @@ fn r1657b_a_guessed_hop_that_settles_on_the_caller_is_disclosed() {
     assert!(why(&v, "hy::regex::Regex::reset_cache").iter().any(|w| w.contains("DFA::reset_cache")), "names the lost callee:\n{v:#}");
     let (code, _) = scan(&d, Some("deny Unknown hy::regex::Regex::reset_cache"), false);
     assert_eq!(code, 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn r1675_a_tail_claimant_under_an_unknown_written_head_is_disclosed() {
+    // Fixture `p1` (polling 3.x's shape): `mod kq; use kq as sys;` emitted by a macro, so `sys` is hidden from the scan; the
+    // root `Poller::wait` calls `self.poller.wait()` on `poller: sys::Poller`. Published 0.41.3, f6c278e8 and the first 1b cut
+    // all settled `sys::Poller::wait` on the ROOT `Poller::wait` (itself) and read the unit ABSENT over a write (executed).
+    let d = fixture(
+        "r1675",
+        &[
+            ("main.rs", "macro_rules! select { () => { mod kq; use kq as sys; } }\nselect!();\npub struct Poller { poller: sys::Poller }\nimpl Poller {\n    pub fn new() -> Poller { Poller { poller: sys::Poller } }\n    pub fn wait(&self) -> u8 { self.poller.wait() }\n}\nfn main() {}\n"),
+            ("kq.rs", &format!("pub struct Poller;\nimpl Poller {{ pub fn wait(&self) -> u8 {{ {W} 1 }} }}\n")),
+        ],
+    );
+    let (_, v) = scan(&d, None, false);
+    assert_eq!(inferred(&v, "Poller::wait"), vec!["Unknown"], "disclosed, never absent:\n{v:#}");
+    let (code, _) = scan(&d, Some("deny Unknown Poller::wait"), false);
+    assert_eq!(code, 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn r1657b_a_ufcs_deref_receiver_dispatches_through_the_bound() {
+    // Fixture `e1` (dashmap 5.5 `serialize_impl!`'s shape): `std::ops::Deref::deref(self).show()` in a macro-made impl body under
+    // `V: Show`. Published 0.41.3, f6c278e8 and the first 1b cut read `via_ref`/`via_solo` ABSENT over a write (executed): the
+    // UFCS spelling left the deref target untyped. Twin `Ref`s (`a`, `b`) and a unique `Solo` both charge now.
+    let d = fixture(
+        "ufcsderef",
+        &[(
+            "main.rs",
+            &format!("pub trait Show {{ fn show(&self); }}\npub struct Loud;\nimpl Show for Loud {{ fn show(&self) {{ {W} }} }}\npub mod a {{ pub struct Ref<V> {{ pub v: V }} impl<V> std::ops::Deref for Ref<V> {{ type Target = V; fn deref(&self) -> &V {{ &self.v }} }} }}\npub mod b {{ pub struct Ref<V> {{ pub v: V }} impl<V> std::ops::Deref for Ref<V> {{ type Target = V; fn deref(&self) -> &V {{ &self.v }} }} }}\npub mod c {{ pub struct Solo<V> {{ pub v: V }} impl<V> std::ops::Deref for Solo<V> {{ type Target = V; fn deref(&self) -> &V {{ &self.v }} }} }}\nmacro_rules! show_impl {{ () => {{ fn show(&self) {{ std::ops::Deref::deref(self).show() }} }}; }}\nimpl<V: Show> Show for a::Ref<V> {{ show_impl! {{}} }}\nimpl<V: Show> Show for b::Ref<V> {{ show_impl! {{}} }}\nimpl<V: Show> Show for c::Solo<V> {{ show_impl! {{}} }}\npub fn via_ref(r: &a::Ref<Loud>) {{ r.show() }}\npub fn via_solo(s: &c::Solo<Loud>) {{ s.show() }}\nfn main() {{}}\n"),
+        )],
+    );
+    let (_, v) = scan(&d, None, false);
+    for f in ["via_ref", "via_solo"] {
+        assert_eq!(inferred(&v, f), vec!["Env", "Fs"], "`{f}` writes (executed):\n{v:#}");
+    }
+    let (_, off) = scan(&d, None, true);
+    assert!(inferred(&off, "via_solo").is_empty(), "OFF: the pre-fix silence:\n{off:#}");
     let _ = std::fs::remove_dir_all(&d);
 }
