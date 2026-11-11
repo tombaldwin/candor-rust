@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev165 (rustagent-r1661): SOUNDNESS R1661 — Pass B's cached `calls` change: a `crate::`-rooted receiver base forms no
+    // dependency provenance marker, so the untyped-receiver floor discloses. A rev163 entry replays the silence warm.
     // rev163 (rustagent-fxg): SOUNDNESS R1658/R1659 — Pass A's decl index files a `withdrawn_retgen_key` marker (in `scan.rs`, from
     // `rets`' withdrawn positions) and Pass B's cached `calls`/`refusals` change (a field accessor over a std handle is typed; a
     // withdrawn twin accessor discloses). A rev162 entry replays the silence warm. Mandatory.
@@ -619,7 +621,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev163/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev165/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -11445,6 +11445,18 @@ impl<'a> CallCollector<'a> {
                             return None;
                         }
                         let (root, rest) = t.split_once("::")?;
+                        // SOUNDNESS R1661 — a `crate::`-rooted type is this crate's own (the comment above), never a
+                        // dependency's: rooting a provenance at `crate` formed an inert `crate::<untyped>::..` marker that no
+                        // dependency answers, and `note_untyped_method` counted it as a formed call, so the R1095
+                        // `dispatch:untyped receiver` floor stood down. EXECUTED (lane fixture `m2x`): `s.f.0.go()` with `s:
+                        // &crate::m::S` read ABSENT over a write on 0.41.3. Answering None leaves the floor to disclose.
+                        // Kill switch `CANDOR_R1661_OFF`.
+                        if root == "crate" && !candor_report::env::switch("CANDOR_R1661_OFF") {
+                            if candor_report::env::trace("CANDOR_R1661_INSTR") {
+                                eprintln!("R1661CRATEPROV\t{t}"); // §E1 REACH
+                            }
+                            return None;
+                        }
                         format!("{root}::{TYPE_PROV_SEG}::{rest}")
                     }
                     None => self.dep_value_provenance(&f.base)?,
