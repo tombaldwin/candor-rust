@@ -7930,7 +7930,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // kept this caller hedged. Without this, the removal turned a hedged caller into an absent one (EXECUTED shape:
             // a generic `E::delete_by_id(id).exec(db)` with no lock-pinned source, reached through an untyped field).
             let r1605_unknown = |u: &String| r1605_reach.get(u).is_some_and(|b| !b.is_empty());
-            let impure: Vec<&String> = cands
+            let mut impure: Vec<&String> = cands
                 .iter()
                 .filter(|u| {
                     inferred.get(*u).is_some_and(|e| e.iter().any(|x| *x != "Unknown"))
@@ -7942,6 +7942,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         || r1605_unknown(u)
                 })
                 .collect();
+            // SOUNDNESS R1666 — THE RESIDUAL THE FLOOR STATED, CLOSED FOR A NAME STD DOES NOT HAVE. A candidate whose ONLY effect is
+            // `Unknown` (basic-toml's `Error::fix_offset`, hedged through a callback) was excluded because the std-trait names
+            // (`hash`, `clone`, `as_ref`, `to_tokens`) dominated the 5.95% measurement. Those are std names; a method std has no
+            // member of that name for is not one of them. So an `Unknown`-only candidate counts where `leaf` is no std method
+            // name (`std_methods`, generated from rust-src). The untyped call to a crate method that is hedged all the way down
+            // read ABSENT at the caller (EXECUTED, lane fixture `f66`). Kill switch `CANDOR_R1666_OFF`.
+            if impure.is_empty() {
+                let unknown_only: Vec<&String> =
+                    cands.iter().filter(|u| inferred.get(*u).is_some_and(|e| !e.is_empty() && e.iter().all(|x| *x == "Unknown"))).collect();
+                if !unknown_only.is_empty() && !*admit_unknown {
+                    let std_name = crate::std_methods::is_std_method_name(leaf);
+                    let cb = unknown_only.iter().any(|u| unknown_why.get(*u).is_some_and(|w| w.iter().any(|x| x.starts_with("callback"))));
+                    if candor_report::env::trace("CANDOR_R1666_INSTR") && !direct.get(caller).is_some_and(|d| d.contains("Unknown")) {
+                        eprintln!("R1666ALL\t{caller}\t{leaf}"); // §E1 REACH COUNTER: every Unknown-only site (the declined form)
+                        if !std_name {
+                            eprintln!("R1666NOSTD\t{caller}\t{leaf}");
+                            if cb {
+                                eprintln!("R1666CB\t{caller}\t{leaf}");
+                            }
+                        }
+                    }
+                    if !std_name && !candor_report::env::switch("CANDOR_R1666_OFF") {
+                        impure = unknown_only;
+                    }
+                }
+            }
             if impure.is_empty() {
                 continue;
             }
