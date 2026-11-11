@@ -11715,6 +11715,23 @@ impl<'a> CallCollector<'a> {
                     return Some((name, Vec::new(), None));
                 }
             }
+            // SOUNDNESS R1667 (third spelling) — the ONE-segment form, `use dep::Data; Data::Struct(v)`, beside a crate-local
+            // `enum Data { Struct(..) }` in another module: the `Enum\u{1e}Variant` index is keyed by the written LEAF, so the
+            // local enum's payload typed `v` on every arm. EXECUTED (lane fixtures `depenum1a`/`depenum1b`): charged the local
+            // `Fields::uses`' `Fs` over a pure dependency impl, and ABSENT over an effectful one. Left untyped ONLY where that
+            // local key exists and the written name resolves to a dependency, so a dependency enum no local enum shadows
+            // (syn's `TokenTree::Group(g)`) keeps the typing the routes below give it.
+            if let Some(en) = tuple_variant_path(pat).filter(|w| !w.contains("::")) {
+                if self.enum_variants.contains_key(&format!("{en}\u{1e}{leaf}")) {
+                    let full = self.expand_scoped(&en);
+                    if !full.starts_with("crate::") && full.contains("::") && self.is_dependency_type(&full) {
+                        if candor_report::env::trace("CANDOR_R1657_INSTR") {
+                            eprintln!("R1667DEPENUM1\t{full}\t{leaf}"); // §E1 REACH
+                        }
+                        return Some((name, Vec::new(), None));
+                    }
+                }
+            }
         }
         let leaves = self.enum_variant_traits.get(&leaf).cloned().unwrap_or_default();
         // VEIN A — a pattern that NAMES its enum is typed by that enum's own variant first (see the

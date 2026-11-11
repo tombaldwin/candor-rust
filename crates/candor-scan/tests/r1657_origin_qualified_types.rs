@@ -394,6 +394,42 @@ pub fn localenum_zq(d: &ast::Data) {{ match d {{ ast::Data::Struct(v) => v.uses(
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// SOUNDNESS R1667 (third spelling) — the ONE-segment dependency enum pattern, `use dep::Data; Data::Struct(v)`, beside a local
+/// `ast::Data { Struct(Fields) }`. EXECUTED (lane fixtures `depenum1a`, `depenum1b`, `cargo run`): on bb24901 and before, `v` was
+/// typed by the local enum's payload, so the caller was charged the local `Fields::uses`' `Fs` over a pure dependency impl (a) and
+/// read ABSENT over an effectful one (b). Now untyped, so the untyped-receiver floor discloses; `CANDOR_R1667_OFF` restores both.
+#[test]
+fn r1667_a_one_segment_dependency_enum_pattern_is_not_typed_by_a_local_same_leaf_enum() {
+    for (tag, local_writes) in [("a", true), ("b", false)] {
+        let base = std::env::temp_dir().join(format!("candor-r1667-depenum1{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("dep/src")).unwrap();
+        std::fs::create_dir_all(base.join("app/src")).unwrap();
+        std::fs::write(base.join("dep/Cargo.toml"), "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::write(base.join("dep/src/lib.rs"), "pub struct DataStruct; pub enum Data { Struct(DataStruct), Other(u8) }\n").unwrap();
+        std::fs::write(base.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\ndep = { path = \"../dep\" }\n").unwrap();
+        let (lw, dw) = if local_writes { (W, "") } else { ("", W) };
+        std::fs::write(base.join("app/src/lib.rs"), format!("pub mod ast {{ pub struct Fields; impl Fields {{ pub fn uses(&self) {{ {lw} }} }}\n\
+pub enum Data {{ Struct(Fields), Other(u8) }} }}\npub trait Uses {{ fn uses(&self); }}\nimpl Uses for dep::DataStruct {{ fn uses(&self) {{ {dw} }} }}\n\
+pub mod user {{ use crate::Uses; use dep::Data;\n\
+pub fn onesegment_zq(d: &Data) {{ match d {{ Data::Struct(v) => v.uses(), Data::Other(_) => {{}} }} }} }}\n")).unwrap();
+        let f = "user::onesegment_zq";
+        let (_, on) = scan(&base.join("app"), None, false);
+        assert_eq!(inferred(&on, f), ["Unknown"], "{tag}: {on:#}");
+        assert!(why(&on, f).iter().any(|w| w.starts_with("dispatch:untyped receiver of `uses`")), "{tag}: {on:#}");
+        let out = Command::new(bin()).arg(base.join("app").to_string_lossy().as_ref()).arg("--json")
+            .env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY").env("CANDOR_R1667_OFF", "1")
+            .output().expect("run candor-scan");
+        let off: serde_json::Value = serde_json::from_slice(&out.stdout).expect("report json");
+        if local_writes {
+            assert!(inferred(&off, f).contains(&"Fs".to_string()), "CANDOR_R1667_OFF restores the fabrication {off:#}");
+        } else {
+            assert!(inferred(&off, f).is_empty(), "CANDOR_R1667_OFF restores the silence {off:#}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
 /// SOUNDNESS R1660 — a chain hop whose DECLARED return was withdrawn (same-leaf twins declare different returns) is a guessed
 /// hop, like one declared to return another type (R1663). lettre's `conn.unpark().abort()`: sync `ParkedConnection::unpark ->
 /// SmtpConnection` beside an async twin of the same leaf. Once R1657 typed `conn` to its own module's twin, the `ambiguous:` hedge
