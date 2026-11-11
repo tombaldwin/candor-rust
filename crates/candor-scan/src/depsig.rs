@@ -36,6 +36,8 @@ use crate::*;
 
 #[path = "depsig_strict.rs"]
 mod strict;
+#[path = "depsig_probe.rs"]
+mod probe;
 
 /// The std-witness traits (`model::STD_WITNESS_TRAITS` leaves) a body bounded by `bound` can reach on the value.
 /// `Some(empty)` for a MARKER bound that runs nothing; `None` for a bound this table does not know.
@@ -428,6 +430,16 @@ fn ty_leaf(t: &syn::Type) -> Option<String> {
     }
 }
 
+/// REVIEW7 D2 — attribute names that bring no item into scope, and the std derives (hoisted for SOUNDNESS R1627's consumer reading)
+const INERT: &[&str] = &["cfg", "allow", "warn", "deny", "forbid", "expect", "doc", "inline", "cold", "must_use", "deprecated",
+    "repr", "non_exhaustive", "macro_export", "macro_use", "automatically_derived", "track_caller", "no_mangle", "export_name",
+    "link", "link_name", "link_section", "used", "test", "ignore", "should_panic", "rustfmt", "clippy", "allow_internal_unstable",
+    "unstable", "stable", "rustc_const_stable", "feature", "diagnostic", "derive", "target_feature", "no_std", "no_implicit_prelude",
+    "recursion_limit", "crate_type", "crate_name", "doc_cfg", "global_allocator", "panic_handler", "naked", "instruction_set",
+    "debugger_visualizer", "collapse_debuginfo", "coverage", "optimize", "windows_subsystem", "type_length_limit", "no_main",
+    "proc_macro", "proc_macro_derive", "proc_macro_attribute"];
+const STD_DERIVES: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Default"];
+
 /// SOUNDNESS R1192 — the crate-wide facts the per-ITEM rules read, built once per dependency source.
 struct SrcIndex {
     files: Vec<syn::File>,
@@ -716,14 +728,6 @@ impl SrcIndex {
 
     /// REVIEW7 D2 — does this source contain anything that may bring items into scope that the parse cannot see?
     fn has_unseen_items(&self) -> bool {
-        const INERT: &[&str] = &["cfg", "allow", "warn", "deny", "forbid", "expect", "doc", "inline", "cold", "must_use", "deprecated",
-            "repr", "non_exhaustive", "macro_export", "macro_use", "automatically_derived", "track_caller", "no_mangle", "export_name",
-            "link", "link_name", "link_section", "used", "test", "ignore", "should_panic", "rustfmt", "clippy", "allow_internal_unstable",
-            "unstable", "stable", "rustc_const_stable", "feature", "diagnostic", "derive", "target_feature", "no_std", "no_implicit_prelude",
-            "recursion_limit", "crate_type", "crate_name", "doc_cfg", "global_allocator", "panic_handler", "naked", "instruction_set",
-            "debugger_visualizer", "collapse_debuginfo", "coverage", "optimize", "windows_subsystem", "type_length_limit", "no_main",
-            "proc_macro", "proc_macro_derive", "proc_macro_attribute"];
-        const STD_DERIVES: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Default"];
         struct V<'a>(bool, &'a SrcIndex);
         impl<'a, 'b> Visit<'b> for V<'a> {
             fn visit_attribute(&mut self, a: &'b syn::Attribute) {
@@ -1714,6 +1718,8 @@ pub(crate) struct DepSigs {
     /// the lock-pinned sources this scan READ to type a value, by package, with how many call sites each typed — the
     /// report's `dependencySources`
     pub(crate) consulted: std::collections::BTreeMap<String, DepSource>,
+    /// SOUNDNESS R1627 — `probe_clear` answers, per (consumer dir, method)
+    probes: HashMap<(String, String), Result<(), String>>,
 }
 
 /// SOUNDNESS R1578 — one dependency source the scan read to type a value (the report's `dependencySources` element).
@@ -2361,6 +2367,8 @@ impl DepSigs {
                     'o' => 0,
                     'r' => 1,
                     'm' => 2,
+                    // SOUNDNESS R1627 — any receiver form: the caller proved no trait in scope supplies the method
+                    'a' => 4,
                     _ => {
                         self.say("ret", alias, callee, 0, "form?");
                         return None;
@@ -2387,8 +2395,8 @@ impl DepSigs {
                     if !matches!(c.site, Site::Inherent(Some(_))) {
                         return Err(());
                     }
-                    let want = if k == 3 { None } else { Some(k) };
-                    if c.recv != want {
+                    let ok = if k == 4 { c.recv.is_some() } else { c.recv == if k == 3 { None } else { Some(k) } };
+                    if !ok {
                         return Ok(None);
                     }
                 }
@@ -2945,6 +2953,14 @@ fn cand_returns(c: &Cand<'_>, _pos: usize) -> Result<Option<BTreeSet<String>>, (
         match t {
             syn::Type::Paren(p) => t = &p.elem,
             syn::Type::Group(g) => t = &g.elem,
+            // SOUNDNESS R1627 — `&mut Self` / `&Self` (a builder step): the OUTERMOST layer only, over a plain nominal (`M` / `S`)
+            syn::Type::Reference(r) if wraps.is_empty() && !candor_report::env::switch("CANDOR_R1627_OFF") => {
+                wraps.push(if r.mutability.is_some() { 'M' } else { 'S' });
+                t = &r.elem;
+                if matches!(t, syn::Type::Path(p) if p.path.segments.last().is_some_and(|l| l.ident == "Result" || l.ident == "Option")) {
+                    return Ok(None);
+                }
+            }
             syn::Type::Path(p) if p.qself.is_none() && p.path.leading_colon.is_none() => {
                 let last = p.path.segments.last().ok_or(())?;
                 let leaf = last.ident.to_string();

@@ -237,7 +237,7 @@ fn attrs_of(attrs: &[syn::Attribute]) -> Attrs {
 #[derive(Debug)]
 enum Bind {
     /// a struct / enum / union / trait, with its generic parameter count and whether it is conditional
-    Nominal { params: usize, cond: bool, public: bool },
+    Nominal { params: usize, cond: bool, public: bool, tr: bool },
     Alias { target: Option<Vec<String>>, cond: bool, public: bool },
     Use { path: Vec<String>, cond: bool, public: bool },
     Mod { cond: bool, public: bool },
@@ -380,10 +380,10 @@ impl ModTable {
             };
             let bind = |s: &mut ModTable, n: String, b: Bind| s.binds.entry((m.to_string(), n)).or_default().push(b);
             match it {
-                syn::Item::Struct(i) => bind(self, i.ident.to_string(), Bind::Nominal { params: i.generics.params.len(), cond, public }),
-                syn::Item::Enum(i) => bind(self, i.ident.to_string(), Bind::Nominal { params: i.generics.params.len(), cond, public }),
-                syn::Item::Union(i) => bind(self, i.ident.to_string(), Bind::Nominal { params: i.generics.params.len(), cond, public }),
-                syn::Item::Trait(i) => bind(self, i.ident.to_string(), Bind::Nominal { params: i.generics.params.len(), cond, public }),
+                syn::Item::Struct(i) => bind(self, i.ident.to_string(), Bind::Nominal { params: i.generics.params.len(), cond, public, tr: false }),
+                syn::Item::Enum(i) => bind(self, i.ident.to_string(), Bind::Nominal { params: i.generics.params.len(), cond, public, tr: false }),
+                syn::Item::Union(i) => bind(self, i.ident.to_string(), Bind::Nominal { params: i.generics.params.len(), cond, public, tr: false }),
+                syn::Item::Trait(i) => bind(self, i.ident.to_string(), Bind::Nominal { params: i.generics.params.len(), cond, public, tr: true }),
                 syn::Item::Type(i) => {
                     let target = match &*i.ty {
                         syn::Type::Path(p) if p.qself.is_none() && p.path.leading_colon.is_none() => {
@@ -809,6 +809,14 @@ fn ret_path(output: &syn::ReturnType, generics: &HashSet<String>, self_ty: Optio
         match t {
             syn::Type::Paren(p) => t = &p.elem,
             syn::Type::Group(g) => t = &g.elem,
+            // SOUNDNESS R1627 — a builder step returns `&mut Self` / `&Self`: the OUTERMOST layer only, over a plain nominal (`M` / `S`)
+            syn::Type::Reference(r) if wraps.is_empty() && !candor_report::env::switch("CANDOR_R1627_OFF") => {
+                wraps.push(if r.mutability.is_some() { 'M' } else { 'S' });
+                t = &r.elem;
+                if matches!(t, syn::Type::Path(p) if p.path.segments.last().is_some_and(|l| l.ident == "Result" || l.ident == "Option")) {
+                    return None;
+                }
+            }
             syn::Type::Path(p) if p.qself.is_none() && p.path.leading_colon.is_none() => {
                 let last = p.path.segments.last()?;
                 let leaf = last.ident.to_string();
@@ -929,8 +937,10 @@ impl DepSigs {
                 if !c.public {
                     return Err("private".into());
                 }
-                let want = if k == 3 { None } else { Some(k) };
-                if c.recv != want {
+                // SOUNDNESS R1627 — `need` 4: the consumer proved no trait in scope can supply the method (`probe_clear`), so the
+                // inherent method is the one that runs whatever its receiver form; it must still take a receiver
+                let ok = if k == 4 { c.recv.is_some() } else { c.recv == if k == 3 { None } else { Some(k) } };
+                if !ok {
                     return Err("form".into());
                 }
                 let (w, p) = ret_path(&c.output, &c.generics, Some(&tleaf)).ok_or("ret?")?;
@@ -972,6 +982,43 @@ impl DepSigs {
             eprintln!("R1628UNION\t{path}\t{p}"); // §E1 REACH COUNTER
         }
         Ok(DepRet { is_async: first.is_async, wraps: first.wraps, ty: RetTy::Dep(p) })
+    }
+
+    /// SOUNDNESS R1627 — does the path a consumer `use`s (`rest`, after the crate name) bring NO trait into scope? A module, a
+    /// free fn, or a nominal type that is not a `trait` (through aliases and non-glob `use`s, every arm of a conditional binding):
+    /// `use backoff::ExponentialBackoffBuilder;` names a type, and a type's name carries none of the traits implemented for it.
+    /// `Err(reason)` for every doubt (a glob, a macro-made name, a path this reading cannot follow).
+    pub(super) fn strict_not_trait(&mut self, src: &Path, rest: &[String]) -> Result<(), String> {
+        let idx = self.index(src).ok_or("unreadable")?;
+        if !idx.unparsed.is_empty() {
+            return Err("unparsed".into());
+        }
+        if idx.path_attr {
+            return Err("pathattr".into());
+        }
+        let mt = idx.strict.get_or_init(|| ModTable::build(idx));
+        if mt.unplaced {
+            return Err("unplaced".into());
+        }
+        let (last, pre) = rest.split_last().ok_or("empty")?;
+        if mt.mod_path("", rest).is_some() {
+            return Ok(());
+        }
+        if let Some(m) = mt.mod_path("", pre) {
+            if let Some(v) = mt.fns.get(&(m.clone(), last.clone())) {
+                if !v.is_empty() && !mt.binds.contains_key(&(m, last.clone())) {
+                    return Ok(());
+                }
+            }
+        }
+        let arms = mt.nominals(idx, "", rest, 0).ok_or("nominal?")?;
+        for (dm, leaf, _) in arms {
+            match mt.binds.get(&(dm, leaf)) {
+                Some(v) if !v.is_empty() && v.iter().all(|b| matches!(b, Bind::Nominal { tr: false, .. } | Bind::Alias { .. })) => {}
+                _ => return Err("trait?".into()),
+            }
+        }
+        Ok(())
     }
 
     /// One arm's written return, placed (`strict_ret`).

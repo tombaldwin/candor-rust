@@ -1253,7 +1253,7 @@ pub(crate) fn r1578_resolve(
     for st in parts {
         match st {
             "a" if is_async => is_async = false,
-            "?" | "u" if !is_async && !wraps.is_empty() => {
+            "?" | "u" if !is_async && matches!(wraps.first(), Some('R' | 'O')) => {
                 wraps.remove(0);
             }
             // SOUNDNESS R1619 — `Result::ok` (std's inherent `fn ok(self) -> Option<T>`, the first probe step on an owned
@@ -1261,9 +1261,22 @@ pub(crate) fn r1578_resolve(
             "m:ok" if !is_async && wraps.first() == Some(&'R') && !candor_report::env::switch("CANDOR_R1619_OFF") => {
                 wraps[0] = 'O';
             }
-            m if m.starts_with("m:") && !is_async && wraps.is_empty() => {
+            // SOUNDNESS R1627 — a step that returned `&mut Self` / `&Self` hands the next method a reference receiver
+            m if m.starts_with("m:") && !is_async && (wraps.is_empty() || (matches!(wraps.as_slice(), ['M' | 'S']) && !candor_report::env::switch("CANDOR_R1627_OFF"))) => {
                 let RetTy::Dep(q) = &ty else { return None };
-                let r = sigs.ret_of(dir, cr, cr_real, q, Some((&m[2..], form)))?;
+                match wraps.first() {
+                    Some('M') => form = 'm',
+                    Some('S') => form = 'r',
+                    _ => {}
+                }
+                // SOUNDNESS R1627 — the form rule (R1200's probe) refuses an owned receiver and a `&self` method
+                // (`ExponentialBackoffBuilder::new().build()`); where the consumer provably has no trait in scope that
+                // declares the method, the inherent one is the one that runs whatever the form
+                let mut r = sigs.ret_of(dir, cr, cr_real, q, Some((&m[2..], form)));
+                if r.is_none() && sigs.probe_clear(dir, &m[2..], deps, renames).is_ok() {
+                    r = sigs.ret_of(dir, cr, cr_real, q, Some((&m[2..], 'a')));
+                }
+                let r = r?;
                 (is_async, wraps, ty, form) = (r.is_async, r.wraps, r.ty, 'o');
             }
             _ => return None,
@@ -1273,7 +1286,9 @@ pub(crate) fn r1578_resolve(
         return None;
     }
     match ty {
-        RetTy::Dep(q) if wraps.is_empty() => Some(R1578::Typed { cr: cr.to_string(), method, ty: q }),
+        RetTy::Dep(q) if wraps.is_empty() || (matches!(wraps.as_slice(), ['M' | 'S']) && !candor_report::env::switch("CANDOR_R1627_OFF")) => {
+            Some(R1578::Typed { cr: cr.to_string(), method, ty: q })
+        }
         _ => Some(R1578::Std),
     }
 }
