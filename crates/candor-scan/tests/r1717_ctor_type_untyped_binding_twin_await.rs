@@ -13,7 +13,7 @@
 //!     that is not provably a future, so no `poll` edge and no disclosure (tokio 1.25 `watch::Sender::closed`). R1719: `.await` straight on a
 //!     method call's result (`n.notified().await`) read the receiver's own type, not the declared return, so even the non-twin shape was silent.
 //!
-//! EXECUTED GROUND TRUTH (`cargo run` of `MAIN` over `LIB`, `R1717_OUT=<dir>`): one file per `g*` unit — g1_direct, g1_bound, g1_same, g2_attr,
+//! EXECUTED GROUND TRUTH (`cargo run` of `MAIN` over `LIB`, `R1717_OUT=<dir>`): one file per `g*` unit — g1_direct, g1_bound, g1_same, g1_alias, g2_attr,
 //! g3_let, g3_inline. `PURE` is the same shapes with no effect anywhere; it must stay pure. Kill switches `CANDOR_R1717_OFF`, `CANDOR_R1719_OFF`.
 
 use std::path::{Path, PathBuf};
@@ -69,6 +69,15 @@ impl<'a> Future for Notified<'a> {
 pub mod task { pub struct Notified<S>(pub S); impl<S> Notified<S> { pub fn run(self) {} } }
 pub async fn g3_let(n: &Notify) { let x = n.notified(); x.await; }
 pub async fn g3_inline(n: &Notify) { n.notified().await; }
+
+// CONTROL for (1): a ctor whose declared return is a type ALIAS (`RedisResult<Client>`) is the root type, not the alias (redis 1.7.1 sentinel).
+pub type AliasResult<T> = Result<T, ()>;
+pub struct Cl(pub String);
+impl Cl {
+    pub fn open(t: &str) -> AliasResult<Cl> { Ok(Cl(t.to_string())) }
+    pub fn get_connection(&self) { std::fs::write(out(&self.0), b"x").unwrap(); }
+}
+pub fn g1_alias(t: &str) -> AliasResult<()> { let c = Cl::open(t)?; c.get_connection(); Ok(()) }
 "#;
 
 const PURE: &str = r#"// SOUNDNESS R1717 fixture, PURE TWIN CRATE: every shape of `app`, with no effect anywhere.
@@ -118,7 +127,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
     loop { if let Poll::Ready(v) = f.as_mut().poll(&mut cx) { return v; } }
 }
 fn main() {
-    g1_direct("g1_direct"); g1_bound("g1_bound"); g1_same("g1_same");
+    g1_direct("g1_direct"); g1_bound("g1_bound"); g1_same("g1_same"); g1_alias("g1_alias").unwrap();
     let e = rd::Entry { tag: "g2_attr".into(), f: Box::new(|t| { std::fs::write(out(t), b"x").unwrap(); }) };
     e.attr();
     let _ = wr::Entry { v: vec![] }.attrs().count();
@@ -173,7 +182,7 @@ fn r1717_the_three_silences_are_charged_or_disclosed() {
     let d = fixture("on", LIB);
     let (_, on) = scan(&d, None, false);
     // (1) a ctor whose declaration says another type: the terminal is edged (direct, let-bound), and a ctor that returns `Self` is unchanged.
-    for u in ["g1_direct", "g1_bound", "g1_same"] {
+    for u in ["g1_direct", "g1_bound", "g1_same", "g1_alias"] {
         assert!(strs(&on, u, "inferred").contains(&"Fs".to_string()), "{u}: {on:#}");
     }
     // (2) the std-named method on an untyped binding of a local method's result is disclosed, with the reason that is true.

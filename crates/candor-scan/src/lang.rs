@@ -2016,9 +2016,16 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                 let r1717_declared_other = !candor_report::env::switch("CANDOR_R1717_OFF") && type_like && {
                     let full_ty = expand(ty, uses);
                     let tl = full_ty.rsplit("::").next().unwrap_or(&full_ty);
+                    // …and ONLY where the declared return is a nominal type THIS crate declares (`nominal_key`): a type alias is no
+                    // type (`-> RedisResult<Client>` files `RedisResult`, and typing `let c = Client::open(..)?` as it REMOVED
+                    // `Client::get_connection` from redis 1.7.1's sentinel units — the A/B's CONCRETE LOST rows).
                     !full_ty.contains(crate::decls::ALIAS_ALT_SEP)
-                        && returns.contains_key(&crate::model::impl_ret_key(tl, last))
                         && !returns.contains_key(&crate::model::impl_self_ret_key(tl, last))
+                        && returns.get(&crate::model::impl_ret_key(tl, last)).is_some_and(|r| {
+                            let rl = r.split('<').next().unwrap_or(r);
+                            let rl = rl.rsplit("::").next().unwrap_or(rl);
+                            !r.contains(crate::decls::ALIAS_ALT_SEP) && rl != tl && returns.contains_key(&crate::model::nominal_key(rl))
+                        })
                 };
                 if is_ctor(last) && type_like && !r1717_declared_other {
                     // R807 REACH PROBE — the one name R807 adds, so the A/B can count what it typed.
