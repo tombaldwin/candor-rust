@@ -4164,6 +4164,7 @@ pub(crate) fn fninfo(
         // SOUNDNESS R1286 — see the collector field.
         impl_trait_quals: impl_generics.map(crate::lang::generics_trait_quals).unwrap_or_default(),
         block_field_variants: dup_variants.iter().map(|(p, f, e, n)| (*p, (f, e, n.as_slice()))).collect(),
+        r1608_stopped_vars: Default::default(),
     };
     // SOUNDNESS R1196 — a `Result` PARAMETER's error type (`CallCollector::err_of`), named by the signature; a generic
     // error type (the fn's or the enclosing impl's parameter) is the caller's choice and names nothing.

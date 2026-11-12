@@ -633,6 +633,13 @@ pub(crate) struct CallCollector<'a> {
     /// (`uses[H] = <body-item>H`) for the same span — R119 refuses to promote a name two nested scopes
     /// declare, so without this a receiver of either struct typed as the file's `H`. Empty for every other body.
     pub(crate) block_field_variants: HashMap<usize, (&'a FieldIndex, &'a FieldElemIndex, &'a [String])>,
+    /// SOUNDNESS R1717 — the `let` bindings whose R1608 chain walk STOPPED (a declaration exists but cannot be used: a twin leaf's
+    /// type change, a projection return, ...) and which were therefore left UNTYPED on purpose "so later calls disclose". The
+    /// disclosure is the R1095 judge's, which stands aside for a std-named leaf (`next`, `poll`) and for an `.await`: `let mut a =
+    /// self.attrs(); a.next()?` and `let n = x.notified(); n.await` read ABSENT over a callee that is `Unknown` (gimli
+    /// `DebuggingInformationEntry::attr`, tokio `watch::Sender::closed`). A use of a name in this set goes to the judge as a
+    /// `WRAP_PREFIX` site (an `Unknown`-only candidate counts). `CANDOR_R1717_OFF=1` records nothing.
+    pub(crate) r1608_stopped_vars: std::collections::HashSet<String>,
 }
 
 /// Decode a `self.returns` entry — recorded by `decls::record_return` under a fn's leaf name — into the
@@ -2199,6 +2206,26 @@ impl<'a> CallCollector<'a> {
         .then_some(leaf)
     }
 
+    /// SOUNDNESS R1717 — `local_future_leaf`'s twin refusal, relaxed for `.await`: a leaf declared at two quals where SOME twin
+    /// implements `Future` and not every one does (tokio `sync::notify::Notified` beside `runtime::task::Notified`, which is no
+    /// future). `local_future_leaf` answers `None` ("left as typed"), so `let n = x.notified(); n.await` formed no `poll` edge and
+    /// no disclosure over a `poll` that is `Unknown` (tokio 1.25 `watch::Sender::closed`). An awaited value must be a future, so
+    /// the twins that can be the operand are the ones implementing it; the edge is `Leaf::poll`, which the resolver settles by the
+    /// tail's claimants exactly as it does for the every-twin case. Off with `CANDOR_R1717_OFF=1`.
+    fn partial_twin_future_leaf(&self, t: &str) -> Option<String> {
+        if candor_report::env::switch("CANDOR_R1717_OFF") || self.is_dependency_type(t) || matches!(t.split("::").next(), Some("std" | "core" | "alloc")) {
+            return None;
+        }
+        let head = t.split('<').next().unwrap_or(t);
+        let leaf = head.rsplit("::").next().unwrap_or(head).to_string();
+        let twin = self.assign_drop.twin_leaves.is_none_or(|t| t.contains(&leaf))
+            || self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}*"));
+        (twin
+            && self.trait_impls.get("Future").is_some_and(|v| v.contains(&leaf))
+            && !self.returns.contains_key(&crate::model::async_ret_key(&leaf)))
+        .then_some(leaf)
+    }
+
     /// SOUNDNESS R1286 — is the receiver bound `tr` (its expanded spelling `full`, `recv_trait_full`) std's I/O trait? A
     /// rooted spelling answers itself (`lang::is_std_io_trait`). A BARE leaf nothing rooted — no `use`, and the crate's
     /// written qualifications tombstoned or absent — is std's only where this scope globs `std::io` or its prelude
@@ -3413,7 +3440,14 @@ impl<'a> CallCollector<'a> {
         if candor_report::env::trace("CANDOR_R1095_INSTR") {
             eprintln!("R1095SITE\t{leaf}"); // §E1 REACH PROBE — a site, before the candidate judgement
         }
-        if inert_roots.is_empty() {
+        let r1717_stopped = !self.r1608_stopped_vars.is_empty()
+            && matches!(peel_recv(&node.receiver), syn::Expr::Path(p) if p.path.get_ident().is_some_and(|i| self.r1608_stopped_vars.contains(&i.to_string())));
+        if r1717_stopped && inert_roots.is_empty() {
+            if candor_report::env::trace("CANDOR_R1717_INSTR") {
+                eprintln!("R1717SITE\t.{leaf}"); // §E1 REACH COUNTER
+            }
+            self.untyped_methods.insert(format!("{}{leaf}", crate::lazy::WRAP_PREFIX));
+        } else if inert_roots.is_empty() {
             self.untyped_methods.insert(leaf.to_string());
         } else {
             self.untyped_methods.insert(format!("{}{}\u{1}{leaf}", crate::lazy::INERT_MARK_PREFIX, inert_roots.join(",")));
@@ -13398,6 +13432,46 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 None => self.push_coercion_edge(&l, "poll", "Future"),
             }
         }
+        // SOUNDNESS R1717 — `.await` of a binding the R1608 walk left untyped on purpose: the `poll` it runs is of a type no route
+        // named, so it is a call on an untyped receiver (see `r1608_stopped_vars`).
+        if !self.r1608_stopped_vars.is_empty() {
+            if let syn::Expr::Path(p) = b {
+                if p.path.get_ident().is_some_and(|i| self.r1608_stopped_vars.contains(&i.to_string())) {
+                    if candor_report::env::trace("CANDOR_R1717_INSTR") {
+                        eprintln!("R1717SITE\t.await");
+                    }
+                    self.untyped_methods.insert(format!("{}poll", crate::lazy::WRAP_PREFIX));
+                }
+            }
+        }
+        // SOUNDNESS R1719 — `.await` directly on a METHOD CALL's result (`x.notified().await`, `self.sleep(d).await` with `sleep -> Sleep`):
+        // the operand's type reads from the call's DECLARED return (`type_of`), where `resolve_recv_type`'s chain walk guessed the
+        // receiver's own type (`Notify`, no future), so the `poll` the await runs formed no edge and no disclosure (EXECUTED fixture
+        // `closed_inline`: the same value bound by `let` first charged). Off with `CANDOR_R1719_OFF=1`.
+        if let (syn::Expr::MethodCall(_), false) = (b, candor_report::env::switch("CANDOR_R1719_OFF")) {
+            if let Some(t) = self.type_of(b) {
+                let head = t.split('<').next().unwrap_or(&t).to_string();
+                let l = self.local_future_leaf(&t).or_else(|| self.partial_twin_future_leaf(&t));
+                if let Some(l) = l {
+                    if candor_report::env::trace("CANDOR_R1719_INSTR") {
+                        eprintln!("R1719AWAIT\t{head}"); // §E1 REACH COUNTER
+                    }
+                    match head.strip_prefix("crate::") {
+                        Some(q) if self.local_future_leaf(&t).is_some() => self.push_coercion_edge(q, "poll", "Future"),
+                        _ => self.push_coercion_edge(&l, "poll", "Future"),
+                    }
+                }
+            }
+        }
+        if let Some(l) = (!matches!(b, syn::Expr::Field(_)))
+            .then(|| self.resolve_recv_type(b).filter(|t| self.local_future_leaf(t).is_none()).and_then(|t| self.partial_twin_future_leaf(&t)))
+            .flatten()
+        {
+            if candor_report::env::trace("CANDOR_R1717_INSTR") {
+                eprintln!("R1717TWINAWAIT\t{l}"); // §E1 REACH COUNTER
+            }
+            self.push_coercion_edge(&l, "poll", "Future");
+        }
         syn::visit::visit_expr_await(self, node);
     }
 
@@ -16587,6 +16661,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             // left untyped here too: `type_of` would answer the same chain from facts the walk refuses (a
                             // projection return, a twin leaf's type change) and a wrong local type is a silent typed miss.
                             let r1608_stopped = self.with_pre_bindings(&pre_bindings, |s| s.r1608_stopped(&init.expr));
+                            self.r1608_stopped_vars.remove(&id.ident.to_string());
+                            if r1608_stopped && !candor_report::env::switch("CANDOR_R1717_OFF") {
+                                self.r1608_stopped_vars.insert(id.ident.to_string());
+                            }
                             if let Some(t) = (!r1608_stopped)
                                 .then(|| self.with_pre_bindings(&pre_bindings, |s| s.type_of(&init.expr)))
                                 .flatten()
@@ -16648,6 +16726,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 // answers. Only on that withdrawn-return evidence: an init that is merely unanswerable keeps
                                 // today's behaviour (the R536 measurement below is why a blanket clear is wrong).
                                 self.vars.remove(&id.ident.to_string());
+                                if !candor_report::env::switch("CANDOR_R1717_OFF") {
+                                    self.r1608_stopped_vars.insert(id.ident.to_string());
+                                }
+                            }
+                            // SOUNDNESS R1717 — …and a binding of a crate-local METHOD's result that no route typed (a twin type leaf
+                            // makes the declared return ambiguous): its later uses are calls on a value this crate's own
+                            // declaration produced, not on std's.
+                            if !self.vars.contains_key(&id.ident.to_string())
+                                && !candor_report::env::switch("CANDOR_R1717_OFF")
+                                && matches!(peel_recv(&init.expr), syn::Expr::MethodCall(mc)
+                                    if self.returns.contains_key(&crate::model::any_method_key(&mc.method.to_string())))
+                            {
+                                if candor_report::env::trace("CANDOR_R1717_INSTR") {
+                                    eprintln!("R1717BIND\t{}", id.ident);
+                                }
+                                self.r1608_stopped_vars.insert(id.ident.to_string());
                             }
                         }
                         }

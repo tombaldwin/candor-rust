@@ -2006,7 +2006,21 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                         return Some(owner);
                     }
                 }
-                if is_ctor(last) && type_like {
+                // SOUNDNESS R1717 — A CONSTRUCTOR NAME IS NOT A RETURN TYPE. `is_ctor` assumes `Type::builder()` yields `Type`, an
+                // assumption written for a dependency's `Client::builder()`; a crate-local `impl Proc { fn builder() -> ProcBuilder }`
+                // DECLARES otherwise, and typing the value as `Proc` made the terminal `.build()` form `Proc::build`, which no
+                // unit declares — a typed call with no claimant is dropped with no disclosure, so the caller read ABSENT over
+                // `ProcBuilder::build`'s `Clock` (EXECUTED; opentelemetry_sdk `with_batch_exporter`). The declaration the written
+                // type carries wins (the R1289 route below), exactly as for any non-ctor name; the ctor reading stands where no
+                // declaration speaks or the declaration says `Self`. `CANDOR_R1717_OFF=1` restores the ctor reading.
+                let r1717_declared_other = !candor_report::env::switch("CANDOR_R1717_OFF") && type_like && {
+                    let full_ty = expand(ty, uses);
+                    let tl = full_ty.rsplit("::").next().unwrap_or(&full_ty);
+                    !full_ty.contains(crate::decls::ALIAS_ALT_SEP)
+                        && returns.contains_key(&crate::model::impl_ret_key(tl, last))
+                        && !returns.contains_key(&crate::model::impl_self_ret_key(tl, last))
+                };
+                if is_ctor(last) && type_like && !r1717_declared_other {
                     // R807 REACH PROBE — the one name R807 adds, so the A/B can count what it typed.
                     if last == "bind" && candor_report::env::trace("CANDOR_MASK_DEBUG") {
                         eprintln!("R807CTOR {}::bind", expand(ty, uses));
