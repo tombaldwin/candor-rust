@@ -9312,6 +9312,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // (the 0.40.15 behaviour, for the A/B's attribution). The R1351/R1353 filter above applies to the carried keys too:
     // a key whose trait provably does not declare the member is not made valid by appearing on a union (rule 1).
     let r1324_hedge = candor_report::env::switch("CANDOR_R1324_HEDGE");
+    let r1723_off = candor_report::env::switch("CANDOR_R1723_OFF");
     let union_dispatch_hedge = |cand: &str, own_tail: &str, inf: &mut std::collections::BTreeSet<&'static str>, out: &mut BTreeSet<String>, don: &mut BTreeSet<String>| {
         if candor_report::env::switch("CANDOR_R1324_OFF") {
             return;
@@ -9323,7 +9324,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 continue;
             }
             let (tr, m) = (segs[segs.len() - 2], segs[segs.len() - 1]);
-            if format!("{tr}::{m}") == own_tail {
+            // A contributor dispatching the union's OWN member skips itself — except, SOUNDNESS R1723, on a union for a
+            // DEPENDENCY's trait (`serde#de::Visitor::expecting` over serde_path_to_error's `Wrap` / `CaptureKey`, which
+            // forward `self.delegate.expecting(f)` to a caller-chosen visitor). There the member it forwards to is the
+            // CONSUMER's implementor, which no union in this report contains: the key is carried, so a chained consumer's
+            // join reaches its own implementor. Measured (L2, `rustagent-r1723/l2/spte`, live join): without it the
+            // consumer's `Show::fmt` read `[]` over an EXECUTED write once R1723 removed the false-reason hedge v0.41.3 had
+            // put on this row. A LOCAL trait's union keeps the skip. `CANDOR_R1723_OFF=1` restores it everywhere.
+            if format!("{tr}::{m}") == own_tail && (owner == crate_name.as_str() || r1723_off) {
                 continue;
             }
             let protocol = matches!(m, "fmt" | "to_string" | "eq" | "ne" | "hash" | "clone" | "clone_from");

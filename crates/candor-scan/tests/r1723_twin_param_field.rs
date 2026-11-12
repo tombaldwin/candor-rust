@@ -313,3 +313,31 @@ fn r1723_blanket_subtrait_member_reaches_the_supertraits_implementors() {
     assert!(inferred(&off, "Solo::solo_zq").is_empty(), "the switched-off arm must reproduce the silence:\n{off:#}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn r1723_dependency_trait_union_carries_its_forwarded_member() {
+    // serde_path_to_error's shape: local wrappers implement a DEPENDENCY trait member by forwarding it to a caller-chosen
+    // implementor. The union row for that member must carry the key (and the dispatch), or a chained consumer's join stops
+    // at `[]` (L2 `rustagent-r1723/l2/spte`: `Show::fmt` over an EXECUTED write).
+    let d = std::env::temp_dir().join(format!("candor-r1723e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nserde = \"1\"\n").unwrap();
+    std::fs::write(
+        d.join("src/lib.rs"),
+        "use serde::de::Visitor;\nuse std::fmt;\npub struct Wrap<X> { pub delegate: X }\n\
+         impl<'de, X: Visitor<'de>> Visitor<'de> for Wrap<X> {\n    type Value = X::Value;\n    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { self.delegate.expecting(f) }\n}\n",
+    )
+    .unwrap();
+    let union = |v: &serde_json::Value| -> Option<serde_json::Value> {
+        v["functions"].as_array().unwrap().iter().find(|r| r["hash"] == "serde#de::Visitor::expecting" && r["interfaceUnion"] == true).cloned()
+    };
+    let v = scan(&d, false);
+    let u = union(&v).expect("the union row");
+    assert!(u["dispatchesOn"].as_array().is_some_and(|a| a.iter().any(|k| k == "serde#de::Visitor::expecting")), "{u:#}");
+    assert!(u["inferred"].as_array().is_some_and(|a| a.iter().any(|e| e == "Unknown")), "{u:#}");
+    let off = scan(&d, true);
+    let uo = union(&off).expect("the union row");
+    assert!(uo["dispatchesOn"].as_array().is_none_or(|a| a.is_empty()), "the switched-off arm must reproduce the dropped key:\n{uo:#}");
+    let _ = std::fs::remove_dir_all(&d);
+}
