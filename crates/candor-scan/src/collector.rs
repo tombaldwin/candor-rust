@@ -13199,6 +13199,17 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.use_alts = alts;
         syn::visit::visit_item_use(self, node);
     }
+    /// SOUNDNESS R1710 — a body-local `extern crate X as Y;` binds `Y` exactly as a body-local `use X as Y;` does: recorded in
+    /// `local_uses` (EXECUTED: `fn f() { extern crate libc as ffi; ffi::unlink(p) }` was ABSENT, `deny Fs` 0).
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        if !crate::lang::r1710_off() {
+            if let Some((bound, target)) = crate::lang::extern_alias(node, self.include_tests) {
+                self.local_use_seen.insert(bound.clone());
+                self.local_uses.insert(bound, target);
+            }
+        }
+        syn::visit::visit_item_extern_crate(self, node);
+    }
     /// SOUNDNESS R1123 — `mk_pair().1`: the projection moves position 1 out of a TEMPORARY, and every other
     /// position dies with the temporary in this frame (EXECUTED: 1 drop). A subset of what the temporary
     /// really drops (`&mk_pair().0` drops all of it), so it can only under-charge.

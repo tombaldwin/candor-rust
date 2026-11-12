@@ -42,6 +42,17 @@ impl<'ast, 'a> Visit<'ast> for LocalUseCollector<'a> {
         collect_use(&u.tree, String::new(), self.out, &mut unused_alts, &mut self.seen);
         // A `use` tree contains no further `use` items — no need to recurse into it.
     }
+    // SOUNDNESS R1710 — a body-local `extern crate X as Y;` binds `Y` in the body exactly as a body-local `use X as Y;` does
+    // (see `lang::collect_item_uses`).
+    fn visit_item_extern_crate(&mut self, e: &'ast syn::ItemExternCrate) {
+        if crate::lang::r1710_off() {
+            return;
+        }
+        if let Some((bound, target)) = crate::lang::extern_alias(e, self.include_tests) {
+            self.seen.insert(bound.clone());
+            self.out.insert(bound, target);
+        }
+    }
     // A nested `fn`/`impl`/`mod` item inside a body is a SEPARATE scope: its `use`s belong to it, not the
     // enclosing fn, and it is scanned as its own unit. Don't let the default walk descend into one and
     // leak its imports up here. (`Visit` has no dedicated hook for "item that isn't a use", so stop the
@@ -2148,6 +2159,7 @@ pub(crate) fn build_reexport_names(
     mod_aliases: &HashMap<String, String>,
     declared: &std::collections::HashSet<String>,
     local_mods: &std::collections::HashSet<String>,
+    extern_aliases: &std::collections::BTreeMap<String, String>,
 ) -> HashMap<String, String> {
     fn chaseable(k: &str) -> bool {
         !k.starts_with(REDIRECT_MOD_MARK) && !k.ends_with(MOD_GLOB_KEY) && !k.contains(ITEM_SENTINEL)
@@ -2196,6 +2208,18 @@ pub(crate) fn build_reexport_names(
         out.push(arm.to_string());
     }
     let mut raw: HashMap<String, String> = HashMap::new();
+    // SOUNDNESS R1710 — a renamed `extern crate X as Y;` in module `M` is a TERMINAL arm: `M::Y` denotes the extern crate `X`,
+    // not a local item. Without it `use crate::ffi;` (boring: 39 files) filed `aead::ffi -> crate::ffi`, an arm naming nothing,
+    // and a chain through it (`pub use crate::ffi as sys;`, then `use crate::n::sys;`) lost the dependency. The chase stops
+    // at `X` (not `crate::`-rooted). `extern crate self as Y` (`crate`) is left out: its paths are this crate's, and the arm
+    // would name the crate root itself.
+    if !crate::lang::r1710_off() {
+        for (q, x) in extern_aliases {
+            if x.split(ALIAS_ALT_SEP).all(|a| a != "crate") {
+                raw.insert(q.clone(), x.clone());
+            }
+        }
+    }
     for e in edges {
         if e.name == "*" || e.alias == "*" || e.from.is_empty() {
             continue;
@@ -2305,8 +2329,13 @@ pub(crate) fn file_extern_crates(items: &[syn::Item]) -> std::collections::HashS
         match it {
             syn::Item::ExternCrate(e) => {
                 out.insert(e.ident.to_string());
+                // SOUNDNESS R1710 — a RENAMED binding is no longer skipped: the re-export table carries it as a terminal arm
+                // (`build_reexport_names`), so `use crate::ffi;` in `n` files `n::ffi -> crate::ffi -> X`, the dependency. Skipped,
+                // `n::ffi` had no answer at all, and `PRELUDE_SHADOW` could not tell `n`'s import from a different `ffi`.
                 if let Some((_, r)) = &e.rename {
-                    out.insert(r.to_string());
+                    if crate::lang::r1710_off() || crate::lang::extern_alias(e, true).is_none() {
+                        out.insert(r.to_string());
+                    }
                 }
             }
             syn::Item::Mod(m) => {

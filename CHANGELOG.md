@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A call through a RENAMED `extern crate` now reaches the dependency** (SOUNDNESS R1710, silent under-report). `extern crate libc as ffi; ffi::unlink(p)` (boring's `boring_sys as ffi`, bzip2's `libbz2_rs_sys as ffi`, diesel's `libsqlite3_sys as ffi`, backtrace's `std as mystd`, serde_json's `serde_core as serde`) was read as a local declaration: no edge, no κ, no `invisible`, `deny Fs` exit 0 over an executed file deletion, under every spelling. The binding now resolves to the extern crate exactly as `use X as Y;` does: in its module, through the crate root's extern prelude (shadowed by a nearer declaration, import or local glob that supplies the name), `crate::Y`, `self::Y`, `super::Y`, `use Y::f`, `use crate::Y::*`, re-binds in other modules (a terminal arm of the re-export table), and body-local. `extern crate self as Y` names this crate. Expect `invisible`/`dispatchesOn` to name the real dependency (`serde_core`, not `serde`) and new concrete charges where the dependency is classified. `CANDOR_R1710_OFF=1` restores the old reading. Cache rev182.
+
 ## [0.42.0] — 2026-11-12
 
 - **Coverage-gate refresh 2026-11-13 (SOUNDNESS R1528 verdicts).** Nine entries grew under this release's engine

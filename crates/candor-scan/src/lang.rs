@@ -2605,6 +2605,19 @@ fn expand_with(path: &str, uses: &HashMap<String, String>, anchor: bool, follow:
         return expand_with(rest, uses, false, follow);
     }
     let mut segs: Vec<&str> = path.split("::").collect();
+    // SOUNDNESS R1710 — `self::ffi::f` where THIS module says `extern crate X as ffi;` is `X::f`: the module's own binding
+    // (`collect_item_uses`), which the crate-local route below never consults. Only when the module names `ffi` as an extern
+    // crate (`MODEXTERN_KEY`) and binds it to a renamed target; an unrenamed `self::spin::…` keeps its own route.
+    if segs.len() >= 2 && segs[0] == "self" && !r1710_off()
+        && uses.get(MODEXTERN_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == segs[1]))
+    {
+        if let Some(v) = uses.get(segs[1]).filter(|v| v.as_str() != segs[1]) {
+            if candor_report::env::trace("CANDOR_R1710_INSTR") {
+                eprintln!("R1710SELF\t{path}\t{v}"); // §E1 REACH COUNTER
+            }
+            return alias_join(v, &segs[2..]);
+        }
+    }
     // A path rooted at `crate`/`self`/`super` is EXPLICITLY crate-local — it is NOT subject to the file's
     // `use` aliases, so after stripping the prefix we return it as-is. (Re-applying `uses` here would let
     // a `use other::config;` import hijack a local `crate::config::load` call.)
@@ -6275,6 +6288,12 @@ pub(crate) fn collect_use(
                 }
             }
         }
+        // SOUNDNESS R1710 — `use ffi::unlink;` / `use mystd::fs;` whose head is a RENAMED extern crate (the root's, in the
+        // extern prelude, or this module's own `extern crate X as ffi;`) imports from `X`: stored as `X::unlink`, the value
+        // `use X::unlink;` stores. The literal `ffi::unlink` named no unit (EXECUTED: ABSENT, `deny Fs` 0 over an `unlink`).
+        if let Some(v) = extern_alias_head(full, out) {
+            return v;
+        }
         // ONLY a `crate::`-rooted re-bind (`use crate::net`) is re-resolved: `crate::X` names the CRATE
         // ROOT, where a re-export can bring an external name into scope. `self::`/`super::` are RELATIVE to
         // the current module (whose path `collect_use` doesn't know) — a `use super::core::foo` must keep
@@ -6343,6 +6362,9 @@ pub(crate) fn collect_use(
         // prelude glob (`use sqlx_core::driver_prelude::*; net::connect(..)`) read SILENT-PURE and was
         // disclosed NOWHERE — the cardinal sin (sqlx `PgStream::connect`).
         syn::UseTree::Glob(_) => {
+            // SOUNDNESS R1710 — `use crate::ffi::*;` / `use self::ffi::*;` over a renamed extern crate is a glob of the extern
+            // crate `X` (`use X::*;`); as written it was crate-local and recorded nowhere a glob candidate is drawn from.
+            let prefix = extern_alias_glob(&prefix, out).unwrap_or(prefix);
             // VEIN A — every glob, local or not, for `glob_origin`'s "exactly one, and not local" test.
             if !prefix.is_empty() {
                 let e = out.entry(ALLGLOB_KEY.to_string()).or_default();
@@ -6406,6 +6428,16 @@ fn root_one_segment(segs: &[&str], out: &HashMap<String, String>) -> Option<Stri
     let name = segs[i];
     if out.get(MODEXTERN_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == name)) {
         return None;
+    }
+    // SOUNDNESS R1710 — `use super::ffi;` naming the ROOT's `extern crate X as ffi;` names the extern crate `X`, exactly as
+    // `use crate::ffi;` resolves (through the seeded `crate::ffi`); the literal `crate::ffi` names no unit.
+    if !r1710_off() && out.get(XALIAS_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == name)) {
+        if let Some(v) = out.get(&format!("crate::{name}")) {
+            if candor_report::env::trace("CANDOR_R1710_INSTR") {
+                eprintln!("R1710SUPER\t{}\t{v}", segs.join("::")); // §E1 REACH COUNTER
+            }
+            return Some(v.clone());
+        }
     }
     Some(format!("crate::{name}"))
 }
@@ -6488,6 +6520,24 @@ pub(crate) fn collect_item_uses(
     // …and which names are bound ONLY by cfg-gated items: the arm sets that `cfg_arm_key` carries to child scopes.
     let mut ungated: std::collections::HashSet<String> = std::collections::HashSet::new();
     let lifted_items: Vec<&syn::ItemUse> = lifted.iter().collect();
+    // SOUNDNESS R1710 — `extern crate X as Y;` binds `Y` in this module exactly as `use X as Y;` would (a RENAMED extern
+    // crate: rusqlite `extern crate libsqlite3_sys as ffi;`, boring `boring_sys as ffi`, backtrace `std as mystd`). It was
+    // read as a DECLARATION only (`decls::declared_item_name`), so `ffi::f()` was anchored to the local path `crate::ffi::f`,
+    // which names no unit and no dependency: no edge, no κ, no `invisible` (EXECUTED: ABSENT, `deny Fs` 0 over a real
+    // `unlink`). The binding's value is the extern crate's own name, so every reader resolves it as it resolves an
+    // unrenamed `X::f`. `extern crate self as Y` names this crate (`crate`). Unrenamed ones need no entry (`X` is `X`).
+    if !r1710_off() {
+        for it in items {
+            if let syn::Item::ExternCrate(e) = it {
+                if let Some((bound, target)) = extern_alias(e, include_tests) {
+                    if !seen.insert(bound.clone()) {
+                        note_use_collision(out, alts, &bound, &target);
+                    }
+                    out.insert(bound, target);
+                }
+            }
+        }
+    }
     let real = items.iter().filter_map(|it| if let syn::Item::Use(u) = it { Some(u) } else { None });
     for u in real.chain(lifted_items.iter().copied()) {
         {
@@ -6513,6 +6563,10 @@ pub(crate) fn collect_item_uses(
             out.entry(format!("{CFG_OFF_USE_PREFIX}{k}")).or_insert(v);
         }
     }
+    // SOUNDNESS R1710 — a LOCAL glob that may supply the extern-prelude name shadows the prelude (rustc: glob imports are
+    // looked up before the extern prelude). EXECUTED: `use crate::other::*;` with `other::ffi` a pure module, `ffi::unlink`
+    // is the module's — charging `libc::unlink` there fabricated `Fs`.
+    drop_glob_shadowed_prelude(out, &seen);
     // SOUNDNESS R1682 — a name this item list binds under SEVERAL `#[cfg]` arms keeps its single `out` value (the arm
     // written last; this scope's own calls union through `alts`, R140/R1474), and the whole arm set is recorded beside
     // it under `cfg_arm_key`, which `decls::submodule_uses` turns into the inline child's binding — the route a child's
@@ -6540,6 +6594,272 @@ pub(crate) fn collect_item_uses(
         }
     }
 }
+
+/// SOUNDNESS R1710 — the kill switch for resolving a RENAMED `extern crate X as Y;` binding to `X` (every route: the
+/// module's own binding, the crate-root extern prelude, `crate::Y`, `self::Y`, and the re-export table's terminal arm).
+pub(crate) fn r1710_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1710_OFF"))
+}
+
+/// SOUNDNESS R1710 — `(Y, X)` for an `extern crate X as Y;` that binds a NEW name in the build this scan describes
+/// (`use_item_applies`' rule: not `#[cfg(test)]` unless tests are scanned, not a decidably-inactive feature). `as _` binds
+/// nothing and `extern crate X as X` is the unrenamed case. `self` (`extern crate self as Y`) is this crate: `crate`.
+pub(crate) fn extern_alias(e: &syn::ItemExternCrate, include_tests: bool) -> Option<(String, String)> {
+    let (_, r) = e.rename.as_ref()?;
+    let bound = r.to_string();
+    let target = e.ident.to_string();
+    if bound == "_" || bound == target || is_cfg_inactive(&e.attrs) || (!include_tests && is_cfg_test(&e.attrs)) {
+        return None;
+    }
+    // The toolchain's workspace shims (`#[cfg(feature = "rustc-dep-of-std")] extern crate rustc_std_workspace_core as core;`) ARE
+    // the toolchain crate they re-export; resolving to the shim's name would read every `core::` path as an unscanned dependency.
+    let target = match target.as_str() {
+        "self" => "crate".to_string(),
+        "rustc_std_workspace_core" => "core".to_string(),
+        "rustc_std_workspace_alloc" => "alloc".to_string(),
+        "rustc_std_workspace_std" => "std".to_string(),
+        _ => target,
+    };
+    if bound == target {
+        return None;
+    }
+    Some((bound, target))
+}
+
+/// SOUNDNESS R1710 — every renamed `extern crate` binding in this file's item tree (inline modules included), as
+/// `(<module>::<Y>, X)`. A Pass A fact (`FileDecls::extern_aliases`): the crate ROOT's entries are the extern prelude every
+/// module sees (`scan.rs` seeds them), and every entry is a terminal arm of the re-export table, so `use crate::ffi;` /
+/// `use super::ffi;` re-bound in another module chase to the dependency instead of a crate-local path naming nothing.
+pub(crate) fn collect_extern_aliases(items: &[syn::Item], modpath: &str, include_tests: bool, out: &mut Vec<(String, String)>) {
+    for it in items {
+        match it {
+            syn::Item::ExternCrate(e) => {
+                if let Some((bound, target)) = extern_alias(e, include_tests) {
+                    let q = if modpath.is_empty() { bound } else { format!("{modpath}::{bound}") };
+                    out.push((q, target));
+                }
+            }
+            syn::Item::Mod(m) => {
+                if !include_tests && is_cfg_test(&m.attrs) {
+                    continue;
+                }
+                if let Some((_, inner)) = &m.content {
+                    let q = if modpath.is_empty() { m.ident.to_string() } else { format!("{modpath}::{}", m.ident) };
+                    collect_extern_aliases(inner, &q, include_tests, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R1710 — is `name` a renamed extern crate binding in scope here: the crate root's (`XALIAS_KEY`, the extern
+/// prelude) or this module's own (`MODEXTERN_KEY`)? Answered with its target only when the map still binds it to one.
+fn extern_alias_target<'a>(name: &str, out: &'a HashMap<String, String>) -> Option<&'a String> {
+    if r1710_off() {
+        return None;
+    }
+    let listed = |k: &str| out.get(k).is_some_and(|l| l.split('\u{1}').any(|n| n == name));
+    if !(listed(XALIAS_KEY) || listed(MODEXTERN_KEY)) {
+        return None;
+    }
+    out.get(name).filter(|v| v.as_str() != name)
+}
+
+/// SOUNDNESS R1710 — a `use` path whose HEAD is a renamed extern binding (`ffi::unlink`), rewritten onto its target.
+fn extern_alias_head(full: &str, out: &HashMap<String, String>) -> Option<String> {
+    let segs: Vec<&str> = full.split("::").collect();
+    if segs.len() < 2 || matches!(segs[0], "crate" | "self" | "super") {
+        return None;
+    }
+    let v = extern_alias_target(segs[0], out)?;
+    let r = alias_join(v, &segs[1..]);
+    if candor_report::env::trace("CANDOR_R1710_INSTR") {
+        eprintln!("R1710USE\t{full}\t{r}"); // §E1 REACH COUNTER
+    }
+    Some(r)
+}
+
+/// SOUNDNESS R1710 — a GLOB base that names a renamed extern crate through `crate::` (the root's binding) or `self::` (this
+/// module's): `crate::ffi` -> `X`, `self::ffi::sub` -> `X::sub`. `None` otherwise (the base is kept as written). Only a
+/// single-target binding: a `#[cfg]` pair has no one glob base.
+fn extern_alias_glob(prefix: &str, out: &HashMap<String, String>) -> Option<String> {
+    if r1710_off() {
+        return None;
+    }
+    let segs: Vec<&str> = prefix.split("::").collect();
+    if segs.len() < 2 {
+        return None;
+    }
+    let v = match segs[0] {
+        "crate" if out.get(XALIAS_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == segs[1])) => {
+            out.get(&format!("crate::{}", segs[1]))?
+        }
+        "self" if out.get(MODEXTERN_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == segs[1])) => {
+            out.get(segs[1]).filter(|v| v.as_str() != segs[1])?
+        }
+        _ => return None,
+    };
+    if v.contains(crate::decls::ALIAS_ALT_SEP) || v == "crate" {
+        return None;
+    }
+    let r = alias_join(v, &segs[2..]);
+    if candor_report::env::trace("CANDOR_R1710_INSTR") {
+        eprintln!("R1710GLOB\t{prefix}\t{r}"); // §E1 REACH COUNTER
+    }
+    Some(r)
+}
+
+/// SOUNDNESS R1710 — the crate-wide facts that decide whether a LOCAL glob base `G` can supply a root extern-prelude name
+/// `Y`: `G::Y` in `shadow` when `G` declares `Y` (a module, a type), imports something other than the same extern crate
+/// as `Y`, or binds `Y` to another extern crate; `G` in `unknown` when an item-position macro may declare anything there.
+/// Built after the merge (`install_prelude_shadow`), EMPTY during Pass A, which seeds no prelude.
+#[derive(Default)]
+pub(crate) struct PreludeShadow {
+    pub(crate) shadow: std::collections::HashSet<String>,
+    pub(crate) unknown: std::collections::HashSet<String>,
+}
+
+pub(crate) static PRELUDE_SHADOW: std::sync::OnceLock<std::sync::RwLock<PreludeShadow>> = std::sync::OnceLock::new();
+
+pub(crate) fn prelude_shadow_cell() -> &'static std::sync::RwLock<PreludeShadow> {
+    PRELUDE_SHADOW.get_or_init(|| std::sync::RwLock::new(Default::default()))
+}
+
+/// SOUNDNESS R1710 — build `PRELUDE_SHADOW` for the crate's ROOT renamed extern bindings. `mods` are every `mod` item's own
+/// path (`mod_places`), `types` every declared type qual, `use_bound` every `{module}::{name}` a `use` binds, `macro_mods`
+/// the modules whose item lists hide macro-declared items. Reads the re-export table, so it is called after it is installed.
+pub(crate) fn install_prelude_shadow<'a>(
+    aliases: &std::collections::BTreeMap<String, String>,
+    mods: impl Iterator<Item = &'a String>,
+    types: impl Iterator<Item = &'a String>,
+    use_bound: impl Iterator<Item = &'a String>,
+    macro_mods: impl Iterator<Item = &'a String>,
+) {
+    let mut ps = PreludeShadow::default();
+    let root: HashMap<&str, &str> =
+        aliases.iter().filter(|(k, _)| !k.contains("::")).map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    if !root.is_empty() && !r1710_off() {
+        let last = |q: &str| q.rsplit("::").next().unwrap_or(q).to_string();
+        for q in mods.chain(types) {
+            if root.contains_key(last(q).as_str()) {
+                ps.shadow.insert(q.clone());
+            }
+        }
+        for q in use_bound.filter(|q| !q.starts_with('\u{6}')) {
+            if let Some(x) = root.get(last(q).as_str()) {
+                if reexport_lookup(q).as_deref() != Some(*x) {
+                    ps.shadow.insert(q.clone());
+                }
+            }
+        }
+        for (q, v) in aliases.iter().filter(|(k, _)| k.contains("::")) {
+            if root.get(last(q).as_str()).is_some_and(|x| x != v) {
+                ps.shadow.insert(q.clone());
+            }
+        }
+        ps.unknown.extend(macro_mods.cloned());
+    }
+    *prelude_shadow_cell().write().unwrap() = ps;
+}
+
+/// SOUNDNESS R1710 — the end of a module's `collect_item_uses`: drop the seeded extern-prelude binding of every root name
+/// this module did not bind itself (`seen`) when one of its LOCAL globs (`crate::G::*`, `self::G::*`, `super::*`) may
+/// supply that name (`PRELUDE_SHADOW`). A glob base this map cannot place counts as one that may. The dropped name keeps
+/// the reading it had before R1710 (the written path).
+fn drop_glob_shadowed_prelude(out: &mut HashMap<String, String>, seen: &std::collections::HashSet<String>) {
+    if r1710_off() {
+        return;
+    }
+    let Some(names) = out.get(XALIAS_KEY).cloned() else { return };
+    let Some(globs) = out.get(ALLGLOB_KEY).cloned() else { return };
+    let modpath = out.get(MODPATH_KEY).cloned();
+    let bases: Vec<Option<String>> = globs
+        .split('\u{1}')
+        .filter(|g| matches!(g.split("::").next(), Some("crate" | "self" | "super")))
+        .map(|g| {
+            let mut base: Vec<String> = Vec::new();
+            for (i, seg) in g.split("::").enumerate() {
+                match seg {
+                    "crate" if i == 0 => base.clear(),
+                    "self" if i == 0 => {
+                        let m = modpath.as_ref()?;
+                        base = m.split("::").filter(|x| !x.is_empty()).map(str::to_string).collect();
+                    }
+                    "super" => {
+                        if i == 0 {
+                            let m = modpath.as_ref()?;
+                            base = m.split("::").filter(|x| !x.is_empty()).map(str::to_string).collect();
+                        }
+                        base.pop()?;
+                    }
+                    s => base.push(s.to_string()),
+                }
+            }
+            Some(base.join("::"))
+        })
+        .collect();
+    if bases.is_empty() {
+        return;
+    }
+    let cell = prelude_shadow_cell().read().ok();
+    for y in names.split('\u{1}').filter(|n| !n.is_empty()) {
+        if seen.contains(y) || !out.contains_key(y) {
+            continue;
+        }
+        let shadowed = bases.iter().any(|b| match (b, &cell) {
+            (Some(g), Some(ps)) => {
+                let q = if g.is_empty() { y.to_string() } else { format!("{g}::{y}") };
+                ps.shadow.contains(&q) || ps.unknown.contains(g)
+            }
+            _ => true,
+        });
+        if shadowed {
+            if candor_report::env::trace("CANDOR_R1710_INSTR") {
+                eprintln!("R1710GLOBSHADOW\t{y}\t{globs}"); // §E1 REACH COUNTER
+            }
+            out.remove(y);
+        }
+    }
+}
+
+/// SOUNDNESS R1710 — seed the crate ROOT's renamed extern bindings into ONE file's map at Pass B. A root `extern crate X as Y;`
+/// puts `Y` in the EXTERN PRELUDE (2018+), so `Y::f()` names `X::f` in every module of the crate, with no import (rusqlite,
+/// boring: `ffi::…` written beside, or without, `use crate::ffi;`). The prelude is the LAST place a name is looked up, so the
+/// bare key is seeded only where nothing nearer binds it: not when this file's top level declares `Y` (an own `mod ffi`
+/// shadows the prelude; an inline module that declares it drops it in `submodule_uses`), and never over a key already
+/// present; the file's own `use` items, read after this seed, overwrite it. A glob import that supplies a DIFFERENT `Y` is not
+/// modelled, the same precedence a manifest dependency name already takes over a glob (`DEPS_KEY`). `extern crate self as Y`
+/// seeds `Y -> crate`. Also lists the root's `Y`s under `XALIAS_KEY` for `root_one_segment`.
+pub(crate) fn seed_extern_prelude(
+    aliases: &std::collections::BTreeMap<String, String>,
+    items: &[syn::Item],
+    include_tests: bool,
+    uses: &mut HashMap<String, String>,
+) {
+    if r1710_off() {
+        return;
+    }
+    let root: Vec<(&String, &String)> = aliases.iter().filter(|(k, _)| !k.contains("::")).collect();
+    if root.is_empty() {
+        return;
+    }
+    let declared: std::collections::HashSet<String> =
+        items.iter().filter_map(|it| crate::decls::declared_item_name(it, include_tests)).collect();
+    let mut names: Vec<&str> = Vec::new();
+    for (y, x) in root {
+        names.push(y);
+        if !declared.contains(y.as_str()) && !uses.contains_key(y.as_str()) {
+            uses.insert(y.clone(), x.clone());
+        }
+    }
+    uses.insert(XALIAS_KEY.to_string(), names.join("\u{1}"));
+}
+
+/// SOUNDNESS R1710 — the reserved per-file key listing the crate ROOT's renamed extern bindings (`\u{1}`-joined `Y`s),
+/// seeded at Pass B. `root_one_segment` reads it: `use super::ffi;` one level below the root names the extern crate.
+pub(crate) const XALIAS_KEY: &str = "*xalias";
 
 /// SOUNDNESS R1682 — the reserved `uses` key carrying a `#[cfg]`-duplicated binding's whole arm set (see
 /// `collect_item_uses`). `*` cannot begin a path segment, so no import can bind it.

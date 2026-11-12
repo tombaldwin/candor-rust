@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev182 (rustagent-r1715): SOUNDNESS R1710/R1715/R1711(c) on top of rev181. Pass A's `FileDecls` gains `extern_aliases`
+    // (every renamed `extern crate X as Y;`) and the module `use` maps bind `Y -> X`, so the root's `root_reexports` gain `Y`
+    // too; a rev181 entry replays `ffi::f()` as the local path naming nothing — the stale direction is SILENCE. Mandatory.
+    // (rev179 was the unmerged r1710 lane's token.)
     // rev181 (rustagent-r1723): SOUNDNESS R1723/R1724 — `QualIndexes` gains `cfg_off` (the quals the default build does not
     // compile), the drop-glue owner closure unions a twin leaf's default-build arms, and Pass B's cached `calls`/`unresolved`
     // change (a field typed by its proven owner's own parameter is answered from that declaration, and a projected poll on
@@ -661,7 +665,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev181/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev182/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -813,6 +817,10 @@ pub(crate) struct FileDecls {
     /// read only by the re-export table. A rev173 entry has none (rev174).
     #[serde(default)]
     pub(crate) private_uses: Vec<Reexport>,
+    /// SOUNDNESS R1710 — every renamed `extern crate X as Y;` in this file (`lang::collect_extern_aliases`), as
+    /// `(<module>::<Y>, X)`. A rev178 entry has none (rev179).
+    #[serde(default)]
+    pub(crate) extern_aliases: Vec<(String, String)>,
     /// R99 — MODULE-QUALIFIED name → EXTERNAL/aliased path, for the three shapes that give a std or
     /// dependency item a second crate-local spelling: a SUBMODULE `pub use` of an external item, a
     /// NOMINAL `type` alias, and a callable-typed `const`/`static` bound to a fn item. Keyed by the path a
@@ -1004,6 +1012,10 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     collect_reexports(items, modpath, &dir, include_tests, &uses, &mut reexports, &mut mod_aliases);
     let mut private_uses = Vec::new();
     crate::decls::collect_private_uses(items, modpath, &dir, include_tests, &mut private_uses); // SOUNDNESS R1657 s2 (R1689)
+    let mut extern_aliases = Vec::new();
+    if !crate::lang::r1710_off() {
+        crate::lang::collect_extern_aliases(items, modpath, include_tests, &mut extern_aliases); // SOUNDNESS R1710
+    }
     crate::decls::collect_cfg_arm_aliases(items, modpath, &dir, include_tests, &mut mod_aliases); // SOUNDNESS R1682
     let mut use_bound = Vec::new();
     crate::decls::collect_use_bound(items, modpath, &dir, include_tests, &mut use_bound);
@@ -1148,6 +1160,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         // the two answer different questions — see `Reexport`).
         reexports,
         private_uses,
+        extern_aliases,
         mod_aliases,
         use_bound,
         mod_places,
@@ -1256,6 +1269,9 @@ pub(crate) struct MergedDecls {
     pub(crate) reexports: Vec<Reexport>,
     /// SOUNDNESS R1657 stage 2 (R1689) — every file's private local named `use` bindings, for the re-export table only.
     pub(crate) private_uses: Vec<Reexport>,
+    /// SOUNDNESS R1710 — every file's renamed `extern crate` bindings (`FileDecls::extern_aliases`): qualified binding ->
+    /// target crate, `ALIAS_ALT_SEP`-joined when `#[cfg]` arms bind one name to two crates.
+    pub(crate) extern_aliases: std::collections::BTreeMap<String, String>,
     /// Every file's MODULE-QUALIFIED external aliases, unioned (R99 — see `FileDecls::mod_aliases`). A key
     /// carries its module path, so two files collide only where they declare the SAME name in the SAME
     /// module, which no crate that compiles does.
@@ -2249,6 +2265,19 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     // resulting index does not depend on this order.
     acc.reexports.extend(fd.reexports.iter().cloned());
     acc.private_uses.extend(fd.private_uses.iter().cloned());
+    for (q, x) in &fd.extern_aliases {
+        // SOUNDNESS R1710 — a `#[cfg]` pair binding one name to two crates keeps both arms.
+        match acc.extern_aliases.get_mut(q) {
+            Some(prev) if !prev.split(crate::decls::ALIAS_ALT_SEP).any(|a| a == x) => {
+                prev.push(crate::decls::ALIAS_ALT_SEP);
+                prev.push_str(x);
+            }
+            Some(_) => {}
+            None => {
+                acc.extern_aliases.insert(q.clone(), x.clone());
+            }
+        }
+    }
     acc.use_bound.extend(fd.use_bound.iter().cloned());
     for (placed, by) in &fd.mod_places {
         acc.mod_places.entry(placed.clone()).or_default().insert(by.clone());
@@ -2697,6 +2726,16 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     // `fns`, a stage re-derived on every scan) — because "this field cannot reach a cached FnInfo" is
     // exactly the reasoning that left `deref_target` out of this digest for months. Over-invalidating
     // costs a re-derivation nobody notices; under-invalidating publishes a stale purity claim.
+    // SOUNDNESS R1710 — the renamed extern bindings: the root's are every file's extern prelude, and every one is a terminal
+    // arm of the re-export table, so they re-resolve `ffi::f()` / `use crate::ffi;` in OTHER files.
+    s.push_str("extern_aliases");
+    for (k, v) in &m.extern_aliases {
+        s.push('|');
+        s.push_str(k);
+        s.push('=');
+        s.push_str(v);
+    }
+    s.push('\n');
     s.push_str("reexports");
     let mut rx: Vec<String> = m
         .reexports

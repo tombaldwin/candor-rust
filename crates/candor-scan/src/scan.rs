@@ -1866,6 +1866,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .collect()
     };
     let r1657s2_deps = cargo_deps(dir).0;
+    // SOUNDNESS R1710 — every declared type qual (the stage-2 set is empty under its own switch).
+    let r1710_types: Vec<String> =
+        decls_per_file.iter().flat_map(|(_, _, fd)| fd.ts.types.iter().map(|(q, _, _)| q.clone())).collect();
     let install_reexport_names = |merged: &MergedDecls| {
         let t = if crate::lang::r1657s2_off() {
             HashMap::new()
@@ -1882,11 +1885,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     .filter(|e| !r1657s2_deps.contains(&e.name) && !matches!(e.name.as_str(), "std" | "core" | "alloc"))
                     .cloned()
                     .collect();
-                crate::decls::build_reexport_names(&edges, &merged.mod_aliases, &r1657s2_declared, &r1657s2_mods)
+                crate::decls::build_reexport_names(&edges, &merged.mod_aliases, &r1657s2_declared, &r1657s2_mods, &merged.extern_aliases)
             }
         };
         let n = t.len();
         *crate::lang::reexport_names_cell().write().unwrap() = t;
+        // SOUNDNESS R1710 — which local glob bases may supply a root extern-prelude name (`lang::PRELUDE_SHADOW`); reads the
+        // table just installed.
+        crate::lang::install_prelude_shadow(
+            &merged.extern_aliases,
+            merged.mod_places.keys(),
+            r1710_types.iter(),
+            merged.use_bound.iter(),
+            merged.macro_modules.iter(),
+        );
         n
     };
     let r1657s2_names = install_reexport_names(&merged);
@@ -2854,6 +2866,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // VEIN A — and the manifest's dependency names, so a glob is never credited with a name that is
         // an extern crate (`use sqlx_core::prelude::*; dotenvy::var(..)` keeps `dotenvy`).
         crate::lang::seed_deps(&manifest_deps, &mut uses);
+        // SOUNDNESS R1710 — …and the crate ROOT's renamed `extern crate X as Y;` bindings: the extern prelude, in scope as `Y`
+        // in every module that does not declare or import `Y` itself (see `lang::seed_extern_prelude`).
+        crate::lang::seed_extern_prelude(&merged.extern_aliases, &file.items, include_tests, &mut uses);
         // …and the MODULE-QUALIFIED external aliases (R99): a submodule `pub use std::process::Command`, a
         // nominal `pub type Cmd = std::process::Command`, a callable-typed `const`. Same cross-file problem
         // the root re-exports have — the declaring module is usually a DIFFERENT file — and the same answer.
