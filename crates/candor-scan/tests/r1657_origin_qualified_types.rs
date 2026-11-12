@@ -82,6 +82,21 @@ fn twins(a_eff: bool) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The same two twins as `twins`, in ONE file as inline modules. The kill-switch (OFF) arms use this form: with `CANDOR_R1657_OFF`
+/// the pre-change reading keeps the LAST same-leaf twin merged (`fields[leaf]`), and "last" is the order `scan` walks the files in,
+/// which is the directory's own `read_dir` order and so differs by filesystem (alphabetical on APFS and a plain overlay;
+/// REVERSE creation order on tmpfs and on CI's runner, where the OFF arms of the two-file form read the other twin and
+/// failed with the silence/fabrication "not restored"). Within one file the last twin is the one written last, on every
+/// filesystem, so the legacy pick is deterministic and the attribution is checkable.
+fn twins_one_file(a_eff: bool) -> String {
+    let (ea, eb) = if a_eff { (W, "") } else { ("", W) };
+    format!("mod a {{ pub struct EngineA; impl EngineA {{ pub fn run(&self) {{ {ea} }} }} pub struct Holder {{ pub inner: EngineA }} pub fn make() -> Holder {{ Holder {{ inner: EngineA }} }} }}\n\
+mod b {{ pub struct EngineB; impl EngineB {{ pub fn run(&self) {{ {eb} }} }} pub struct Holder {{ pub inner: EngineB }} pub fn make() -> Holder {{ Holder {{ inner: EngineB }} }} }}\n\
+mod c {{ use crate::a::make as make_a; use crate::b::make as make_b;\n\
+pub fn consume_a_zq() {{ let h = make_a(); h.inner.run(); }}\npub fn consume_b_zq() {{ let h = make_b(); h.inner.run(); }} }}\n\
+fn main() {{ c::consume_a_zq(); c::consume_b_zq(); }}\n")
+}
+
 fn files<'a>(v: &'a [(&'a str, String)]) -> Vec<(&'a str, &'a str)> {
     v.iter().map(|(p, s)| (*p, s.as_str())).collect()
 }
@@ -95,6 +110,11 @@ fn r1657_fxi_the_silence_closes_and_the_kill_switch_restores_it() {
     let (_, on) = scan(&d, None, false);
     assert_eq!(inferred(&on, "c::consume_a_zq"), ["Env", "Fs"], "{on:#}");
     assert!(inferred(&on, "c::consume_b_zq").is_empty(), "the pure twin's consumer stays pure");
+    let _ = std::fs::remove_dir_all(&d);
+    // The attribution arm: one file, so the pre-change last-twin pick does not depend on the filesystem's directory order.
+    let d = fixture("fxi1", &[("main.rs", &twins_one_file(true))]);
+    let (_, on1) = scan(&d, None, false);
+    assert_eq!(inferred(&on1, "c::consume_a_zq"), ["Env", "Fs"], "{on1:#}");
     let (_, off) = scan(&d, None, true);
     assert!(!inferred(&off, "c::consume_a_zq").contains(&"Fs".to_string()), "CANDOR_R1657_OFF restores the silence");
     assert_eq!(off["switches"], serde_json::json!(["CANDOR_R1657_OFF"]), "the switched report names the switch");
@@ -112,6 +132,11 @@ fn r1657_fxii_the_fabrication_is_removed_and_the_effectful_twin_stays_charged() 
     let (_, on) = scan(&d, None, false);
     assert!(inferred(&on, "c::consume_a_zq").is_empty(), "fxii pure consumer {on:#}");
     assert_eq!(inferred(&on, "c::consume_b_zq"), ["Env", "Fs"], "the effectful twin's consumer stays charged");
+    let _ = std::fs::remove_dir_all(&d);
+    // The attribution arm: one file (see `twins_one_file`).
+    let d = fixture("fxii1", &[("main.rs", &twins_one_file(false))]);
+    let (_, on1) = scan(&d, None, false);
+    assert!(inferred(&on1, "c::consume_a_zq").is_empty(), "fxii pure consumer {on1:#}");
     let (_, off) = scan(&d, None, true);
     assert!(inferred(&off, "c::consume_a_zq").contains(&"Fs".to_string()), "CANDOR_R1657_OFF restores the fabrication");
     let _ = std::fs::remove_dir_all(&d);
