@@ -150,6 +150,27 @@ pub async fn p3_let(n: &PNotify) { let x = n.pnotified(); x.await; }
 pub async fn p3_inline(n: &PNotify) { n.pnotified().await; }
 "#;
 
+/// Fix 4's own fixture: BUILDER types are distinct, so no other site in `g4b_get` is ambiguous and the hop hedge is the ONLY disclosure of `get`.
+const LIB2: &str = r#"pub fn out(tag: &str) -> String { format!("{}/{}", std::env::var("R1717_OUT").unwrap_or_else(|_| "/tmp".into()), tag) }
+pub type Res<T> = Result<T, ()>;// ONLY disclosure of `get`.
+pub mod web2 {
+    pub struct Client(pub String);
+    pub struct BuilderA(pub String);
+    impl Client {
+        pub fn builder(t: &str) -> BuilderA { BuilderA(t.to_string()) }
+        pub fn get(&self) -> u8 { std::fs::write(crate::out(&self.0), b"x").unwrap(); 1 }
+    }
+    impl BuilderA { pub fn assemble_a(self) -> crate::Res<Client> { Ok(Client(self.0)) } }
+    pub mod inner {
+        pub struct Client(pub String);
+        impl Client {
+            pub fn get(&self) -> u8 { std::fs::write(crate::out(&self.0), b"x").unwrap(); 1 }
+        }
+        pub fn g4b_get(t: &str) -> crate::Res<u8> { Ok(super::Client::builder(t).assemble_a()?.get()) }
+    }
+}
+"#;
+
 #[allow(dead_code)]
 const MAIN: &str = r#"use app::*;
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -261,5 +282,31 @@ fn r1717_the_kill_switches_restore_the_silent_rows() {
     assert!(strs(&off, "g1_same", "inferred").contains(&"Fs".to_string()), "{off:#}");
     let (refused, _) = scan(&d, Some("deny Fs g1_direct\n"), true);
     assert_eq!(refused, 2, "a gate under a result-moving switch is refused (SPEC 0.42 §3.4)");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// CALIBRATION of fix 4 ALONE (the std-named-tail hedge after a hop). `CANDOR_R1717_OFF` also turns fix 1 off, which puts the root reading back, so it
+/// cannot show the hedge is what makes the assertion pass; `CANDOR_R1717_HOP_OFF` isolates it. Executed ground truth: `g4b_get` writes a file.
+/// A gate under a result-moving switch is refused (exit 2), so the "exit 0" half is read off the report: no row at all for `g4b_get`.
+#[test]
+fn r1717_the_hop_hedge_alone_is_what_discloses_g4b_get() {
+    let d = fixture("hop", LIB2);
+    let (_, on) = scan(&d, None, false);
+    assert_eq!(strs(&on, "web2::inner::g4b_get", "inferred"), ["Unknown"], "{on:#}");
+    assert!(strs(&on, "web2::inner::g4b_get", "unknownWhy").iter().any(|w| w.starts_with("dispatch:untyped receiver of `get`")), "{on:#}");
+    let (rc, _) = scan(&d, Some("deny Unknown web2::inner::g4b_get\n"), false);
+    assert_eq!(rc, 1, "the hop hedge reaches the gate");
+    let mut cmd = Command::new(bin());
+    cmd.arg(d.join("app").to_string_lossy().as_ref()).arg("--json");
+    for (k, _) in std::env::vars() {
+        if k.starts_with("CANDOR_") {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.env("CANDOR_R1717_HOP_OFF", "1");
+    let out = cmd.output().expect("run candor-scan");
+    assert!(out.status.code() == Some(0) || out.status.code() == Some(1), "{}", String::from_utf8_lossy(&out.stderr));
+    let off: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(row(&off, "web2::inner::g4b_get").is_none(), "fix 4 off: g4b_get reads silent over a real write: {off:#}");
     let _ = std::fs::remove_dir_all(&d);
 }

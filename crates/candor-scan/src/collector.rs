@@ -14078,11 +14078,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // SOUNDNESS R1717 — a std-named leaf stays std's only where the moved step's declared return is std's own. Where it is a
                         // nominal type THIS crate declares (`Client::builder().build()?.get(u)`, `build -> Result<Client>`, `get` std-named) the
                         // walk's receiver guess (`ClientBuilder`, once `builder` is typed by its declaration) names no unit and the call vanished
-                        // with no disclosure (EXECUTED, fixture `v2`: Fs lost against the pre-branch root reading). `CANDOR_R1717_OFF` keeps the
+                        // with no disclosure (EXECUTED, fixture `v2`: Fs lost against the pre-branch root reading). `CANDOR_R1717_OFF` or `CANDOR_R1717_HOP_OFF` (this hedge alone) keeps the
                         // std-name exclusion.
                         let std_named = crate::std_methods::is_std_method_name(&leaf);
                         let local_moved = std_named
                             && !candor_report::env::switch("CANDOR_R1717_OFF")
+                            && !candor_report::env::switch("CANDOR_R1717_HOP_OFF")
                             && moved.is_some_and(|st| {
                                 self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| {
                                     let rl = r.rsplit("::").next().unwrap_or(r);
