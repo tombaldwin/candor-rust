@@ -340,3 +340,28 @@ fn r1717_a_dependency_type_sharing_a_local_leaf_is_not_retyped() {
     assert!(strs(&v, "local_chain", "inferred").contains(&"Env".to_string()), "control: the local chain is charged: {v:#}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// R1719 must not read a TWIN receiver's declared return (reqwest 0.11 `wasm::RequestBuilder::send`): `a::Client::exec -> Pending` (a future whose `poll`
+/// writes a file) beside `w::Client::exec -> impl Future` (not filed, so no disagreement is recorded). `w::send` awaits ITS OWN future and must not be
+/// charged `a::Pending::poll`'s `Fs`.
+#[test]
+fn r1719_a_twin_receivers_declared_return_is_not_read() {
+    let src = "use std::future::Future;\nuse std::pin::Pin;\nuse std::task::{Context, Poll};\n\
+        pub mod a {\n\
+            use super::*;\n\
+            pub struct Client;\n\
+            pub struct Pending(pub u8);\n\
+            impl Future for Pending { type Output = u8; fn poll(self: Pin<&mut Self>, _c: &mut Context<'_>) -> Poll<u8> { std::fs::write(\"/tmp/r1719\", b\"x\").unwrap(); Poll::Ready(1) } }\n\
+            impl Client { pub fn exec(&self) -> Pending { Pending(1) } }\n\
+        }\n\
+        pub mod w {\n\
+            use super::*;\n\
+            pub struct Client;\n\
+            impl Client { pub fn exec(&self) -> impl Future<Output = u8> { async { 1 } } }\n\
+            pub async fn send(c: &Client) -> u8 { c.exec().await }\n\
+        }\n";
+    let d = fixture("r1719twin", src);
+    let (_, on) = scan(&d, None, false);
+    assert!(!strs(&on, "w::send", "inferred").contains(&"Fs".to_string()), "w::send awaited its own future: {on:#}");
+    let _ = std::fs::remove_dir_all(&d);
+}
