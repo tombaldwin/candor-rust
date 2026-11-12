@@ -14087,12 +14087,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| {
                                     let rl = r.rsplit("::").next().unwrap_or(r);
                                     let rl = rl.split('<').next().unwrap_or(rl);
-                                    // a nominal type of this crate, or a name that is no std type (a `Result` alias files the ALIAS's name, its
-                                    // payload lost: `-> RedisResult<Client>` files `Result`, since a WRITTEN `Result<X>` is peeled to `X`); a std type keeps the exclusion
-                                    self.returns.contains_key(&crate::model::nominal_key(rl))
-                                        || (crate::lang::is_type_ident(rl)
-                                            && !crate::model::STD_CONVERSION_TARGETS.contains(&rl)
-                                            && !matches!(rl, "Option" | "Self" | "Iter" | "IntoIter" | "Ref" | "RefMut"))
+                                    // a nominal type of this crate, or `Result` (a `Result` ALIAS files `Result`, its payload lost: `-> RedisResult<Client>`;
+                                    // a WRITTEN `Result<X>` is peeled to `X`). Any other std return keeps the std-name exclusion.
+                                    self.returns.contains_key(&crate::model::nominal_key(rl)) || rl == "Result"
                                 })
                             });
                         if *base == ty && moved.is_some() && (!std_named || local_moved) {
