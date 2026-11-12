@@ -14061,7 +14061,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // `HOP_GUESS_PREFIX + <base leaf>::<method>`; `scan.rs` hands it to the R1095 judge only if that tail names no
                 // unit. A std-named method is std's on the declared (std) return (`Option::unwrap`) and is left alone. Kill switch
                 // `CANDOR_R1663_OFF`.
-                if !candor_report::env::switch("CANDOR_R1663_OFF") && !crate::std_methods::is_std_method_name(&leaf) {
+                if !candor_report::env::switch("CANDOR_R1663_OFF") {
                     if let Some((steps, base)) = &strict {
                         let bl = base.rsplit("::").next().unwrap_or(base);
                         // SOUNDNESS R1660 — …or the step's declared return was WITHDRAWN (same-leaf twins declare different returns:
@@ -14075,7 +14075,27 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| r != base && r.rsplit("::").next() != Some(bl))
                                 || (r1660 && self.returns.contains_key(&crate::model::withdrawn_impl_ret_key(bl, st)))
                         });
-                        if *base == ty && moved.is_some() {
+                        // SOUNDNESS R1717 — a std-named leaf stays std's only where the moved step's declared return is std's own. Where it is a
+                        // nominal type THIS crate declares (`Client::builder().build()?.get(u)`, `build -> Result<Client>`, `get` std-named) the
+                        // walk's receiver guess (`ClientBuilder`, once `builder` is typed by its declaration) names no unit and the call vanished
+                        // with no disclosure (EXECUTED, fixture `v2`: Fs lost against the pre-branch root reading). `CANDOR_R1717_OFF` keeps the
+                        // std-name exclusion.
+                        let std_named = crate::std_methods::is_std_method_name(&leaf);
+                        let local_moved = std_named
+                            && !candor_report::env::switch("CANDOR_R1717_OFF")
+                            && moved.is_some_and(|st| {
+                                self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| {
+                                    let rl = r.rsplit("::").next().unwrap_or(r);
+                                    let rl = rl.split('<').next().unwrap_or(rl);
+                                    // a nominal type of this crate, or a name that is no std type (a `Result` alias files the ALIAS's name, its
+                                    // payload lost: `-> RedisResult<Client>` files `Result`, since a WRITTEN `Result<X>` is peeled to `X`); a std type keeps the exclusion
+                                    self.returns.contains_key(&crate::model::nominal_key(rl))
+                                        || (crate::lang::is_type_ident(rl)
+                                            && !crate::model::STD_CONVERSION_TARGETS.contains(&rl)
+                                            && !matches!(rl, "Option" | "Self" | "Iter" | "IntoIter" | "Ref" | "RefMut"))
+                                })
+                            });
+                        if *base == ty && moved.is_some() && (!std_named || local_moved) {
                             if candor_report::env::trace("CANDOR_R1663_INSTR") {
                                 eprintln!("R1663HOP\t{bl}.{}\t.{leaf}", moved.map_or("", |m| m.as_str())); // §E1 REACH COUNTER
                             }

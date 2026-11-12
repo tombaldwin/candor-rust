@@ -4,7 +4,7 @@
 //!     typed the root as `Proc` (written for a dependency's `Client::builder()`), so the terminal formed `Proc::build`, which no unit declares,
 //!     and a typed call with no claimant is dropped with no disclosure. ABSENT on published 0.41.3 and on every switch-off arm; EXECUTED below.
 //!     (opentelemetry_sdk 0.31 `TracerProviderBuilder::with_batch_exporter`, whose `BatchSpanProcessorBuilder::build` is `Clock`.) The claim
-//!     "renaming the terminal charges it" in the release-bar report is FALSE: `finish`/`done`/`make`/`new`/`get` all drop too.
+//!     "renaming the terminal charges it" in the release-bar report is FALSE: `assemble`/`done`/`make`/`new`/`get` all drop too.
 //! (2) A BINDING OF A CRATE-LOCAL METHOD'S RESULT THAT NO ROUTE TYPED (`let mut a = self.attrs();` where two `Entry` types declare `attrs` with
 //!     different returns) and then a STD-NAMED method on it (`a.next()`): the R1095 judge stands aside for a std-named leaf (R1666), so a callee
 //!     that is `Unknown` only left the caller `[]` with no `unknownWhy` (gimli 0.32 `DebuggingInformationEntry::attr`, 17 units). Before 1b an
@@ -78,6 +78,40 @@ impl Cl {
     pub fn get_connection(&self) { std::fs::write(out(&self.0), b"x").unwrap(); }
 }
 pub fn g1_alias(t: &str) -> AliasResult<()> { let c = Cl::open(t)?; c.get_connection(); Ok(()) }
+
+// CONTROL for (1) (x11rb-protocol): a value constructor returning `Result<Option<Entries>>` is filed under the WRAPPER's leaf `Option`, which this
+// crate also declares as a struct elsewhere; it must keep the root reading (the A/B lost `XAuthorityEntries::next` when it did not).
+pub mod shadow { pub struct Option(pub u8); }
+pub struct Entries(pub String);
+impl Entries {
+    pub fn new(t: &str) -> Result<std::option::Option<Entries>, ()> { Ok(Some(Entries(t.to_string()))) }
+    pub fn run(&self) { std::fs::write(out(&self.0), b"x").unwrap(); }
+}
+pub fn g1_option(t: &str) { let e = Entries::new(t).unwrap().unwrap(); e.run(); }
+pub fn g1_option_match(t: &str) { match Entries::new(t).unwrap() { Some(e) => e.run(), None => {} } }
+
+// (4) `Client::builder().build()?.get(u)` over TWIN `Client`/`ClientBuilder` types and a STD-NAMED `get` (reqwest `blocking::get`): the typed tail
+// names no unit, and the std-name exclusion of the R1663 hedge made it vanish. Now disclosed AT the `get` call.
+pub type Res<T> = Result<T, ()>;
+pub mod web {
+    pub struct Client(pub String);
+    pub struct ClientBuilder(pub String);
+    impl Client {
+        pub fn builder(t: &str) -> ClientBuilder { ClientBuilder(t.to_string()) }
+        pub fn get(&self) -> u8 { std::fs::write(crate::out(&self.0), b"x").unwrap(); 1 }
+    }
+    impl ClientBuilder { pub fn assemble(self) -> crate::Res<Client> { Ok(Client(self.0)) } }
+    pub mod blocking {
+        pub struct Client(pub String);
+        pub struct ClientBuilder(pub String);
+        impl Client {
+            pub fn builder(t: &str) -> ClientBuilder { ClientBuilder(t.to_string()) }
+            pub fn get(&self) -> u8 { std::fs::write(crate::out(&self.0), b"x").unwrap(); 1 }
+        }
+        impl ClientBuilder { pub fn assemble(self) -> crate::Res<Client> { Ok(Client(self.0)) } }
+        pub fn g4_get(t: &str) -> crate::Res<u8> { Ok(Client::builder(t).assemble()?.get()) }
+    }
+}
 "#;
 
 const PURE: &str = r#"// SOUNDNESS R1717 fixture, PURE TWIN CRATE: every shape of `app`, with no effect anywhere.
@@ -127,7 +161,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
     loop { if let Poll::Ready(v) = f.as_mut().poll(&mut cx) { return v; } }
 }
 fn main() {
-    g1_direct("g1_direct"); g1_bound("g1_bound"); g1_same("g1_same"); g1_alias("g1_alias").unwrap();
+    g1_direct("g1_direct"); g1_bound("g1_bound"); g1_same("g1_same"); g1_alias("g1_alias").unwrap(); g1_option("g1_option"); g1_option_match("g1_option_match"); web::blocking::g4_get("g4_get").unwrap();
     let e = rd::Entry { tag: "g2_attr".into(), f: Box::new(|t| { std::fs::write(out(t), b"x").unwrap(); }) };
     e.attr();
     let _ = wr::Entry { v: vec![] }.attrs().count();
@@ -182,18 +216,20 @@ fn r1717_the_three_silences_are_charged_or_disclosed() {
     let d = fixture("on", LIB);
     let (_, on) = scan(&d, None, false);
     // (1) a ctor whose declaration says another type: the terminal is edged (direct, let-bound), and a ctor that returns `Self` is unchanged.
-    for u in ["g1_direct", "g1_bound", "g1_same", "g1_alias"] {
+    for u in ["g1_direct", "g1_bound", "g1_same", "g1_alias", "g1_option", "g1_option_match"] {
         assert!(strs(&on, u, "inferred").contains(&"Fs".to_string()), "{u}: {on:#}");
     }
     // (2) the std-named method on an untyped binding of a local method's result is disclosed, with the reason that is true.
     assert_eq!(strs(&on, "rd::Entry::attr", "inferred"), ["Unknown"], "{on:#}");
     assert!(strs(&on, "rd::Entry::attr", "unknownWhy").iter().any(|w| w.starts_with("dispatch:untyped receiver of `next`")), "{on:#}");
+    // (4) the twin-type chain over a std-named tail: disclosed AT the `get` call (the reason names it).
+    assert!(strs(&on, "web::blocking::g4_get", "unknownWhy").iter().any(|w| w.starts_with("dispatch:untyped receiver of `get`")), "{on:#}");
     // (3) `.await` of a twin-leaf future, bound and inline.
     for u in ["g3_let", "g3_inline"] {
         assert!(strs(&on, u, "inferred").contains(&"Fs".to_string()), "{u}: {on:#}");
     }
     // THE GATE FLIPS over code that really writes a file (the OFF test shows each at exit 0 before).
-    for (e, u) in [("Fs", "g1_direct"), ("Fs", "g1_bound"), ("Unknown", "rd::Entry::attr"), ("Fs", "g3_let"), ("Fs", "g3_inline")] {
+    for (e, u) in [("Fs", "g1_direct"), ("Fs", "g1_bound"), ("Unknown", "rd::Entry::attr"), ("Fs", "g3_let"), ("Fs", "g3_inline"), ("Unknown", "web::blocking::g4_get")] {
         let (rc, _) = scan(&d, Some(&format!("deny {e} {u}\n")), false);
         assert_eq!(rc, 1, "deny {e} {u}");
     }
