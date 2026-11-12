@@ -2025,9 +2025,12 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                     // …and ONLY for a type THIS crate declares: the index is keyed by the type's LEAF, so `hyper::Client::builder()` in a crate that
                     // declares its own `Client` (lambda_runtime_api_client) read the local `Client::builder -> ClientBuilder` and charged the local
                     // `ClientBuilder::build`'s `Env` to a call into the dependency (a fabrication, found by the final-binary bucket-1 audit). A path
-                    // rooted anywhere but `crate`/`self`/`super`, or bare, is not this crate's.
+                    // rooted at a declared dependency (`DEPS_KEY`) or at std is not this crate's.
                     last == "builder"
-                        && (!full_ty.contains("::") || matches!(full_ty.split("::").next(), Some("crate" | "self" | "super")))
+                        && full_ty.split_once("::").is_none_or(|(root, _)| {
+                            !matches!(root, "std" | "core" | "alloc")
+                                && !uses.get(DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == root))
+                        })
                         && !full_ty.contains(crate::decls::ALIAS_ALT_SEP)
                         && !returns.contains_key(&crate::model::impl_self_ret_key(tl, last))
                         && returns.get(&crate::model::impl_ret_key(tl, last)).is_some_and(|r| {
