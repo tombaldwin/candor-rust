@@ -1,6 +1,6 @@
 //! SOUNDNESS R1717 (+ R1719) — THREE SILENCES THE R1657 STAGE 1b `self` TYPING EXPOSED, ONE OF WHICH WAS ON EVERY ARM.
 //!
-//! (1) A CONSTRUCTOR NAME IS NOT A RETURN TYPE. `sp::Proc::builder(t).build()` with `impl Proc { fn builder(..) -> ProcBuilder }`: `is_ctor`
+//! (1) THE `builder` ENTRY NAME IS NOT A RETURN TYPE. `sp::Proc::builder(t).build()` with `impl Proc { fn builder(..) -> ProcBuilder }`: `is_ctor`
 //!     typed the root as `Proc` (written for a dependency's `Client::builder()`), so the terminal formed `Proc::build`, which no unit declares,
 //!     and a typed call with no claimant is dropped with no disclosure. ABSENT on published 0.41.3 and on every switch-off arm; EXECUTED below.
 //!     (opentelemetry_sdk 0.31 `TracerProviderBuilder::with_batch_exporter`, whose `BatchSpanProcessorBuilder::build` is `Clock`.) The claim

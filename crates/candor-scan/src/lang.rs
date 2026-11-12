@@ -2006,7 +2006,7 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                         return Some(owner);
                     }
                 }
-                // SOUNDNESS R1717 — A CONSTRUCTOR NAME IS NOT A RETURN TYPE. `is_ctor` assumes `Type::builder()` yields `Type`, an
+                // SOUNDNESS R1717 — THE BUILDER ENTRY NAME IS NOT A RETURN TYPE. `is_ctor` assumes `Type::builder()` yields `Type`, an
                 // assumption written for a dependency's `Client::builder()`; a crate-local `impl Proc { fn builder() -> ProcBuilder }`
                 // DECLARES otherwise, and typing the value as `Proc` made the terminal `.build()` form `Proc::build`, which no
                 // unit declares — a typed call with no claimant is dropped with no disclosure, so the caller read ABSENT over
@@ -2019,7 +2019,11 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                     // …and ONLY where the declared return is a nominal type THIS crate declares (`nominal_key`): a type alias is no
                     // type (`-> RedisResult<Client>` files `RedisResult`, and typing `let c = Client::open(..)?` as it REMOVED
                     // `Client::get_connection` from redis 1.7.1's sentinel units — the A/B's CONCRETE LOST rows).
-                    !full_ty.contains(crate::decls::ALIAS_ALT_SEP)
+                    // …and ONLY for the builder entry `builder` (the shape the rule's evidence is: a `-> XBuilder` that is a distinct type), not the
+                    // value constructors (`new`/`open`/`connect`/`from`), whose declared returns are wrapped in `Result`/`Option`/aliases that the
+                    // index files by the WRAPPER's leaf (`Result<Option<X>>` files `Option`, which x11rb-protocol also declares as a struct).
+                    last == "builder"
+                        && !full_ty.contains(crate::decls::ALIAS_ALT_SEP)
                         && !returns.contains_key(&crate::model::impl_self_ret_key(tl, last))
                         && returns.get(&crate::model::impl_ret_key(tl, last)).is_some_and(|r| {
                             let rl = r.split('<').next().unwrap_or(r);
@@ -2027,6 +2031,9 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                             !r.contains(crate::decls::ALIAS_ALT_SEP) && rl != tl && returns.contains_key(&crate::model::nominal_key(rl))
                         })
                 };
+                if r1717_declared_other && candor_report::env::trace("CANDOR_R1717_INSTR") {
+                    eprintln!("R1717CTOR\t{full}\t{:?}", returns.get(&crate::model::impl_ret_key(ty.rsplit("::").next().unwrap_or(ty), last))); // §E1 REACH COUNTER
+                }
                 if is_ctor(last) && type_like && !r1717_declared_other {
                     // R807 REACH PROBE — the one name R807 adds, so the A/B can count what it typed.
                     if last == "bind" && candor_report::env::trace("CANDOR_MASK_DEBUG") {
