@@ -102,7 +102,10 @@ pub fn refusal_marker_for(locator: &str) -> Option<RefusalMarker> {
     if locator.ends_with(".json") && p.is_file() {
         let dir = p.parent()?;
         let me = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        // SOUNDNESS R1722 — several markers can cover one report; which one is returned must not depend on the filesystem's order.
+        let mut ents: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
+        ents.sort_by_key(|e| e.file_name());
+        for entry in ents {
             let f = entry.path();
             if !f.to_string_lossy().ends_with(".refused.json") {
                 continue;

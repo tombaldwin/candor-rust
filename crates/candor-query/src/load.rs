@@ -133,7 +133,10 @@ pub(crate) fn glob_encountered(prefix: &str) -> Vec<PathBuf> {
     let needle = format!("{base}.encountered-");
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
-        for ent in rd.flatten() {
+        // SOUNDNESS R1722 — name order, not the filesystem's.
+        let mut ents: Vec<_> = rd.flatten().collect();
+        ents.sort_by_key(|e| e.file_name());
+        for ent in ents {
             if let Some(n) = ent.file_name().to_str()
                 && let Some(mid) = n.strip_prefix(&needle).and_then(|m| m.strip_suffix(".json")) {
                     // an encountered sidecar is `<base>.encountered-<crate>-<kind>.json` — a SINGLE
@@ -200,7 +203,10 @@ pub(crate) fn load_hierarchy(prefix: &str) -> BTreeMap<String, Vec<String>> {
     let Ok(rd) = std::fs::read_dir(&dir) else {
         return out;
     };
-    for ent in rd.flatten() {
+    // SOUNDNESS R1722 — `extend` below appends in file order, so the merged lists must not take the filesystem's.
+    let mut ents: Vec<_> = rd.flatten().collect();
+    ents.sort_by_key(|e| e.file_name());
+    for ent in ents {
         let name = ent.file_name();
         let Some(name) = name.to_str() else { continue };
         if !name.starts_with(&pfx) || !name.ends_with(".hierarchy.json") {
@@ -277,7 +283,10 @@ pub(crate) fn load_callgraph_flagged(prefix: &str) -> (BTreeMap<String, Vec<Stri
     let Some(base) = p.file_name().and_then(|s| s.to_str()) else { return (out, partial) };
     let pfx = format!("{base}.");
     let Ok(rd) = std::fs::read_dir(&dir) else { return (out, partial) };
-    for ent in rd.flatten() {
+    // SOUNDNESS R1722 — `extend` below appends in file order, so the merged edge lists must not take the filesystem's.
+    let mut ents: Vec<_> = rd.flatten().collect();
+    ents.sort_by_key(|e| e.file_name());
+    for ent in ents {
         let name = ent.file_name();
         let Some(name) = name.to_str() else { continue };
         if !name.starts_with(&pfx) || !name.ends_with(".callgraph.json") {

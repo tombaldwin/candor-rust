@@ -1434,7 +1434,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // walk, so the two file sets are exact complements and no file can fall between them.
     let peeking = peek_excluded;
 
-    for entry in walkdir::WalkDir::new(root)
+    for entry in crate::deps::ordered_walk(root)
         .into_iter()
         // A nested directory carrying its own Cargo.toml is a DIFFERENT package (Cargo's own
         // semantics) — folding its files into this crate collides same-named fns across packages
