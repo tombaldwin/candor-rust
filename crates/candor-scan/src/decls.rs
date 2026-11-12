@@ -6207,6 +6207,10 @@ pub(crate) fn collect_decls(
                         if let Some(q) = c.borrow_mut().as_mut() {
                             q.file(&qual, fields.get(&r1624_leaf), field_elem.get(&r1624_leaf),
                                    trait_fields.get(&r1624_leaf), field_elem_trait.get(&r1624_leaf));
+                            // SOUNDNESS R1723 — a declaration the default build does not compile (see `QualIndexes::cfg_off`).
+                            if crate::lang::cfg_off_active() || crate::lang::is_cfg_inactive(&s.attrs) {
+                                q.cfg_off.insert(qual.clone());
+                            }
                             let e = q.params.entry(qual.clone()).or_default();
                             for t in s.generics.type_params() {
                                 let n = t.ident.to_string();
@@ -6681,6 +6685,10 @@ pub(crate) fn collect_decls(
                         // (`use super::T10 as Renamed; impl Renamed for M10`) is filed under `T10`.
                         let key = crate::lang::impl_trait_leaf(tr, uses).unwrap_or_else(|| leaf.ident.to_string());
                         trait_impls.entry(key.clone()).or_default().push(ty.clone());
+                        // SOUNDNESS R1723 (exposed blanket) — see `model::blanket_impl_key`.
+                        if im.generics.type_params().any(|g| g.ident == ty.as_str()) {
+                            rets.insert(crate::model::blanket_impl_key(&key), Some("1".to_string()));
+                        }
                         // SOUNDNESS R1186 — a hand-written conversion: filed under its SOURCE type (`model::from_impl_key`).
                         if matches!(key.as_str(), "From" | "TryFrom") {
                             for (src, tgt, bare) in crate::lang::from_impl_facts(im, leaf, ty, uses) {

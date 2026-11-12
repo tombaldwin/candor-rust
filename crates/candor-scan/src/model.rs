@@ -1021,6 +1021,12 @@ pub(crate) fn trait_ret_assoc_key(member: &str) -> String {
     format!("\u{1f}ret:{member}")
 }
 
+/// SOUNDNESS R1723 (exposed blanket) — the crate holds a BLANKET impl of local trait `trait_leaf` (`impl<T: Once> Rs for T`):
+/// its `trait_impls` entry is the impl's parameter NAME, which names no type.
+pub(crate) fn blanket_impl_key(trait_leaf: &str) -> String {
+    format!("<blanketimpl>{trait_leaf}")
+}
+
 pub(crate) fn pub_trait_key(trait_leaf: &str) -> String {
     format!("<pubtrait>{trait_leaf}")
 }

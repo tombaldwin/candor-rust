@@ -5313,6 +5313,15 @@ impl<'a> CallCollector<'a> {
                 if v == crate::cache::QUAL_TOMB || crate::lang::dyn_alias_leaves_str(v).is_some() {
                     return None;
                 }
+                // SOUNDNESS R1723 — the owner declares the field as one of its own type PARAMETERS (`inner: F`): that names no
+                // type, so it is not a concrete answer, and the leaf-keyed entry (a twin's concrete type, or nothing once R476
+                // moved it) must not answer either. Which of the two the leaf held depended on the walk order: answered `F`, the
+                // pinned spelling `Pin::new(&mut self.inner).poll(cx)` formed `F::poll` and read ABSENT; answered nothing, it took
+                // the bound route and hedged. The bound route (`qual_trait_field_in`) and `r1723_own_param_payload` answer it.
+                if !elem && !candor_report::env::switch("CANDOR_R1723_OFF") && qi.params.get(&qual).is_some_and(|ps| ps.iter().any(|p| p == v)) {
+                    instr("own-param", v);
+                    return Some(None);
+                }
                 if legacy.get(leaf).and_then(|m| m.get(key)).is_none() {
                     // SOUNDNESS R1657 stage 1b (F1) — the leaf-keyed entry is gone because R476 moved it to `trait_fields`: a
                     // same-leaf TWIN declares this field as its own type PARAMETER (futures-lite `io::Chain { #[pin] first: R1 }`
@@ -9870,6 +9879,44 @@ impl<'a> CallCollector<'a> {
                 == 1
     }
 
+    /// SOUNDNESS R1724 — R1319's unkeyable dispatch, for a bound spelled through a CRATE-LOCAL path that names no trait this
+    /// scan can see. async-std writes `use crate::io::{self, BufRead, Read};`, and `crate::io` re-exports
+    /// `futures_io::AsyncBufRead as BufRead` from inside a `cfg_std! { .. }` macro the engine does not expand: `full` is
+    /// `crate::io::BufRead`, which is no local trait (`local_traits` has no such leaf) and roots at no dependency, so the
+    /// dispatch formed no obligation-1 key, no `dispatchesOn`, no `invisible` and no disclosure. `io::read::take::Take::
+    /// poll_fill_buf` (`self.project().inner.poll_fill_buf(cx)`, `T: BufRead`) read pure on v0.41.3 and every later build;
+    /// once R1723 stopped reading async-std's `Chain` twin by its sibling's field, `Chain::poll_fill_buf` joined it. The true
+    /// reason is the dispatch the engine cannot key: `dispatch:<Trait>.<member>`. Same gates as R1319 (a binding or field
+    /// receiver; one such bound; not a conventionally-pure member nor one of the wrapper's own). `CANDOR_R1724_OFF=1` disables it.
+    fn local_unkeyable_dispatch(&self, receiver: &syn::Expr, full: &str, tr_leaf: &str, leaf: &str) -> bool {
+        if !full.starts_with("crate::") || self.local_traits.contains_key(tr_leaf) || candor_report::env::switch("CANDOR_R1724_OFF") {
+            return false;
+        }
+        if !matches!(peel_value(receiver), syn::Expr::Path(_) | syn::Expr::Field(_)) {
+            return false;
+        }
+        // The bound is spelled through the crate (so no std prelude leaf is meant: `crate::io::BufRead` is not std's), but a
+        // member of the WRAPPER the value sits in is not this trait's (`this.stream.as_mut()` calls `Pin::as_mut` on the
+        // projection, `x.is_some()` an `Option`'s) — a denylist of `Pin`/`Option`/`Result`/reference members.
+        if std_conventionally_pure(tr_leaf, leaf)
+            || matches!(leaf, "as_mut" | "as_ref" | "as_deref" | "as_deref_mut" | "get_mut" | "get_ref" | "get_unchecked_mut"
+                | "into_ref" | "set" | "is_some" | "is_none" | "is_ok" | "is_err" | "map" | "map_err" | "and_then" | "or_else"
+                | "unwrap" | "unwrap_or" | "unwrap_or_else" | "unwrap_or_default" | "expect" | "ok" | "err" | "take"
+                | "replace" | "clone" | "copied" | "cloned" | "iter" | "iter_mut" | "into_inner" | "to_owned" | "to_string"
+                | "len" | "is_empty")
+            // A member a crate-local trait declares (`StreamExt::take_while`, blanket over `Stream`) is that trait's, and the
+            // local dispatch route answers it.
+            || self.local_traits.values().any(|t| t.methods.contains(leaf))
+        {
+            return false;
+        }
+        self.resolve_recv_traits(receiver)
+            .iter()
+            .filter(|t| self.local_traits.get(t.as_str()).is_none() && self.recv_trait_full(receiver, t, leaf).starts_with("crate::"))
+            .count()
+            == 1
+    }
+
     /// SOUNDNESS R1325 (rustagent-0415) — the LOCAL trait whose member `x.leaf()` must be, when `x` is bounded by a std
     /// I/O trait (`full`/`tr_leaf`) that does NOT declare `leaf`. Gates, each a way the answer could be another trait's:
     ///  * the bound is std's own `Read`/`Write`/`BufRead`/`Seek` (`lang::is_std_io_trait`), and `leaf` is none of the
@@ -10066,6 +10113,9 @@ impl<'a> CallCollector<'a> {
             return PayloadTy::Old;
         }
         let syn::Expr::Field(fe) = peel_recv(expr) else { return PayloadTy::Old };
+        if let Some(d) = self.r1723_own_param_payload(fe) {
+            return d;
+        }
         let Some(t) = self.resolve_recv_type(expr) else { return PayloadTy::Old };
         let container = self.resolve_recv_type(&fe.base).map(|b| b.rsplit("::").next().unwrap_or(&b).to_string());
         let ev = self.scrut_evidence(&fe.base);
@@ -10074,6 +10124,101 @@ impl<'a> CallCollector<'a> {
             eprintln!("R1267FIELD\t{t}\t{d:?}"); // §E1 REACH COUNTER
         }
         d
+    }
+
+    /// SOUNDNESS R1723 — a FIELD whose PROVEN owner (`owner_qual`) declares it as one of the owner's OWN type parameters
+    /// (`struct ResponseFuture<F> { #[pin] inner: F }`), answered from that declaration and the owner's own parameter list,
+    /// never from the leaf-keyed `fields` / `type_params_key` facts. Those are LAST-TWIN-WINS: with a same-leaf twin declaring
+    /// `inner` concretely (tower-http's `cors::ResponseFuture { inner: Kind<F> }` beside `compression::future::ResponseFuture
+    /// { inner: F }`), whichever twin the walk merged last decided whether `self.as_mut().project().inner.poll(cx)` hedged or
+    /// read ABSENT, and once R1722 sorted the walk it read ABSENT on every machine (EXECUTED fixture `rustagent-r1723/fx`, both
+    /// file orders; `deny Unknown` 1 -> 0 over a real write). A crate with NO twin read it absent too: R476 moves a
+    /// parameter-typed field out of `fields`, so the projection spelling found no type and no bound.
+    ///
+    /// The answer maps the parameter by POSITION through the base's written instantiation (`scrut_evidence`: `self`, its
+    /// projections, an annotated binding or parameter; for an unannotated value of the impl's own self type, the impl header's)
+    /// to this scope's bounds — `payload_decision`'s rule with the owner's own list: a bounded argument dispatches over its
+    /// bounds, anything else keeps the previous reading (`Old`). `None`: the owner is not proven, its declaration does not
+    /// type this field by a bare parameter, or nothing shows the instantiation — the caller keeps its reading (the bound
+    /// route, which a unique owner also takes). Kill switch `CANDOR_R1723_OFF`.
+    fn r1723_own_param_payload(&self, fe: &syn::ExprField) -> Option<PayloadTy> {
+        let key = match &fe.member {
+            syn::Member::Named(n) => n.to_string(),
+            syn::Member::Unnamed(i) => i.index.to_string(),
+        };
+        self.r1723_own_param_payload_at(&fe.base, &key)
+    }
+
+    /// `r1723_own_param_payload` for the field `key` of `base_expr`.
+    fn r1723_own_param_payload_at(&self, base_expr: &syn::Expr, key: &str) -> Option<PayloadTy> {
+        if candor_report::env::switch("CANDOR_R1723_OFF") {
+            return None;
+        }
+        let owner = self.resolve_recv_type(base_expr)?;
+        if self.is_dependency_type(&owner) {
+            return None;
+        }
+        let (qi, qual) = self.owner_qual(base_expr, &owner)?;
+        let v = qi.fields.get(&qual)?.get(key)?;
+        let params = qi.params.get(&qual)?;
+        let pos = params.iter().position(|p| p == v)?;
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(&owner);
+        let bounds_of = |a: &str| -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            for l in self.generic_bounds.get(a).into_iter().chain(self.impl_generic_bounds.get(a)).flatten() {
+                if !out.contains(l) {
+                    out.push(l.clone());
+                }
+            }
+            out
+        };
+        // The base's written instantiation; for a value of this impl's own self type that writes none (`let this =
+        // self.project();`), the impl header's — R1657 stage 1b's rule for the same projection.
+        let fits = |(l, args): &(String, Vec<String>)| {
+            let l = self.returns.get(&crate::model::projection_of_key(l)).map(String::as_str).unwrap_or(l);
+            l == owner_leaf && args.len() == params.len()
+        };
+        let self_leaf = self.uses.get(crate::lang::SELF_KEY).map(|s| s.rsplit("::").next().unwrap_or(s).to_string());
+        let ev = self.scrut_evidence(base_expr).filter(fits).or_else(|| {
+            (self_leaf.as_deref() == Some(owner_leaf)).then(|| self.scrut_evidence(&syn::parse_quote!(self))).flatten().filter(fits)
+        });
+        // Nothing shows the instantiation: the caller keeps its reading (the bound route), as for a unique owner.
+        let (_, args) = ev?;
+        let arg = &args[pos];
+        let b = bounds_of(arg);
+        // `payload_decision`'s rule: a bounded argument dispatches over its bounds; anything else (a concrete or unwritten
+        // argument, an unbounded parameter) keeps the pre-R1723 reading.
+        let d = if b.is_empty() { PayloadTy::Old } else { PayloadTy::Dispatch(b) };
+        if candor_report::env::trace("CANDOR_R1723_INSTR") {
+            eprintln!("R1723OWN\t{qual}.{key}\t{v}\t{d:?}"); // §E1 REACH COUNTER
+        }
+        Some(d)
+    }
+
+    /// SOUNDNESS R1723 — R963's pinned-generic hedge for the PROJECTION spelling: `self.as_mut().project().inner.poll(cx)`
+    /// (`#[pin] inner: F`, `F: Future`), the pin-project idiom, where no `Pin::new(..)` is written for `pinned_arg` to see. The
+    /// value is the owner's own type parameter (`r1723_own_param_payload`), its bounds here are std traits that declare the
+    /// polled member, and no local impl can be named — so the call formed no edge, no key and no disclosure, exactly R963's
+    /// silence one spelling over (EXECUTED fixture `rustagent-r1723/fx`, the `proj` arm writes a file; `deny Unknown` 0 on
+    /// v0.41.3, `main` and R1722, in both file orders, with no twin at all). A DEPENDENCY trait bound forms its own key and is
+    /// not answered here. The bounds, or `None`.
+    fn r1723_projected_poll(&self, recv: &syn::Expr, leaf: &str) -> Option<Vec<String>> {
+        if candor_report::env::switch("CANDOR_R1723_OFF") || (self.generic_bounds.is_empty() && self.impl_generic_bounds.is_empty()) {
+            return None;
+        }
+        let syn::Expr::Field(fe) = peel_recv(recv) else { return None };
+        let PayloadTy::Dispatch(b) = self.r1723_own_param_payload(fe)? else { return None };
+        let st = crate::std_bounds::table();
+        let marker = |t: &str| matches!(t, "Send" | "Sync" | "Unpin" | "Sized" | "Copy" | "Clone" | "Debug" | "'static");
+        let all_std = b.iter().all(|t| {
+            let l = t.rsplit("::").next().unwrap_or(t);
+            !self.local_traits.contains_key(l) && (marker(l) || crate::std_bounds::is_std_trait_leaf(l))
+        });
+        let declares = b.iter().any(|t| {
+            let l = t.rsplit("::").next().unwrap_or(t);
+            !self.local_traits.contains_key(l) && st.traits_by_leaf(l).iter().any(|p| st.trait_method(p, leaf).is_some())
+        });
+        (all_std && declares).then_some(b)
     }
 
     fn scoped_generic_recv(&self, expr: &syn::Expr) -> Vec<String> {
@@ -10690,6 +10835,18 @@ impl<'a> CallCollector<'a> {
                     syn::Member::Unnamed(idx) => idx.index.to_string(),
                 };
                 let base_leaf = base.rsplit("::").next().unwrap_or(&base);
+                // SOUNDNESS R1723 — a twin owner's field declared as its OWN type parameter: its bounds are this scope's for the
+                // instantiating argument (`r1723_own_param_payload`), never the leaf-keyed `trait_fields` entry, which is the
+                // LAST twin's. bzip2's `bufread::BzDecoder { obj: R }` (`R: BufRead`) beside `write::BzDecoder { obj: W }` (`W:
+                // Write`) dispatched `self.obj.fill_buf()` over `Write`, which declares no `fill_buf`, and read pure.
+                if self.assign_drop.twin_leaves.is_some_and(|t| t.contains(base_leaf)) {
+                    if let Some(d) = self.r1723_own_param_payload_at(&f.base, &key) {
+                        return match d {
+                            PayloadTy::Dispatch(b) => b,
+                            _ => Vec::new(),
+                        };
+                    }
+                }
                 // SOUNDNESS R1624 — the owner's own declaration's trait leaves, where its path is proven (a same-leaf twin's
                 // `self.h: Box<dyn Wr>` dispatched on its SIBLING's `Box<dyn Sk>` and read pure over an executed write).
                 if let Some(l) = self.qual_trait_field_in(&f.base, &base, &key, false) {
@@ -10914,6 +11071,28 @@ impl<'a> CallCollector<'a> {
             return false; // blanket/unrelated name — not this trait's dispatch
         }
         let count = lt.count;
+        // SOUNDNESS R1723 (exposed blanket) — a member the trait INHERITS from a local supertrait, where the trait's
+        // implementors include a BLANKET impl (`impl<I: RangeStreamOnce + ..> RangeStream for I`, combine 4.6.7): the
+        // blanket's self type is a parameter name, so `trait_impls[tr]` below forms `I::uncons_range`, which names no type,
+        // and the call read PURE behind a key naming a member `tr` does not declare (R549's shape). EXECUTED fixture
+        // `rustagent-r1723/fx/q6`. Every implementor of `tr` implements the supertrait that declares the member, so its
+        // implementors are a sound superset: dispatch over them too. Surfaced when R1723 stopped reading combine's six
+        // `Stream` twins by their siblings' fields (an untyped fan-out had charged them). `CANDOR_R1723_OFF=1` disables it.
+        if count == 1
+            && !lt.methods.contains(leaf)
+            && self.returns.contains_key(&crate::model::blanket_impl_key(tr))
+            && !candor_report::env::switch("CANDOR_R1723_OFF")
+        {
+            let sups: Vec<String> =
+                lt.supertraits.iter().filter(|s| s.as_str() != tr && self.trait_declares_method(s, leaf, 0)).cloned().collect();
+            for s in sups {
+                if candor_report::env::trace("CANDOR_R1723_INSTR") {
+                    eprintln!("R1723BLANKET\t{tr}\t{s}\t{leaf}"); // §E1 REACH COUNTER
+                }
+                self.dispatch_trait_member(&s, leaf, str_arg.clone(), assoc);
+            }
+        }
+        let Some(lt) = self.local_traits.get(tr) else { return false };
         // ⟨peek-scope-attribution⟩ Record the reachability fact BEFORE the ambiguity/bound gates below —
         // those decide whether an EFFECT edge is safe to fabricate, but "this fn dispatches on trait-leaf
         // `tr`'s method `leaf`" is true regardless of either, and costs nothing extra to record.
@@ -13558,6 +13737,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     }
                     self.mark_unresolved(format!("dispatch:untyped pinned receiver of `{leaf}`"));
                 }
+            } else if let Some(b) = self.r1723_projected_poll(&node.receiver, &leaf) {
+                if candor_report::env::trace("CANDOR_R1723_INSTR") {
+                    eprintln!("R1723PIN\t{leaf}\t{}", b.join("+")); // §E1 REACH COUNTER
+                }
+                self.mark_unresolved(format!("dispatch:generic pinned receiver of `{leaf}`"));
             }
         }
         // Inline literal first (unchanged); fall back to const-string propagation so `post(API_BASE)` /
@@ -14369,6 +14553,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // with the true reason `dispatch:<Trait>.<member>`. See `glob_unkeyable_dispatch` for the gates.
                         if crate::lang::reach_debug() {
                             eprintln!("R1319GLOB\t{tr_leaf}\t{leaf}"); // §E1 REACH COUNTER
+                        }
+                        self.mark_unresolved(format!("dispatch:{tr_leaf}.{leaf}"));
+                    } else if self.local_unkeyable_dispatch(&node.receiver, &full, tr_leaf, &leaf) {
+                        if candor_report::env::trace("CANDOR_R1724_INSTR") {
+                            eprintln!("R1724LOCAL\t{full}\t{leaf}"); // §E1 REACH COUNTER
                         }
                         self.mark_unresolved(format!("dispatch:{tr_leaf}.{leaf}"));
                     }

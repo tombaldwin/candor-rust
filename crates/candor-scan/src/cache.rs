@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev181 (rustagent-r1723): SOUNDNESS R1723/R1724 — `QualIndexes` gains `cfg_off` (the quals the default build does not
+    // compile), the drop-glue owner closure unions a twin leaf's default-build arms, and Pass B's cached `calls`/`unresolved`
+    // change (a field typed by its proven owner's own parameter is answered from that declaration, and a projected poll on
+    // one hedges). A rev180 entry carries no `cfg_off` and the old readings, so it must not be reused.
     // rev180 (rustagent-r1717): SOUNDNESS R1717/R1719 — Pass B's cached `calls` change (a constructor name no longer types its value as the
     // root where the crate's own declaration returns another type; an `.await` of a typed method-call result or a twin-leaf future forms
     // its `poll` edge) and `untyped_methods` gains `WRAP_PREFIX` entries for uses of a binding no route typed. A rev178 entry replays the
@@ -657,7 +661,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev180/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev181/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1804,6 +1808,12 @@ pub(crate) struct QualIndexes {
     /// disagree, so a proven owner reads its own here (`CallCollector::owner_field_args`). Same tomb rule.
     #[serde(default)]
     pub(crate) field_args: HashMap<String, HashMap<String, String>>,
+    /// SOUNDNESS R1723 — the quals declared where the DEFAULT build does not compile them (a file, inline `mod` or the struct
+    /// itself under a `#[cfg(feature = ..)]` the manifest declares and its default set does not enable — `lang::CfgOffScope`,
+    /// `lang::is_cfg_inactive`). A same-leaf twin set's drop glue unions the arms the manifest cannot settle and drops these
+    /// (SPEC §4 ⟨0.38⟩, the R140/R977 default-build clause); a platform arm (`unix`) is never here.
+    #[serde(default)]
+    pub(crate) cfg_off: std::collections::BTreeSet<String>,
 }
 
 impl QualIndexes {
@@ -1855,6 +1865,7 @@ impl QualIndexes {
         for (q, m) in &o.field_elem_trait {
             merge_qual_entry(&mut self.field_elem_trait, q, m, &tomb_v, false);
         }
+        self.cfg_off.extend(o.cfg_off.iter().cloned()); // R1723
         for (q, ps) in &o.params {
             let e = self.params.entry(q.clone()).or_default();
             for p in ps {
@@ -2296,6 +2307,12 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     nested(&mut s, "qual_fields", &m.qual.fields);
     nested(&mut s, "qual_field_elem", &m.qual.field_elem);
     nested(&mut s, "qual_field_args", &m.qual.field_args); // R1630/R1631
+    s.push_str("qual_cfg_off"); // R1723 — a BTreeSet, so the order is fixed
+    for q in &m.qual.cfg_off {
+        s.push(';');
+        s.push_str(q);
+    }
+    s.push('\n');
     for (tag, ix) in [("qual_trait_fields", &m.qual.trait_fields), ("qual_field_elem_trait", &m.qual.field_elem_trait)] {
         nested(&mut s, tag, &ix.iter().map(|(k, v)| (k.clone(), v.iter().map(|(f, l)| (f.clone(), l.join(","))).collect())).collect());
     }
