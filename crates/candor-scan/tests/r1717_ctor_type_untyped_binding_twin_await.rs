@@ -310,3 +310,33 @@ fn r1717_the_hop_hedge_alone_is_what_discloses_g4b_get() {
     assert!(row(&off, "web2::inner::g4b_get").is_none(), "fix 4 off: g4b_get reads silent over a real write: {off:#}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A DEPENDENCY type that shares its leaf with a type this crate declares must not read the local declaration (lambda_runtime_api_client: `hyper::Client::builder()`
+/// beside a local `Client::builder() -> ClientBuilder` whose `build` reads the environment). The scan of the whole corpus found it: a fabricated `Env`.
+#[test]
+fn r1717_a_dependency_type_sharing_a_local_leaf_is_not_retyped() {
+    let root = std::env::temp_dir().join(format!("candor-r1717-dep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("hyp/src")).unwrap();
+    std::fs::create_dir_all(root.join("app/src")).unwrap();
+    std::fs::write(root.join("hyp/Cargo.toml"), "[package]\nname = \"hyp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(root.join("hyp/src/lib.rs"), "pub struct Client; pub struct B; impl Client { pub fn builder() -> B { B } } impl B { pub fn build(self) -> Client { Client } }\n").unwrap();
+    std::fs::write(
+        root.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nhyp = { path = \"../hyp\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("app/src/lib.rs"),
+        "pub struct Client; pub struct ClientBuilder;\n\
+         impl Client { pub fn builder() -> ClientBuilder { ClientBuilder } }\n\
+         impl ClientBuilder { pub fn build(self) -> Client { let _ = std::env::var(\"X\"); Client } }\n\
+         pub fn dep_chain() { let _c = hyp::Client::builder().build(); }\n\
+         pub fn local_chain() { let _c = Client::builder().build(); }\n",
+    )
+    .unwrap();
+    let (_, v) = scan(&root, None, false);
+    assert!(!strs(&v, "dep_chain", "inferred").contains(&"Env".to_string()), "a dependency's builder was read as the local one: {v:#}");
+    assert!(strs(&v, "local_chain", "inferred").contains(&"Env".to_string()), "control: the local chain is charged: {v:#}");
+    let _ = std::fs::remove_dir_all(&root);
+}
