@@ -1624,3 +1624,37 @@ fn expand_member_glob(root: &Path, m: &str) -> Vec<String> {
     matched.sort();
     matched
 }
+
+#[cfg(test)]
+mod r1722_ordered_walk_tests {
+    /// SOUNDNESS R1722 — `ordered_walk` yields names in sorted order, on a directory whose raw `read_dir` order is NOT that.
+    ///
+    /// The earlier whole-scan determinism test built a fixture twice in forward and reverse CREATION order. That is blind on
+    /// any filesystem whose listing ignores creation order (APFS and ext4 list in name-hash order) and on one that lists in
+    /// creation order but happens to match the name order. This test needs neither: 24 names are created in a scrambled
+    /// order, so the raw listing equals the sorted one only by a 1-in-24! accident on a hash-ordered filesystem and never on
+    /// tmpfs (reverse creation order, and the scramble is not the reverse of sorted). It also asserts the raw listing really
+    /// differs, so a filesystem that sorts by itself reports an honest "cannot fail here" rather than a vacuous pass.
+    #[test]
+    fn r1722_ordered_walk_is_sorted_where_read_dir_is_not() {
+        let d = std::env::temp_dir().join(format!("candor-r1722-ow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let names: Vec<String> = (0..24u32).map(|i| format!("f{:02}.rs", (i * 7 + 5) % 24)).collect(); // 7 is coprime to 24
+        for n in &names {
+            std::fs::write(d.join(n), "").unwrap();
+        }
+        let mut want: Vec<String> = names.clone();
+        want.sort();
+        let raw: Vec<String> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        let got: Vec<String> = super::ordered_walk(&d)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(got, want, "ordered_walk must yield the tree in name order (raw read_dir order was {raw:?})");
+        assert_ne!(raw, want, "this filesystem lists a scrambled directory in name order, so the test cannot fail here: {raw:?}");
+    }
+}

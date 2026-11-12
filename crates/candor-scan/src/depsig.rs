@@ -927,7 +927,7 @@ impl SrcIndex {
         let mut files = Vec::new();
         let mut file_mods: Vec<Option<String>> = Vec::new();
         let mut unparsed = Vec::new();
-        let walk = walkdir::WalkDir::new(src).into_iter().filter_entry(|e| {
+        let walk = crate::deps::ordered_walk(src).into_iter().filter_entry(|e| {
             let n = e.file_name().to_string_lossy();
             e.depth() == 0 || !(n.starts_with('.') || n == "target" || n == "tests" || n == "benches" || n == "examples")
         });
