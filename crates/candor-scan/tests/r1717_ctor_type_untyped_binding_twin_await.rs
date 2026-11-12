@@ -150,6 +150,27 @@ pub async fn p3_let(n: &PNotify) { let x = n.pnotified(); x.await; }
 pub async fn p3_inline(n: &PNotify) { n.pnotified().await; }
 "#;
 
+/// Fix 4's own fixture: BUILDER types are distinct, so no other site in `g4b_get` is ambiguous and the hop hedge is the ONLY disclosure of `get`.
+const LIB2: &str = r#"pub fn out(tag: &str) -> String { format!("{}/{}", std::env::var("R1717_OUT").unwrap_or_else(|_| "/tmp".into()), tag) }
+pub type Res<T> = Result<T, ()>;// ONLY disclosure of `get`.
+pub mod web2 {
+    pub struct Client(pub String);
+    pub struct BuilderA(pub String);
+    impl Client {
+        pub fn builder(t: &str) -> BuilderA { BuilderA(t.to_string()) }
+        pub fn get(&self) -> u8 { std::fs::write(crate::out(&self.0), b"x").unwrap(); 1 }
+    }
+    impl BuilderA { pub fn assemble_a(self) -> crate::Res<Client> { Ok(Client(self.0)) } }
+    pub mod inner {
+        pub struct Client(pub String);
+        impl Client {
+            pub fn get(&self) -> u8 { std::fs::write(crate::out(&self.0), b"x").unwrap(); 1 }
+        }
+        pub fn g4b_get(t: &str) -> crate::Res<u8> { Ok(super::Client::builder(t).assemble_a()?.get()) }
+    }
+}
+"#;
+
 #[allow(dead_code)]
 const MAIN: &str = r#"use app::*;
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
@@ -261,5 +282,86 @@ fn r1717_the_kill_switches_restore_the_silent_rows() {
     assert!(strs(&off, "g1_same", "inferred").contains(&"Fs".to_string()), "{off:#}");
     let (refused, _) = scan(&d, Some("deny Fs g1_direct\n"), true);
     assert_eq!(refused, 2, "a gate under a result-moving switch is refused (SPEC 0.42 §3.4)");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// CALIBRATION of fix 4 ALONE (the std-named-tail hedge after a hop). `CANDOR_R1717_OFF` also turns fix 1 off, which puts the root reading back, so it
+/// cannot show the hedge is what makes the assertion pass; `CANDOR_R1717_HOP_OFF` isolates it. Executed ground truth: `g4b_get` writes a file.
+/// A gate under a result-moving switch is refused (exit 2), so the "exit 0" half is read off the report: no row at all for `g4b_get`.
+#[test]
+fn r1717_the_hop_hedge_alone_is_what_discloses_g4b_get() {
+    let d = fixture("hop", LIB2);
+    let (_, on) = scan(&d, None, false);
+    assert_eq!(strs(&on, "web2::inner::g4b_get", "inferred"), ["Unknown"], "{on:#}");
+    assert!(strs(&on, "web2::inner::g4b_get", "unknownWhy").iter().any(|w| w.starts_with("dispatch:untyped receiver of `get`")), "{on:#}");
+    let (rc, _) = scan(&d, Some("deny Unknown web2::inner::g4b_get\n"), false);
+    assert_eq!(rc, 1, "the hop hedge reaches the gate");
+    let mut cmd = Command::new(bin());
+    cmd.arg(d.join("app").to_string_lossy().as_ref()).arg("--json");
+    for (k, _) in std::env::vars() {
+        if k.starts_with("CANDOR_") {
+            cmd.env_remove(k);
+        }
+    }
+    cmd.env("CANDOR_R1717_HOP_OFF", "1");
+    let out = cmd.output().expect("run candor-scan");
+    assert!(out.status.code() == Some(0) || out.status.code() == Some(1), "{}", String::from_utf8_lossy(&out.stderr));
+    let off: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(row(&off, "web2::inner::g4b_get").is_none(), "fix 4 off: g4b_get reads silent over a real write: {off:#}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A DEPENDENCY type that shares its leaf with a type this crate declares must not read the local declaration (lambda_runtime_api_client: `hyper::Client::builder()`
+/// beside a local `Client::builder() -> ClientBuilder` whose `build` reads the environment). The scan of the whole corpus found it: a fabricated `Env`.
+#[test]
+fn r1717_a_dependency_type_sharing_a_local_leaf_is_not_retyped() {
+    let root = std::env::temp_dir().join(format!("candor-r1717-dep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("hyp/src")).unwrap();
+    std::fs::create_dir_all(root.join("app/src")).unwrap();
+    std::fs::write(root.join("hyp/Cargo.toml"), "[package]\nname = \"hyp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(root.join("hyp/src/lib.rs"), "pub struct Client; pub struct B; impl Client { pub fn builder() -> B { B } } impl B { pub fn build(self) -> Client { Client } }\n").unwrap();
+    std::fs::write(
+        root.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nhyp = { path = \"../hyp\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("app/src/lib.rs"),
+        "pub struct Client; pub struct ClientBuilder;\n\
+         impl Client { pub fn builder() -> ClientBuilder { ClientBuilder } }\n\
+         impl ClientBuilder { pub fn build(self) -> Client { let _ = std::env::var(\"X\"); Client } }\n\
+         pub fn dep_chain() { let _c = hyp::Client::builder().build(); }\n\
+         pub fn local_chain() { let _c = Client::builder().build(); }\n",
+    )
+    .unwrap();
+    let (_, v) = scan(&root, None, false);
+    assert!(!strs(&v, "dep_chain", "inferred").contains(&"Env".to_string()), "a dependency's builder was read as the local one: {v:#}");
+    assert!(strs(&v, "local_chain", "inferred").contains(&"Env".to_string()), "control: the local chain is charged: {v:#}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// R1719 must not read a TWIN receiver's declared return (reqwest 0.11 `wasm::RequestBuilder::send`): `a::Client::exec -> Pending` (a future whose `poll`
+/// writes a file) beside `w::Client::exec -> impl Future` (not filed, so no disagreement is recorded). `w::send` awaits ITS OWN future and must not be
+/// charged `a::Pending::poll`'s `Fs`.
+#[test]
+fn r1719_a_twin_receivers_declared_return_is_not_read() {
+    let src = "use std::future::Future;\nuse std::pin::Pin;\nuse std::task::{Context, Poll};\n\
+        pub mod a {\n\
+            use super::*;\n\
+            pub struct Client;\n\
+            pub struct Pending(pub u8);\n\
+            impl Future for Pending { type Output = u8; fn poll(self: Pin<&mut Self>, _c: &mut Context<'_>) -> Poll<u8> { std::fs::write(\"/tmp/r1719\", b\"x\").unwrap(); Poll::Ready(1) } }\n\
+            impl Client { pub fn exec(&self) -> Pending { Pending(1) } }\n\
+        }\n\
+        pub mod w {\n\
+            use super::*;\n\
+            pub struct Client;\n\
+            impl Client { pub fn exec(&self) -> impl Future<Output = u8> { async { 1 } } }\n\
+            pub async fn send(c: &Client) -> u8 { c.exec().await }\n\
+        }\n";
+    let d = fixture("r1719twin", src);
+    let (_, on) = scan(&d, None, false);
+    assert!(!strs(&on, "w::send", "inferred").contains(&"Fs".to_string()), "w::send awaited its own future: {on:#}");
     let _ = std::fs::remove_dir_all(&d);
 }

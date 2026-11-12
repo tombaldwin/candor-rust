@@ -13448,8 +13448,18 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // the operand's type reads from the call's DECLARED return (`type_of`), where `resolve_recv_type`'s chain walk guessed the
         // receiver's own type (`Notify`, no future), so the `poll` the await runs formed no edge and no disclosure (EXECUTED fixture
         // `closed_inline`: the same value bound by `let` first charged). Off with `CANDOR_R1719_OFF=1`.
-        if let (syn::Expr::MethodCall(_), false) = (b, candor_report::env::switch("CANDOR_R1719_OFF")) {
-            if let Some(t) = self.type_of(b) {
+        // …but not through a TWIN receiver type: the declared-return fact is leaf-keyed, and a twin whose own `m` returns `impl Future` (not filed, so
+        // no disagreement is recorded) hands the other twin's nominal return to both (reqwest 0.11 `wasm::RequestBuilder::send`:
+        // `self.client.execute_request(req).await` read async_impl's `-> Pending` and charged its `poll`'s `Log` — a fabrication found by the
+        // bucket-1 audit on the final binary).
+        let r1719_recv_twin = |m: &syn::ExprMethodCall| {
+            self.resolve_recv_type(&m.receiver).is_none_or(|t| {
+                let leaf = t.split('<').next().unwrap_or(&t).rsplit("::").next().unwrap_or("").to_string();
+                self.assign_drop.twin_leaves.is_none_or(|tw| tw.contains(&leaf)) || self.ambiguous_type_leaves.contains(&format!("{leaf}\u{1f}*"))
+            })
+        };
+        if let (syn::Expr::MethodCall(mc), false) = (b, candor_report::env::switch("CANDOR_R1719_OFF")) {
+            if let Some(t) = (!r1719_recv_twin(mc)).then(|| self.type_of(b)).flatten() {
                 let head = t.split('<').next().unwrap_or(&t).to_string();
                 let l = self.local_future_leaf(&t).or_else(|| self.partial_twin_future_leaf(&t));
                 if let Some(l) = l {
@@ -14078,11 +14088,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // SOUNDNESS R1717 — a std-named leaf stays std's only where the moved step's declared return is std's own. Where it is a
                         // nominal type THIS crate declares (`Client::builder().build()?.get(u)`, `build -> Result<Client>`, `get` std-named) the
                         // walk's receiver guess (`ClientBuilder`, once `builder` is typed by its declaration) names no unit and the call vanished
-                        // with no disclosure (EXECUTED, fixture `v2`: Fs lost against the pre-branch root reading). `CANDOR_R1717_OFF` keeps the
+                        // with no disclosure (EXECUTED, fixture `v2`: Fs lost against the pre-branch root reading). `CANDOR_R1717_OFF` or `CANDOR_R1717_HOP_OFF` (this hedge alone) keeps the
                         // std-name exclusion.
                         let std_named = crate::std_methods::is_std_method_name(&leaf);
                         let local_moved = std_named
                             && !candor_report::env::switch("CANDOR_R1717_OFF")
+                            && !candor_report::env::switch("CANDOR_R1717_HOP_OFF")
                             && moved.is_some_and(|st| {
                                 self.returns.get(&crate::model::impl_ret_key(bl, st)).is_some_and(|r| {
                                     let rl = r.rsplit("::").next().unwrap_or(r);

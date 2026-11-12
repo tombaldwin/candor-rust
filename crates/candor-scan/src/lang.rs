@@ -2022,7 +2022,15 @@ pub(crate) fn ctor_type(expr: &syn::Expr, uses: &HashMap<String, String>, return
                     // …and ONLY for the builder entry `builder` (the shape the rule's evidence is: a `-> XBuilder` that is a distinct type), not the
                     // value constructors (`new`/`open`/`connect`/`from`), whose declared returns are wrapped in `Result`/`Option`/aliases that the
                     // index files by the WRAPPER's leaf (`Result<Option<X>>` files `Option`, which x11rb-protocol also declares as a struct).
+                    // …and ONLY for a type THIS crate declares: the index is keyed by the type's LEAF, so `hyper::Client::builder()` in a crate that
+                    // declares its own `Client` (lambda_runtime_api_client) read the local `Client::builder -> ClientBuilder` and charged the local
+                    // `ClientBuilder::build`'s `Env` to a call into the dependency (a fabrication, found by the final-binary bucket-1 audit). A path
+                    // rooted at a declared dependency (`DEPS_KEY`) or at std is not this crate's.
                     last == "builder"
+                        && full_ty.split_once("::").is_none_or(|(root, _)| {
+                            !matches!(root, "std" | "core" | "alloc")
+                                && !uses.get(DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == root))
+                        })
                         && !full_ty.contains(crate::decls::ALIAS_ALT_SEP)
                         && !returns.contains_key(&crate::model::impl_self_ret_key(tl, last))
                         && returns.get(&crate::model::impl_ret_key(tl, last)).is_some_and(|r| {
