@@ -10199,6 +10199,28 @@
       ]
     },
     {
+      "fn": "deps::ordered_walk",
+      "loc": "crates/candor-scan/src/deps.rs:356:1: 356:69",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "358c524ceb72adb10e20dac301c1a5e4",
+      "invisible": [
+        "candor_report",
+        "walkdir"
+      ]
+    },
+    {
       "fn": "deps::read_crate_name",
       "loc": "crates/candor-scan/src/deps.rs:1431:1: 1431:61",
       "inferred": [

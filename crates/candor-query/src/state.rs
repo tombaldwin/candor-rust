@@ -138,7 +138,8 @@ pub(crate) fn locate_newest(kind: &str, dirs: &[String]) -> Option<PathBuf> {
                 continue;
             }
             let Ok(mtime) = ent.metadata().and_then(|m| m.modified()) else { continue };
-            if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
+            // SOUNDNESS R1722 — an mtime tie (two builds in one second on a coarse clock) takes the greater path, not the first listed.
+            if newest.as_ref().is_none_or(|(t, p)| mtime > *t || (mtime == *t && ent.path() > *p)) {
                 newest = Some((mtime, ent.path()));
             }
         }

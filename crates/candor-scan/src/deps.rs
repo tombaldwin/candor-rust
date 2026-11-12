@@ -347,6 +347,17 @@ pub(crate) const DEP_SEPARATORS: [char; 6] = [' ', '\t', '\n', '\r', ':', ','];
 /// Every report file a `deps` TOKEN names — the one enumeration, used by the loader below AND by the
 /// §3.3.1 sink-over-input guard in `scan.rs`.
 ///
+/// SOUNDNESS R1722 — EVERY directory walk this engine makes goes through here. `walkdir` yields a directory's entries in the
+/// filesystem's own `read_dir` order, which is NOT a property of the tree: APFS, ext4, overlayfs and tmpfs list the same files
+/// in different orders (tmpfs, in reverse creation order). Anything downstream that keeps the last of several same-named
+/// entries then answers differently on different machines — and a last-wins pick over an effectful and a pure twin is a
+/// silence on one of them. Sorting by file name makes the walk (and so the `paths` vector, the merged decl index and the
+/// report order) a function of the tree alone. `CANDOR_R1722_OFF` restores the filesystem's order, for an A/B.
+pub(crate) fn ordered_walk<P: AsRef<Path>>(p: P) -> walkdir::WalkDir {
+    let w = walkdir::WalkDir::new(p);
+    if candor_report::env::switch("CANDOR_R1722_OFF") { w } else { w.sort_by_file_name() }
+}
+
 /// SHARED BECAUSE WRITING IT TWICE WAS WRONG TWICE. The guard first registered only the directory
 /// token, so a sink inside a dep directory destroyed the operator's report at exit 0. The repair then
 /// hand-wrote a FLAT `read_dir` beside this RECURSIVE walk — and `--deps` writes one subdirectory per
@@ -356,7 +367,7 @@ pub(crate) fn dep_report_files(tok: &str) -> Vec<std::path::PathBuf> {
     let p = std::path::Path::new(tok);
     let mut out = Vec::new();
     if p.is_dir() {
-        for e in walkdir::WalkDir::new(p).into_iter().filter_map(Result::ok) {
+        for e in ordered_walk(p).into_iter().filter_map(Result::ok) {
             let f = e.path();
             let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if f.is_file() && name.ends_with(".json") && !name.contains("callgraph") {
@@ -1077,7 +1088,7 @@ pub(crate) fn cargo_deps(dir: &str) -> (std::collections::HashSet<String>, HashM
     // own Cargo.toml is a different package whose deps are ITS universe, not this crate's — scan_target
     // scans it separately. Without this, a nested fixture/path-dep's deps polluted the parent's κ
     // ledger (the source walk skips the nested sources, so the two had drifted out of agreement).
-    for entry in walkdir::WalkDir::new(dir)
+    for entry in ordered_walk(dir)
         .into_iter()
         .filter_entry(|e| {
             if e.depth() == 0 || !e.file_type().is_dir() {
@@ -1366,7 +1377,7 @@ pub(crate) fn non_registry_manifest_names(dir: &str) -> std::collections::HashSe
     let root_doc: Option<toml::Table> = find_workspace_root(Path::new(dir))
         .and_then(|root| std::fs::read_to_string(root.join("Cargo.toml")).ok())
         .and_then(|t| t.parse::<toml::Table>().ok());
-    for entry in walkdir::WalkDir::new(dir)
+    for entry in ordered_walk(dir)
         .into_iter()
         .filter_entry(|e| {
             if e.depth() == 0 || !e.file_type().is_dir() {
@@ -1450,13 +1461,19 @@ pub(crate) fn dirs_cargo_registry_src() -> Vec<std::path::PathBuf> {
     let home = candor_report::env::operator("CARGO_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| Path::new(&candor_report::env::operator("HOME").unwrap_or_default()).join(".cargo"));
-    std::fs::read_dir(home.join("registry").join("src"))
+    let mut roots: Vec<std::path::PathBuf> = std::fs::read_dir(home.join("registry").join("src"))
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_dir())
-        .collect()
+        .collect();
+    // SOUNDNESS R1722 — the same name@version under two registry index dirs resolves to the FIRST root; that is a function
+    // of the tree only if the roots are in a fixed order, not the filesystem's.
+    if !candor_report::env::switch("CANDOR_R1722_OFF") {
+        roots.sort();
+    }
+    roots
 }
 
 /// This scan's own package NAME, from `[package].name` — real TOML (⟨finding 3⟩: a header-table

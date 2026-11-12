@@ -1913,7 +1913,12 @@ impl DepSigs {
                 }
                 let want = compat(&nums(r));
                 for reg in crate::deps::dirs_cargo_registry_src() {
-                    for e in std::fs::read_dir(&reg).into_iter().flatten().flatten() {
+                    // SOUNDNESS R1722 — filesystem order is not a property of the tree.
+                    let mut ents: Vec<_> = std::fs::read_dir(&reg).into_iter().flatten().flatten().collect();
+                    if !candor_report::env::switch("CANDOR_R1722_OFF") {
+                        ents.sort_by_key(|e| e.file_name());
+                    }
+                    for e in ents {
                         let n = e.file_name().to_string_lossy().to_string();
                         let Some((name, ver)) = n.rsplit_once('-').filter(|(_, v)| v.chars().next().is_some_and(|c| c.is_ascii_digit())) else { continue };
                         if norm(name) == real && !ver.contains('-') && compat(&nums(ver)) == want && !out.contains(&e.path()) {

@@ -269,7 +269,7 @@ impl DepSigs {
         }
         let root = Path::new(dir);
         let mut facts = Facts { m: m.to_string(), ..Default::default() };
-        let walk = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
+        let walk = crate::deps::ordered_walk(root).into_iter().filter_entry(|e| {
             let n = e.file_name().to_string_lossy();
             if e.depth() == 0 {
                 return true;

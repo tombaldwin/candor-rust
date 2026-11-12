@@ -1434,7 +1434,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // walk, so the two file sets are exact complements and no file can fall between them.
     let peeking = peek_excluded;
 
-    for entry in walkdir::WalkDir::new(root)
+    for entry in crate::deps::ordered_walk(root)
         .into_iter()
         // A nested directory carrying its own Cargo.toml is a DIFFERENT package (Cargo's own
         // semantics) — folding its files into this crate collides same-named fns across packages
@@ -2391,8 +2391,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // FIELD dropped silent-pure. `owned_drops[T]` = the local drop-types edged when a `T` is constructed.
     // Gated to LOCAL drop-types reached through LOCAL field types, so an external field's invisible Drop is
     // never fabricated. Computed to a fixpoint (monotone; a struct owning itself via `Box` terminates).
-    let owned_drops: HashMap<String, BTreeSet<String>> = if merged.drop_types.is_empty() {
-        HashMap::new()
+    let (owned_drops, owned_drops_all): (HashMap<String, BTreeSet<String>>, HashMap<String, BTreeSet<String>>) = if merged.drop_types.is_empty() {
+        (HashMap::new(), HashMap::new())
     } else {
         // A field type's LEAF (`type_path` may qualify it — `inner: ffi::Deflate` — but `owned_drops`,
         // `drop_types`, and the struct keys are all LEAF-keyed, so compare by leaf or the transitive
@@ -2436,19 +2436,63 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 eprintln!("R718BORROW {t}.{field} {ty}");
             }
         };
+        // SOUNDNESS R1723 — A TWIN LEAF'S OWN FIELDS ARE EVERY ARM'S, NOT THE LAST ONE MERGED. `fields` / `field_elem` are
+        // leaf-keyed and keep the LAST same-leaf declaration merged, so for flate2's `ffi::c::Inflate { inner: Stream<..> }`
+        // beside `ffi::rust::Inflate { inner: Box<InflateState> }` the owner `mem::Decompress { inner: Inflate }` owned
+        // `Stream`'s drop or nothing depending on the walk order, and once R1722 sorted the walk the answer was fixed by the
+        // FILE NAMES. EXECUTED (fixture `rustagent-r1723/fx`, `wcfg`/`wfeat`): a `Wrap { inner: Inner }` overwrite whose
+        // built arm drops a file-writing guard read `deny Fs` 0 in one file order and 1 in the other. A twin leaf is read
+        // off the qualified index instead: the UNION of its arms (SPEC §4 ⟨0.38⟩ — a platform arm cannot be decided), less
+        // the arms the default build does not compile (`QualIndexes::cfg_off`, the R140/R977 default-build clause), unless
+        // that would leave none (nothing describes a build there, so every arm stays, R977). Kill switch `CANDOR_R1723_OFF`.
+        let r1723_on = !candor_report::env::switch("CANDOR_R1723_OFF");
+        // Inside a FILE the default build does not compile there is no default build to describe (R977), so a unit there
+        // reads the closure over EVERY arm (`owned_drops_all`); everywhere else the default-build one.
+        let twin_all: HashMap<String, Vec<String>> = {
+            let mut by_leaf: HashMap<String, Vec<String>> = HashMap::new();
+            if r1723_on {
+                for q in merged.qual.fields.keys() {
+                    by_leaf.entry(q.rsplit("::").next().unwrap_or(q).to_string()).or_default().push(q.clone());
+                }
+            }
+            by_leaf
+                .into_iter()
+                .filter(|(_, qs)| qs.len() >= 2)
+                .map(|(l, mut qs)| {
+                    qs.sort();
+                    (l, qs)
+                })
+                .collect()
+        };
+        let twin_built: HashMap<String, Vec<String>> = twin_all
+            .iter()
+            .map(|(l, qs)| {
+                let built: Vec<String> = qs.iter().filter(|q| !merged.qual.cfg_off.contains(*q)).cloned().collect();
+                (l.clone(), if built.is_empty() { qs.clone() } else { built })
+            })
+            .collect();
+        /// One declaration's `(fields, field_elem)` maps.
+        type Arm<'m> = (Option<&'m HashMap<String, String>>, Option<&'m HashMap<String, String>>);
+        let close = |twin_arms: &HashMap<String, Vec<String>>| -> HashMap<String, BTreeSet<String>> {
         let candidates = |t: &str| -> Vec<String> {
             let leaf = |ty: &String| ty.rsplit("::").next().unwrap_or(ty).to_string();
             let mut v: Vec<String> = Vec::new();
-            for (elem, src) in [(false, fields.get(t)), (true, field_elem.get(t))] {
+            let arms: Vec<Arm<'_>> = match twin_arms.get(t) {
+                Some(qs) => qs.iter().map(|q| (merged.qual.fields.get(q), merged.qual.field_elem.get(q))).collect(),
+                None => vec![(fields.get(t), field_elem.get(t))],
+            };
+            for (elem, own_fields, src) in arms.iter().flat_map(|(f, e)| [(false, *f, *f), (true, *f, *e)]) {
                 let Some(src) = src else { continue };
                 for (k, ty) in src {
                     // VEIN B — `field_elem` now records a std WRAPPER's argument (`m: Mutex<G>` -> `G`) for
                     // the typing routes. Drop glue is a different question with its own model (vein D) and
                     // this change does not move it: a wrapper-held value contributes exactly what it did
                     // before vein B, which was nothing.
+                    if ty == crate::cache::QUAL_TOMB {
+                        continue;
+                    }
                     if elem
-                        && fields
-                            .get(t)
+                        && own_fields
                             .and_then(|m| m.get(k))
                             .is_some_and(|w| crate::lang::is_value_wrapper(w.rsplit("::").next().unwrap_or(w)))
                     {
@@ -2504,7 +2548,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 break;
             }
         }
+        if candor_report::env::trace("CANDOR_R1723_INSTR") {
+            let mut tw: Vec<&String> = twin_arms.keys().collect();
+            tw.sort();
+            for l in tw {
+                let o: Vec<&String> = owned.get(l).map(|s| s.iter().collect()).unwrap_or_default();
+                eprintln!("R1723DROP\t{l}\t{}\t{}", twin_arms[l].join(","), o.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")); // §E1 REACH
+            }
+        }
         owned
+        };
+        (close(&twin_built), close(&twin_all))
     };
     // DROP-RELEVANT LEAVES — the set the collector gates its `<construct>` markers on. Hoisted ABOVE
     // Pass B (it used to sit beside the call loop) because the marker is now emitted at the construction
@@ -2517,6 +2571,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         .iter()
         .cloned()
         .chain(owned_drops.keys().cloned())
+        .chain(owned_drops_all.keys().cloned())
         .collect();
 
     // SOUNDNESS R182 — fn LEAF -> the DROP-RELEVANT candidate return types the ambiguity rule withdrew.
@@ -5224,7 +5279,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // NARROWING conjunct on this half alone, so the field route can only lose charges
                 // relative to what shipped — R49's A/B is not being re-opened by this change.
                 if !returns_escapable {
-                    if let Some(owned) = owned_drops.get(&ty) {
+                    // SOUNDNESS R1723 — a unit in a file the default build does not compile reads every twin arm (R977).
+                    let in_off_file = f.loc.rsplitn(3, ':').nth(2).is_some_and(|file| cfg_off_files.contains(file));
+                    let od = if in_off_file { &owned_drops_all } else { &owned_drops };
+                    if let Some(owned) = od.get(&ty) {
                         drops_here.extend(owned.iter().cloned());
                         for o in owned {
                             drop_quals.entry(o.clone()).or_default().insert(None); // R1253 — a field's twin is not spelled
@@ -9254,6 +9312,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // (the 0.40.15 behaviour, for the A/B's attribution). The R1351/R1353 filter above applies to the carried keys too:
     // a key whose trait provably does not declare the member is not made valid by appearing on a union (rule 1).
     let r1324_hedge = candor_report::env::switch("CANDOR_R1324_HEDGE");
+    let r1723_off = candor_report::env::switch("CANDOR_R1723_OFF");
     let union_dispatch_hedge = |cand: &str, own_tail: &str, inf: &mut std::collections::BTreeSet<&'static str>, out: &mut BTreeSet<String>, don: &mut BTreeSet<String>| {
         if candor_report::env::switch("CANDOR_R1324_OFF") {
             return;
@@ -9265,7 +9324,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 continue;
             }
             let (tr, m) = (segs[segs.len() - 2], segs[segs.len() - 1]);
-            if format!("{tr}::{m}") == own_tail {
+            // A contributor dispatching the union's OWN member skips itself — except, SOUNDNESS R1723, on a union for a
+            // DEPENDENCY's trait (`serde#de::Visitor::expecting` over serde_path_to_error's `Wrap` / `CaptureKey`, which
+            // forward `self.delegate.expecting(f)` to a caller-chosen visitor). There the member it forwards to is the
+            // CONSUMER's implementor, which no union in this report contains: the key is carried, so a chained consumer's
+            // join reaches its own implementor. Measured (L2, `rustagent-r1723/l2/spte`, live join): without it the
+            // consumer's `Show::fmt` read `[]` over an EXECUTED write once R1723 removed the false-reason hedge v0.41.3 had
+            // put on this row. A LOCAL trait's union keeps the skip. `CANDOR_R1723_OFF=1` restores it everywhere.
+            if format!("{tr}::{m}") == own_tail && (owner == crate_name.as_str() || r1723_off) {
                 continue;
             }
             let protocol = matches!(m, "fmt" | "to_string" | "eq" | "ne" | "hash" | "clone" | "clone_from");
