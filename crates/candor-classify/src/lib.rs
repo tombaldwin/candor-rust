@@ -928,6 +928,26 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     // `Unknown` alone (a `dyn ShutdownHandle`) and which now carries a `Net` rule (EXECUTED: a worker blocked in a body read ended at
     // 260 ms with an error after `agent.shutdown()`, ran 811 ms to success without it).
     ("ureq", "ureq::unversioned::transport::tcp::TcpStream::shutdown", "R1696:conditional"),
+    // R1732 (overcharge x3): reqwest 0.13.5 blocking `Part::text`, `Part::bytes` and `Form::text` build an in-memory `Bytes` body
+    // (`Body::from(&'static str | String | &'static [u8] | Vec<u8>)`, then `Part::new`): no `std::fs` anywhere in the three bodies.
+    // The `Fs` is blocking `Body`'s SIX `From<_> for Body` impls sharing one key, one of which (`From<File>`, `f.metadata()`)
+    // reads the file; `Part::text`'s `Body::from(..)` call used to be disclosed `ambiguous:same-name local defs` and R1657
+    // stage 2's re-export table now resolves it to the merged unit (`CANDOR_R1657S2_OFF` turns the `Fs` off). `Part::file` /
+    // `Form::file`, which really open a path, keep their rule.
+    ("reqwest", "reqwest::blocking::multipart::Form::text", "R1732:overcharge"),
+    ("reqwest", "reqwest::blocking::multipart::Part::bytes", "R1732:overcharge"),
+    ("reqwest", "reqwest::blocking::multipart::Part::text", "R1732:overcharge"),
+    // R1733 (conditional x1): rustls 0.23.46 `Accepted::into_connection` runs the ClientHello handshake step, which calls
+    // `config.key_log.log(..)` (`dyn KeyLog`): with `ServerConfig::key_log = Arc::new(KeyLogFile::new())` and `SSLKEYLOGFILE` set it
+    // APPENDS to that file (EXECUTED: 5 lines written), with the default `NoKeyLog` nothing is touched (EXECUTED: no file). The
+    // report's `Fs` is the `dyn KeyLog` union (`KeyLogFile::log` is the one visible implementor that writes), surfaced when R1657
+    // stage 2 resolved `with_certified_key`'s `handle_client_hello` calls that were `ambiguous:same-name local methods`.
+    ("rustls", "rustls::server::server_conn::Accepted::into_connection", "R1733:conditional"),
+    // R1734 (overcharge x1): redis 1.8.1 `ClusterClient::new` is `Self::builder(nodes).build()`; `ClusterClientBuilder::build` is a
+    // `REVIEWED_PURE_ENTRIES` read (PEM bytes the caller supplied, nothing opened). The scan dropped the `.build()` edge on a
+    // `Self::builder(..)` receiver until R1717's builder typing (`CANDOR_R1717_OFF` makes the row vanish), so the wrapper now inherits the
+    // `Fs` the `pem` vocabulary puts on `ClusterParams::from` -> `retrieve_tls_certificates`. The edge is real; the effect is not.
+    ("redis", "redis::cluster_handling::client::ClusterClient::new", "R1734:overcharge"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -5155,6 +5175,11 @@ fn tonic_r1528(path: &str) -> Option<&'static str> {
 /// socket) and `AssumeRoleProvider::builder(..).configure(&sdk).build()` (EXECUTED: nothing) read pure.
 /// `credentials::default_provider` and `token::default_provider` (not rows; the same `Builder::build` behind a free fn)
 /// are charged with them.
+/// 2026-11-13 refresh: `CredentialsProviderChain::{default_provider, or_default_provider}` and `TokenProviderChain::{..}` are
+/// `first_try(.., default_provider().await)` / `or_else(.., default_provider().await)` (meta/credentials/chain.rs:79-93,
+/// meta/token.rs:70-84), so they are those free fns' effect and charged with them. The scan used to DROP the
+/// `DefaultCredentialsChain::builder().build()` edge inside the free fn (R1717's builder typing restored it, which is what grew
+/// the four rows as `Log,Unknown`), so the reading above carries over unchanged: `Net`, state-conditional.
 ///
 /// ONE EFFECT IS ALL `classify` CAN CARRY (R1575 class): every `Fs` row also reads `AWS_*` (`Env`) and every `Net` row also
 /// reads the environment and the profile files (`Env`, `Fs`); only the one named is charged.
@@ -5194,7 +5219,11 @@ fn aws_config_r1528(path: &str) -> Option<&'static str> {
         | ("default_provider::token", "DefaultTokenChain" | "Builder", "build")
         | ("sts" | "sts::assume_role", "AssumeRoleProvider" | "AssumeRoleProviderBuilder", "build" | "build_from_provider")
         | ("sso::token", "SsoTokenProvider" | "Builder", "build")
-        | ("ecs", "EcsCredentialsProvider", "credentials") => Some("Net"),
+        | ("ecs", "EcsCredentialsProvider", "credentials")
+        // the chain constructors that `.await` the free `default_provider` above (aws-config 1.13.2; the 2026-11-13 refresh)
+        // (`""` is the crate-root spelling the coverage-gate's consumer-path guess records, `aws_config::TokenProviderChain::..`)
+        | ("meta::credentials::chain" | "meta::credentials" | "", "CredentialsProviderChain", "default_provider" | "or_default_provider")
+        | ("meta::token" | "", "TokenProviderChain", "default_provider" | "or_default_provider") => Some("Net"),
         _ => None,
     }
 }

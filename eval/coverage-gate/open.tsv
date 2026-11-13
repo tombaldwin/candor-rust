@@ -103,12 +103,17 @@ rdkafka	rdkafka::ThreadedProducer::begin_transaction	Log	src/producer/base_produ
 rdkafka	rdkafka::TopicPartitionList::from_topic_map	Log	src/topic_partition_list.rs	rdkafka::topic_partition_list::TopicPartitionList::from_topic_map
 rdkafka	rdkafka::TopicPartitionList::new	Log	src/topic_partition_list.rs	rdkafka::topic_partition_list::TopicPartitionList::new
 rdkafka	rdkafka::TopicPartitionList::with_capacity	Log	src/topic_partition_list.rs	rdkafka::topic_partition_list::TopicPartitionList::with_capacity
+redis	redis::ClusterClient::new	Fs	src/cluster_handling/client.rs	redis::cluster_handling::client::ClusterClient::new
 redis	redis::EntraIdCredentialsProvider::start	Log,Unknown	src/entra_id.rs	redis::entra_id::EntraIdCredentialsProvider::start
 redis	redis::MultiplexedConnection::new	Clock,Log,Unknown	src/aio/multiplexed_connection.rs	redis::aio::multiplexed_connection::MultiplexedConnection::new
 redis	redis::MultiplexedConnection::new_with_config	Clock,Log,Unknown	src/aio/multiplexed_connection.rs	redis::aio::multiplexed_connection::MultiplexedConnection::new_with_config
 redis	redis::Sentinel::build	Log,Rand	src/sentinel.rs	redis::sentinel::Sentinel::build
 redis	redis::SentinelClient::build	Log,Rand	src/sentinel.rs	redis::sentinel::SentinelClient::build
 redis	redis::SentinelClientBuilder::build	Log,Rand	src/sentinel.rs	redis::sentinel::SentinelClientBuilder::build
+reqwest	reqwest::Form::text	Fs,Unknown	src/blocking/multipart.rs	reqwest::blocking::multipart::Form::text
+reqwest	reqwest::Part::bytes	Fs	src/blocking/multipart.rs	reqwest::blocking::multipart::Part::bytes
+reqwest	reqwest::Part::text	Fs	src/blocking/multipart.rs	reqwest::blocking::multipart::Part::text
+rustls	rustls::Accepted::into_connection	Fs,Unknown	src/server/server_conn.rs	rustls::server::server_conn::Accepted::into_connection
 sea_orm	sea_orm::RusqliteSharedConnection::acquire	Clock	src/driver/rusqlite.rs	sea_orm::driver::rusqlite::RusqliteSharedConnection::acquire
 sea_orm	sea_orm::RusqliteSharedConnection::begin	Clock,Db,Log,Unknown	src/driver/rusqlite.rs	sea_orm::driver::rusqlite::RusqliteSharedConnection::begin
 sea_orm	sea_orm::RusqliteSharedConnection::close	Clock	src/driver/rusqlite.rs	sea_orm::driver::rusqlite::RusqliteSharedConnection::close
