@@ -171,6 +171,10 @@ async_process	async_process::Command::stdin	Exec	Exec	async_process::Command::st
 async_process	async_process::Command::stdout	Exec	Exec	async_process::Command::stdout
 async_process	async_process::Command::uid	Exec	Exec	async_process::unix::Command::uid
 aws_config	aws_config::ConfigLoader::load	Log,Unknown	Net	aws_config::loader::ConfigLoader::load
+aws_config	aws_config::CredentialsProviderChain::default_provider	Log,Unknown	Net	aws_config::meta::credentials::chain::CredentialsProviderChain::default_provider
+aws_config	aws_config::CredentialsProviderChain::or_default_provider	Log,Unknown	Net	aws_config::meta::credentials::chain::CredentialsProviderChain::or_default_provider
+aws_config	aws_config::TokenProviderChain::default_provider	Log,Unknown	Net	aws_config::meta::token::TokenProviderChain::default_provider
+aws_config	aws_config::TokenProviderChain::or_default_provider	Log,Unknown	Net	aws_config::meta::token::TokenProviderChain::or_default_provider
 aws_config	aws_config::default_provider::app_name::Builder::app_name	Log	Fs	aws_config::default_provider::app_name::Builder::app_name
 aws_config	aws_config::default_provider::checksums::request_checksum_calculation_provider	Log	Fs	aws_config::default_provider::checksums::request_checksum_calculation_provider
 aws_config	aws_config::default_provider::checksums::response_checksum_validation_provider	Log	Fs	aws_config::default_provider::checksums::response_checksum_validation_provider
