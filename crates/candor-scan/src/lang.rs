@@ -6560,6 +6560,12 @@ pub(crate) fn collect_item_uses(
     }
     for (k, v) in off {
         if !k.starts_with(['*', '\u{1}']) {
+            // SOUNDNESS R1711 (c) — the inactive arm was collected into a scratch map, which has not seen the extern prelude
+            // or this module's renamed `extern crate`: `#[cfg(feature = "raw_value")] use serde::de::Visitor;` under serde_json's
+            // `extern crate serde_core as serde;` kept `serde::de::Visitor`, so a bound read inside the `CfgOffScope` keyed the
+            // dispatch `serde#…` while every active site of the crate keys `serde_core#…`. Resolved here as `collect_use` does
+            // for an active arm.
+            let v = if candor_report::env::switch("CANDOR_R1711C_OFF") { v } else { extern_alias_head(&v, out).unwrap_or(v) };
             out.entry(format!("{CFG_OFF_USE_PREFIX}{k}")).or_insert(v);
         }
     }
@@ -7264,21 +7270,23 @@ pub(crate) fn collect_glob_foreign_impls(
                     continue; // explicitly imported (obligation 2's own key) or std's
                 }
                 let Some(ty) = impl_type_name(&im.self_ty) else { continue };
-                let roots: std::collections::BTreeSet<String> = uses
+                // SOUNDNESS R1715 — each record also carries the glob's BASE path (`serde::de`), the module the leaf is read
+                // from, so the consumer can follow a facade's re-export of that module (`lang`'s third field; `scan.rs`).
+                let roots: std::collections::BTreeSet<(String, String)> = uses
                     .get(GLOB_KEY)
                     .into_iter()
                     .flat_map(|v| v.split('\u{1}'))
                     .filter_map(|g| {
                         let g = expand(g, uses);
                         let root = g.split("::").next().unwrap_or("").to_string();
-                        (!root.is_empty() && is_dependency_crate_root(&root)).then_some(root)
+                        (!root.is_empty() && is_dependency_crate_root(&root)).then_some((root, g))
                     })
                     .collect();
-                for root in &roots {
+                for (root, base) in &roots {
                     for ii in &im.items {
                         if let syn::ImplItem::Fn(m) = ii {
                             let method = m.sig.ident.to_string();
-                            out.insert(format!("{root}#{leaf}::{method}\u{1f}{ty}::{method}"));
+                            out.insert(format!("{root}#{leaf}::{method}\u{1f}{ty}::{method}\u{1f}{base}"));
                         }
                     }
                 }

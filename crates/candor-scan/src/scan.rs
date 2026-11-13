@@ -1937,6 +1937,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             install_reexport_names(&merged); // R1657 stage 2 — the re-merge rebuilt `mod_aliases`
         }
     }
+    // SOUNDNESS R1711 (c) — the obligation-2 implementor index under the crate ROOT's renamed `extern crate X as Y;`. Pass A
+    // keys an `impl Y::de::Error for T` written in a file other than the root with the file's own `use` map, which has not
+    // seen the root's extern prelude (Pass B seeds it, `lang::seed_extern_prelude`), so the key named `Y#…` while every
+    // Pass B site of the same crate (`dispatchesOn`, the `implemented` witness that mints a path reference's key) names
+    // `X#…`. Two authorities spelling one trait two ways: serde_json's `de::Error::invalid_type(..)` lost its key (the
+    // witness asked `serde_core#…` of an index holding `serde#…`) and its union rows published under `serde#`, an owner
+    // no dependency report carries. See `rekey_root_extern_owners`.
+    rekey_root_extern_owners(&mut merged);
     // SOUNDNESS R1056 — the slice / array / tuple receiver tails Pass B may type a receiver into. See
     // `lang::NONPATH_RECV_TAILS`; installed here, after the last merge and before any Pass B collection.
     {
@@ -3444,6 +3452,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         if !candor_report::env::switch("CANDOR_R1345_OFF") {
             for g in &merged.glob_impl_foreign {
                 let Some((k, q)) = g.split_once('\u{1f}') else { continue };
+                let q = q.split('\u{1f}').next().unwrap_or(q); // R1715 — the third field is the glob base
                 let Some((owner, member)) = k.split_once('#') else { continue };
                 let tr_leaf = member.split("::").next().unwrap_or("");
                 if !deps.contains(owner) || merged.trait_decls.contains_key(tr_leaf) {
@@ -3455,6 +3464,75 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let e = m.entry(k.to_string()).or_default();
                 if !e.iter().any(|x| x == q) {
                     e.push(q.to_string());
+                }
+            }
+        }
+        m
+    };
+    // SOUNDNESS R1715 — THE CONSUMER'S IMPLEMENTORS UNDER THE CRATE A FACADE RE-EXPORTS FROM. An obligation-2 key is
+    // formed from THIS crate's own `use` map (`lang::foreign_trait_owner_qual`), so `impl serde::de::Visitor for V` keys
+    // `serde#de::Visitor::visit_u64` — while `serde` only re-exports `serde_core::de` (`pub use serde_core::{de, ..}` in
+    // serde 1.0.228's root), and a producer keys the dispatch under the trait's true owner, `serde_core#…` (⟨0.39⟩,
+    // obligation 1). Nothing followed the facade, so the join missed and the consumer read pure over its own implementor:
+    // EXECUTED (`deny Fs` 1 on 0.41.3 -> 0) once R1710 made serde_json publish `serde_core#` instead of the alias's
+    // accidental `serde#`, and on every arm for a serde_core producer key. Each implementor key whose owner is a manifest
+    // dependency is resolved through that dependency's lock-pinned root re-exports (`DepSigs::facade_owners`, SPEC §2
+    // ⟨0.42⟩ `dependencySources`: the reading only ADDS a join, and the package read is recorded when it answers one), and
+    // filed here under the owner's 2-segment tail. ADDED at the join beside the exact / tail2 hit, never instead of it.
+    // R1345's glob records resolve through their glob base. `CANDOR_R1715_OFF=1` disables it.
+    // …and where the facade's source CANNOT be read (no Cargo.lock, a version not checked out), the trait's 2-segment tail
+    // (`Visitor::visit_u64`) -> the dependencies this crate implements it under, for the join-site hedge below.
+    let mut facade_blind: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let facade_t2: HashMap<String, (Vec<String>, BTreeSet<String>)> = {
+        let mut m: HashMap<String, (Vec<String>, BTreeSet<String>)> = HashMap::new();
+        if !candor_report::env::switch("CANDOR_R1715_OFF") {
+            // (owner alias, trait path inside it, method, implementor qual)
+            let mut todo: Vec<(String, String, String, String)> = Vec::new();
+            for (k, v) in merged.foreign_impls.iter() {
+                let Some((owner, member)) = k.split_once('#') else { continue };
+                let Some((tp, meth)) = member.rsplit_once("::") else { continue };
+                for q in v {
+                    todo.push((owner.to_string(), tp.to_string(), meth.to_string(), q.clone()));
+                }
+            }
+            for g in &merged.glob_impl_foreign {
+                let mut it = g.split('\u{1f}');
+                let (Some(k), Some(q), Some(base)) = (it.next(), it.next(), it.next()) else { continue };
+                let Some((owner, member)) = k.split_once('#') else { continue };
+                let Some((leaf, meth)) = member.rsplit_once("::") else { continue };
+                let Some((broot, bpath)) = base.split_once("::") else {
+                    todo.push((owner.to_string(), leaf.to_string(), meth.to_string(), q.to_string()));
+                    continue;
+                };
+                if broot == owner && !merged.trait_decls.contains_key(leaf) {
+                    todo.push((owner.to_string(), format!("{bpath}::{leaf}"), meth.to_string(), q.to_string()));
+                }
+            }
+            todo.sort();
+            todo.dedup();
+            let mut sigs = r1578_sigs.borrow_mut();
+            for (owner, tp, meth, q) in todo {
+                if !deps.contains(owner.as_str()) {
+                    continue;
+                }
+                let real = dep_renames.get(owner.as_str()).cloned().unwrap_or_else(|| owner.clone());
+                if sigs.facade(dir, &owner, &real).is_none() {
+                    if let Some(t2) = tail2(&format!("{tp}::{meth}")) {
+                        facade_blind.entry(t2).or_default().insert(owner.clone());
+                    }
+                    continue;
+                }
+                for (o, rest, via) in sigs.facade_owners(dir, &owner, &real, &tp) {
+                    let Some(t2) = tail2(&format!("{rest}::{meth}")) else { continue };
+                    let key = format!("{o}#{t2}");
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1715FACADE\t{owner}#{tp}::{meth}\t{key}\t{q}"); // §E1 REACH COUNTER
+                    }
+                    let e = m.entry(key).or_default();
+                    if !e.0.contains(&q) {
+                        e.0.push(q.clone());
+                    }
+                    e.1.extend(via);
                 }
             }
         }
@@ -4089,6 +4167,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         .filter(|r| r.alias != r.name && r.alias != "*" && r1605_ty_traits.contains_key(&r.name))
         .map(|r| (r.alias.clone(), r.name.clone()))
         .collect();
+    // SOUNDNESS R1715 — per (package, path after the crate): the owner keys a facade's re-exports resolve it to.
+    type R1715Keys = Vec<(String, Vec<String>)>; // (owner key, packages read to reach it)
+    let mut r1715_call_cache: HashMap<(String, String), R1715Keys> = HashMap::new();
+    let mut r1715_blind_cache: HashMap<String, bool> = HashMap::new();
+    // …and every ABSTRACTION MEMBER a chained report dispatches on, by its 2-segment tail (`Deserialize::deserialize` of
+    // `serde_core#de::Deserialize::deserialize`) -> the owners it is dispatched under. A dispatched member is a trait's
+    // (obligation 1 keys only those), so an inherent `Type::m` another package merely ADDS never qualifies.
+    let r1715_tail_owners: HashMap<String, BTreeSet<String>> = {
+        let mut m: HashMap<String, BTreeSet<String>> = HashMap::new();
+        for d in deps_idx.by_key.values() {
+            for k in &d.dispatches_on {
+                let Some((o, rest)) = k.split_once('#') else { continue };
+                if let Some(t2) = tail2(rest) {
+                    m.entry(t2).or_default().insert(o.to_string());
+                }
+            }
+        }
+        m
+    };
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
@@ -6193,8 +6290,66 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if r1349_union_only && crate::lang::reach_debug() {
                 eprintln!("R1349UNION\t{}\t{}", f.qual, jpath); // §E1 REACH COUNTER
             }
+            // SOUNDNESS R1715 — A CALL WRITTEN THROUGH A FACADE OF THE OWNER. `serde::de::Deserialize::deserialize(..)` (or
+            // `<T as de::Deserialize>::deserialize`) is serde_core's trait member, re-exported by serde's root (`pub use
+            // serde_core::{de, ..}`); every chained entry for it — serde_json's `interfaceUnion` row with its implementors —
+            // is keyed `serde_core#…`, and `serde#Deserialize::deserialize` asked only the facade's own report. Before R1710
+            // serde_json's alias spelling published that union under `serde#` and the join held by accident; after it the
+            // consumer read `Unknown` with no edge and lost the `Fs` its own `Error::invalid_type` performs (EXECUTED
+            // e_facade). The path is resolved through the facade's lock-pinned root re-exports (`DepSigs::facade_owners`) and
+            // every entry the OWNER's key finds is UNIONED into the hit (`DepFn::union_with`, the entry-collision rule). With
+            // the facade itself uncovered the resolved hit is a CONTRIBUTOR only, as R1349's is: the facade's `invisible`
+            // still fires. `CANDOR_R1715_OFF=1` disables it.
+            let r1715_extra: Vec<(&crate::deps::DepFn, Vec<String>)> = if jpath.contains("::")
+                && deps.contains(cr_real)
+                && !candor_report::env::switch("CANDOR_R1715_OFF")
+            {
+                let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
+                let ck = (cr_real.to_string(), rel.to_string());
+                let keys = r1715_call_cache.entry(ck).or_insert_with(|| {
+                    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+                    for (o, rest, via) in r1578_sigs.borrow_mut().facade_owners(dir, cr, cr_real, rel) {
+                        let k = if rest.contains("::") { tail2(&rest).map(|t2| format!("{o}#{t2}")) } else { Some(format!("{o}#{rest}")) };
+                        if let Some(k) = k {
+                            out.push((k, via));
+                        }
+                    }
+                    out
+                });
+                keys.iter().filter_map(|(k, via)| deps_idx.by_key.get(k).map(|d| (d, via.clone()))).collect()
+            } else {
+                Vec::new()
+            };
+            if !r1715_extra.is_empty() && crate::lang::reach_debug() {
+                eprintln!("R1715CALL\t{}\t{}\t{}", f.qual, jpath, r1715_extra.len()); // §E1 REACH COUNTER
+            }
+            // R1715 — the same call where the dependency's source CANNOT be read (no Cargo.lock, a version not checked out):
+            // whether it re-exports the member is unknowable, and a chained report DISPATCHING on that member's 2-segment
+            // tail under ANOTHER owner (`serde_core#de::Deserialize::deserialize` for `serde::de::Deserialize::deserialize(..)`)
+            // names exactly the abstraction such a re-export would have joined. HEDGE the call with the member's dispatch reason rather
+            // than read the facade's miss as purity (EXECUTED e_facade, no lockfile: ABSENT, `deny Fs` 0). A readable source
+            // that does not re-export it proves the call is the facade's own, and nothing is added.
+            if r1715_extra.is_empty() && jpath.contains("::") && deps.contains(cr_real) && !candor_report::env::switch("CANDOR_R1715_OFF") {
+                let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
+                if let Some(t2) = rel.contains("::").then(|| tail2(rel)).flatten() {
+                    let blind = r1715_blind_cache.entry(cr_real.to_string())
+                        .or_insert_with(|| r1578_sigs.borrow_mut().facade(dir, cr, cr_real).is_none());
+                    if *blind {
+                        let elsewhere = r1715_tail_owners.get(&t2).is_some_and(|os| os.iter().any(|o| o != cr_real));
+                        if elsewhere {
+                            if let Some((tr, m)) = t2.split_once("::") {
+                                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr}.{m}"));
+                                if crate::lang::reach_debug() {
+                                    eprintln!("R1715BLINDCALL\t{}\t{jpath}", f.qual); // §E1 REACH COUNTER
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if classified.is_none() && (!resolved_local || dep_default_path.is_some() || r1152_union) && !suppress_bare_leaf
-                && jpath.contains("::") && (covered_owner || r1349_union_only)
+                && jpath.contains("::") && (covered_owner || r1349_union_only || !r1715_extra.is_empty())
             {
                 let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
                 let key = if rel.contains("::") {
@@ -6250,6 +6405,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 .insert(format!("ambiguous:same-name units in {cr_real} under a re-exported path"));
                         }
                     }
+                }
+                // R1715 — the owner's entries, unioned into whatever the facade's own key found.
+                let r1715_owned: Option<crate::deps::DepFn> = if r1715_extra.is_empty() {
+                    None
+                } else {
+                    let mut d = hit.cloned().unwrap_or_default();
+                    for (e, via) in &r1715_extra {
+                        d.union_with(e);
+                        for a in via {
+                            r1578_sigs.borrow_mut().note_typed(a);
+                        }
+                    }
+                    Some(d)
+                };
+                if r1715_owned.is_some() {
+                    hit = r1715_owned.as_ref();
                 }
                 if let Some(de) = hit {
                     dep_join_hit = covered_owner; // R1349 — a contributor is not a resolution of the call
@@ -6374,9 +6545,38 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 eprintln!("R529HIT\tCHAIN\t{}\t{ukey}", f.qual); // §E1 REACH PROBE
                             }
                         }
-                        if let Some(impl_quals) = merged.foreign_impls.get(&ukey)
-                            .or_else(|| foreign_impls_by_tail2.get(&ukey_t2))
-                        {
+                        // SOUNDNESS R1715 — …and the implementors this crate wrote through a FACADE of the owner (see
+                        // `facade_t2`): `impl serde::de::Visitor` answers `serde_core#de::Visitor::visit_u64`. Unioned with
+                        // the hit above (a crate may spell one trait both ways), never instead of it.
+                        let facade_hit = facade_t2.get(&ukey_t2);
+                        if let Some((_, via)) = facade_hit {
+                            for a in via {
+                                r1578_sigs.borrow_mut().note_typed(a);
+                            }
+                        }
+                        let direct_hit = merged.foreign_impls.get(&ukey)
+                            .or_else(|| foreign_impls_by_tail2.get(&ukey_t2));
+                        // R1715 — no facade answered, and this crate implements a member of that very tail under a DEPENDENCY
+                        // whose source could not be read (`facade_blind`): that implementor may be the owner's trait through a
+                        // re-export this scan cannot see, so the body that runs may be here and unjoined — whether or not
+                        // another implementor answered the key exactly. HEDGE at the join site, with §4's dispatch reason for
+                        // the member. A source that CAN be read and does not re-export it proves the two traits distinct, and
+                        // nothing is added.
+                        if facade_hit.is_none() && !candor_report::env::switch("CANDOR_R1715_OFF") {
+                            let tl = ukey_member.rsplit("::").take(2).collect::<Vec<_>>();
+                            if tl.len() == 2 {
+                                let t2l = format!("{}::{}", tl[1], tl[0]);
+                                if facade_blind.get(&t2l).is_some_and(|fs| fs.iter().any(|x| x != ukey_owner)) {
+                                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                    unknown_why.entry(f.qual.clone()).or_default().insert(r529_reason(&ukey));
+                                    if crate::lang::reach_debug() {
+                                        eprintln!("R1715BLIND\t{}\t{ukey}", f.qual); // §E1 REACH COUNTER
+                                    }
+                                }
+                            }
+                        }
+                        if direct_hit.is_some() || facade_hit.is_some() {
+                            let impl_quals = direct_hit.into_iter().flatten().chain(facade_hit.into_iter().flat_map(|f| f.0.iter()));
                             answered = true;
                             for cand in impl_quals {
                                 if let Some(ts) = by_tail2.get(cand) {

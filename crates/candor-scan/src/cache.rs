@@ -1324,6 +1324,75 @@ pub(crate) struct MergedDecls {
     pub(crate) impl_members: std::collections::HashSet<String>,
 }
 
+/// SOUNDNESS R1711 (c) — rewrite the OWNER of every obligation-2 implementor key (`foreign_impls`, R1345's
+/// `glob_impl_foreign` tail records and R529's block-local `nested_impl_foreign`) that names a crate-ROOT renamed extern `Y` (`extern crate X as Y;` in the root file,
+/// `merged.extern_aliases` keys without `::`) to `X`, the crate Pass B's extern prelude resolves `Y` to. Pass A forms these
+/// keys from each file's own `use` map, which the root's extern prelude does not reach (it is seeded at Pass B), so only a
+/// file other than the root could spell `Y#…`; the root file's own `use` map binds `Y -> X` already. A key formed from a
+/// file that shadows `Y` with its own declaration or import does not name `Y` as its owner (`expand` rewrote the head),
+/// so it is untouched. A `#[cfg]` pair binding `Y` to two crates is left as written (one arm would be a guess). Returns
+/// the number of keys rewritten. `CANDOR_R1711C_OFF=1` disables it (as does `CANDOR_R1710_OFF=1`, the whole extern-alias
+/// reading).
+pub(crate) fn rekey_root_extern_owners(m: &mut MergedDecls) -> usize {
+    if crate::lang::r1710_off() || candor_report::env::switch("CANDOR_R1711C_OFF") {
+        return 0;
+    }
+    let root: HashMap<String, String> = m
+        .extern_aliases
+        .iter()
+        .filter(|(y, x)| {
+            !y.contains("::") && !x.contains(crate::decls::ALIAS_ALT_SEP) && *y != *x && crate::lang::is_dependency_crate_root(x)
+        })
+        .map(|(y, x)| (y.clone(), x.clone()))
+        .collect();
+    if root.is_empty() {
+        return 0;
+    }
+    let canon = |k: &str| -> Option<String> {
+        let (owner, rest) = k.split_once('#')?;
+        root.get(owner).map(|x| format!("{x}#{rest}"))
+    };
+    let mut n = 0;
+    let old = std::mem::take(&mut m.foreign_impls);
+    // Deterministic: a rewritten key may land on one a file already spelled `X#…`; their implementor lists are unioned
+    // in sorted key order, then de-duplicated in first-seen order, so the result does not depend on HashMap iteration.
+    let mut keys: Vec<String> = old.keys().cloned().collect();
+    keys.sort();
+    for k in keys {
+        let v = &old[&k];
+        let nk = match canon(&k) {
+            Some(c) => {
+                n += 1;
+                if crate::lang::reach_debug() {
+                    eprintln!("R1711CREKEY\t{k}\t{c}"); // §E1 REACH COUNTER
+                }
+                c
+            }
+            None => k.clone(),
+        };
+        let e = m.foreign_impls.entry(nk).or_default();
+        for q in v {
+            if !e.contains(q) {
+                e.push(q.clone());
+            }
+        }
+    }
+    for set in [&mut m.glob_impl_foreign, &mut m.nested_impl_foreign] {
+        for g in std::mem::take(set) {
+            match canon(&g) {
+                Some(c) => {
+                    n += 1;
+                    set.insert(c);
+                }
+                None => {
+                    set.insert(g);
+                }
+            }
+        }
+    }
+    n
+}
+
 /// SOUNDNESS R1489 — a MIXED `#[cfg]` twin: one arm declares `type T = R;` (or `pub use x::R as T;`), the other a
 /// STRUCT/ENUM/UNION `T` at the same qualified name. The alias map recorded only the alias arm, so `T` (and every alias
 /// naming it) expanded to `R` alone and the nominal arm's methods and destructor were never reached — even with no alias

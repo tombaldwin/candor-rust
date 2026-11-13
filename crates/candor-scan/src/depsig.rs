@@ -1720,6 +1720,135 @@ pub(crate) struct DepSigs {
     pub(crate) consulted: std::collections::BTreeMap<String, DepSource>,
     /// SOUNDNESS R1627 — `probe_clear` answers, per (consumer dir, method)
     probes: HashMap<(String, String), Result<(), String>>,
+    /// SOUNDNESS R1715 — `facade` answers, per package (real name): the paths its root file re-exports from its dependencies
+    facades: HashMap<String, Option<std::rc::Rc<Facade>>>,
+}
+
+/// SOUNDNESS R1715 — what a dependency's ROOT FILE re-exports from ITS OWN dependencies, read from the lock-pinned source:
+/// serde 1.0.228's `pub use serde_core::{de, ser, Deserialize, Serialize, ..};` (written inside the zero-argument
+/// `macro_rules! crate_root` its root invokes as `crate_root!();`). Every path value is headed by the REAL package name of
+/// one of the facade's own manifest dependencies (a `package =` rename and a root `extern crate X as Y;` are followed); a
+/// head that is not one of its dependencies (a local module, std) is not recorded. Every `#[cfg]` arm is kept: the reading
+/// may only add a join (SPEC §2 ⟨0.42⟩ `dependencySources`, "THE READING MAY ONLY ADD").
+#[derive(Default, Debug)]
+pub(crate) struct Facade {
+    /// `{module path}::{name}` (root items: `{name}`) -> the dependency paths that name re-exports
+    pub(crate) names: HashMap<String, Vec<String>>,
+    /// module path (`""` the root) -> the dependency paths it glob-re-exports (`pub use dep::m::*;`)
+    pub(crate) globs: HashMap<String, Vec<String>>,
+    /// the names the root file itself DECLARES in each module (an item shadows a glob in rustc)
+    pub(crate) declared: std::collections::HashSet<String>,
+}
+
+/// SOUNDNESS R1715 — a `macro_rules!` whose FIRST arm has an empty matcher: its transcriber, which an empty invocation
+/// (`crate_root!();`) re-emits verbatim. Any other shape is `None` (its expansion is not read).
+fn zero_arg_transcriber(ts: &proc_macro2::TokenStream) -> Option<proc_macro2::TokenStream> {
+    use proc_macro2::TokenTree as T;
+    let toks: Vec<T> = ts.clone().into_iter().collect();
+    match (toks.first(), toks.get(1), toks.get(2), toks.get(3)) {
+        (Some(T::Group(m)), Some(T::Punct(eq)), Some(T::Punct(gt)), Some(T::Group(t)))
+            if eq.as_char() == '=' && gt.as_char() == '>' && m.stream().is_empty() =>
+        {
+            Some(t.stream())
+        }
+        _ => None,
+    }
+}
+
+impl Facade {
+    fn walk(&mut self, items: &[syn::Item], module: &str, deps: &HashMap<String, String>, depth: usize) {
+        let key = |n: &str| if module.is_empty() { n.to_string() } else { format!("{module}::{n}") };
+        let mut zero: HashMap<String, proc_macro2::TokenStream> = HashMap::new();
+        for it in items {
+            if let syn::Item::Macro(m) = it {
+                if let (Some(id), true) = (&m.ident, m.mac.path.is_ident("macro_rules")) {
+                    if let Some(t) = zero_arg_transcriber(&m.mac.tokens) {
+                        zero.insert(id.to_string(), t);
+                    }
+                }
+            }
+        }
+        for it in items {
+            match it {
+                syn::Item::Use(u) if matches!(u.vis, syn::Visibility::Public(_)) => {
+                    let mut out = Vec::new();
+                    flat_use(&u.tree, Vec::new(), &mut out);
+                    for (bound, path) in out {
+                        let Some(head) = path.first() else { continue };
+                        let Some(real) = deps.get(head.as_str()) else { continue };
+                        let mut p = vec![real.clone()];
+                        p.extend(path[1..].iter().cloned());
+                        match bound {
+                            Some(b) => self.names.entry(key(&b)).or_default().push(p.join("::")),
+                            None => self.globs.entry(module.to_string()).or_default().push(p.join("::")),
+                        }
+                    }
+                }
+                syn::Item::ExternCrate(e) if matches!(e.vis, syn::Visibility::Public(_)) => {
+                    let x = e.ident.to_string();
+                    let y = e.rename.as_ref().map(|(_, r)| r.to_string()).unwrap_or_else(|| x.clone());
+                    if let Some(real) = deps.get(x.as_str()) {
+                        self.names.entry(key(&y)).or_default().push(real.clone());
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    self.declared.insert(key(&m.ident.to_string()));
+                    if let (Some((_, inner)), true) = (&m.content, matches!(m.vis, syn::Visibility::Public(_))) {
+                        self.walk(inner, &key(&m.ident.to_string()), deps, depth);
+                    }
+                }
+                syn::Item::Macro(m) if m.ident.is_none() && m.mac.tokens.is_empty() && depth < 4 => {
+                    let Some(name) = m.mac.path.get_ident().map(|i| i.to_string()) else { continue };
+                    let Some(t) = zero.get(&name) else { continue };
+                    if let Ok(x) = syn::parse2::<Items>(t.clone()) {
+                        self.walk(&x.0, module, deps, depth + 1);
+                    }
+                }
+                other => {
+                    if let Some(n) = crate::decls::declared_item_name(other, true) {
+                        self.declared.insert(key(&n));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A `use` tree flattened to `(bound name, path segments)`; a glob is `(None, base)`. `self` in a group binds the group's
+/// own path under its last segment.
+fn flat_use(t: &syn::UseTree, pre: Vec<String>, out: &mut Vec<(Option<String>, Vec<String>)>) {
+    match t {
+        syn::UseTree::Path(p) => {
+            let mut v = pre;
+            v.push(p.ident.to_string());
+            flat_use(&p.tree, v, out);
+        }
+        syn::UseTree::Name(n) if n.ident == "self" => {
+            if let Some(last) = pre.last().cloned() {
+                out.push((Some(last), pre));
+            }
+        }
+        syn::UseTree::Name(n) => {
+            let mut v = pre;
+            v.push(n.ident.to_string());
+            out.push((Some(n.ident.to_string()), v));
+        }
+        syn::UseTree::Rename(r) => {
+            let mut v = pre;
+            if r.ident != "self" {
+                v.push(r.ident.to_string());
+            }
+            if r.rename != "_" {
+                out.push((Some(r.rename.to_string()), v));
+            }
+        }
+        syn::UseTree::Glob(_) => out.push((None, pre)),
+        syn::UseTree::Group(g) => {
+            for i in &g.items {
+                flat_use(i, pre.clone(), out);
+            }
+        }
+    }
 }
 
 /// SOUNDNESS R1578 — one dependency source the scan read to type a value (the report's `dependencySources` element).
@@ -2342,6 +2471,99 @@ impl DepSigs {
         out.sort();
         out.dedup();
         Some(out)
+    }
+
+    /// SOUNDNESS R1715 — the root-file re-exports of the package `real` (as the consumer's Cargo.lock pins it, `lock_source`),
+    /// or `None` with no lock-pinned source, no readable root file, or a root that does not parse. Cached per package.
+    pub(crate) fn facade(&mut self, dir: &str, alias: &str, real: &str) -> Option<std::rc::Rc<Facade>> {
+        if let Some(v) = self.facades.get(real) {
+            return v.clone();
+        }
+        let v = self.lock_source(dir, alias, real).and_then(|src| {
+            let manifest = std::fs::read_to_string(src.dir.join("Cargo.toml")).ok()?.parse::<toml::Table>().ok()?;
+            let lib = manifest.get("lib").and_then(|l| l.get("path")).and_then(|p| p.as_str()).unwrap_or("src/lib.rs");
+            let text = std::fs::read_to_string(src.dir.join(lib)).ok()?;
+            let file = syn::parse_file(&text).ok()?;
+            let norm = |s: &str| s.replace('-', "_");
+            let mut deps: HashMap<String, String> = HashMap::new();
+            for table in crate::deps::manifest_dependency_tables(&manifest) {
+                for (k, v) in table {
+                    let pkg = v.as_table().and_then(|t| t.get("package")).and_then(|p| p.as_str()).unwrap_or(k);
+                    deps.insert(norm(k), norm(pkg));
+                }
+            }
+            // a root `extern crate X as Y;` binds `Y` to the dependency `X` everywhere in the crate (the extern prelude)
+            for it in &file.items {
+                if let syn::Item::ExternCrate(e) = it {
+                    if let (Some((_, y)), Some(real)) = (&e.rename, deps.get(&e.ident.to_string()).cloned()) {
+                        deps.insert(y.to_string(), real);
+                    }
+                }
+            }
+            let mut f = Facade::default();
+            f.walk(&file.items, "", &deps, 0);
+            Some(std::rc::Rc::new(f))
+        });
+        if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
+            eprintln!("DSFACADE\t{real}\t{:?}", v.as_ref().map(|f| (f.names.len(), f.globs.len()))); // §E1 REACH COUNTER
+        }
+        self.facades.insert(real.to_string(), v.clone());
+        v
+    }
+
+    /// SOUNDNESS R1715 — every crate that `path` (a trait path inside package `real`, `de::Visitor`) may NAME, by following
+    /// `real`'s root-file re-exports into its dependencies and theirs (three hops): `(owner, path inside owner, the packages
+    /// whose source was read to get there)`. A longest-prefix explicit re-export wins at each hop; a glob is followed only
+    /// where no explicit name at that module matches and the module does not declare the next segment itself. Empty when
+    /// nothing re-exports it (the path is the package's own).
+    pub(crate) fn facade_owners(&mut self, dir: &str, alias: &str, real: &str, path: &str) -> Vec<(String, String, Vec<String>)> {
+        let mut out = Vec::new();
+        let mut work: Vec<(String, String, String, Vec<String>)> = vec![(alias.to_string(), real.to_string(), path.to_string(), Vec::new())];
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        while let Some((al, re, p, via)) = work.pop() {
+            if via.len() >= 3 || !seen.insert((re.clone(), p.clone())) {
+                continue;
+            }
+            let Some(fac) = self.facade(dir, &al, &re) else { continue };
+            let segs: Vec<&str> = p.split("::").collect();
+            let mut next: Vec<String> = Vec::new();
+            for i in (1..=segs.len()).rev() {
+                let pre = segs[..i].join("::");
+                if let Some(ts) = fac.names.get(&pre) {
+                    for t in ts {
+                        let mut np = t.clone();
+                        if i < segs.len() {
+                            np.push_str("::");
+                            np.push_str(&segs[i..].join("::"));
+                        }
+                        next.push(np);
+                    }
+                    break;
+                }
+                // a glob in the module `segs[..i-1]` may supply `segs[i-1]`, unless that module declares it
+                let m = segs[..i - 1].join("::");
+                if let Some(gs) = fac.globs.get(&m) {
+                    if !fac.declared.contains(&pre) && !fac.names.contains_key(&pre) {
+                        for g in gs {
+                            next.push(format!("{g}::{}", segs[i - 1..].join("::")));
+                        }
+                    }
+                }
+            }
+            for np in next {
+                let Some((owner, rest)) = np.split_once("::") else { continue };
+                if owner == re {
+                    continue;
+                }
+                let mut v = via.clone();
+                v.push(al.clone());
+                out.push((owner.to_string(), rest.to_string(), v.clone()));
+                work.push((owner.to_string(), owner.to_string(), rest.to_string(), v));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Count one call site typed through `alias`'s source (`dependencySources[].typed`).
