@@ -10502,6 +10502,40 @@
       ]
     },
     {
+      "fn": "depsig::DepSigs::assoc_member_traits_locked",
+      "loc": "crates/candor-scan/src/depsig.rs:2326:5: 2326:133",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "bb93463327891106a36914ac0d2e2823",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::DepSigs::index",
+        "depsig::DepSigs::lock_source",
+        "depsig::SrcIndex::assoc_bound_all",
+        "depsig::SrcIndex::trait_answer"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml",
+        "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "depsig::DepSigs::conversion_targets",
       "loc": "crates/candor-scan/src/depsig.rs:2923:5: 2923:125",
       "inferred": [
@@ -10529,6 +10563,74 @@
         "syn",
         "toml",
         "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "depsig::DepSigs::facade",
+      "loc": "crates/candor-scan/src/depsig.rs:2504:5: 2504:103",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "bb93463327891106d1591b63da115f0b",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::DepSigs::lock_source",
+        "depsig::Facade::walk"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "depsig::DepSigs::facade_owners",
+      "loc": "crates/candor-scan/src/depsig.rs:2545:5: 2545:129",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "bb934633278911063c05943a71807682",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::DepSigs::facade"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml"
       ],
       "incomplete": [
         "Fs"
