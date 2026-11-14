@@ -7376,12 +7376,18 @@ impl<'a> CallCollector<'a> {
     /// the written trait path names (UFCS), else every crate the module imports a trait-shaped name from (R1540's set). The
     /// call loop rewrites it into the plain dependency call where the chained report HAS that entry, so the ordinary join
     /// answers it and follows its `dispatchesOn` (the resolution: `de::Error::custom` joins the caller's `DeLoud::custom`).
-    /// A miss on a chained crate is disclosed (`dispatch:<Trait>.<member>`) only where the trait is known to declare the
-    /// member: the call names it, or a trait the module imports from that crate declares it in the lock-pinned source.
+    /// A miss on a chained crate is disclosed where the trait is known to be the dependency's: the call names it, an
+    /// imported trait declares it in the lock-pinned source, or the dependency's report publishes the member on another
+    /// std type (see the call loop).
     ///
-    /// Not formed where the crate defines the member on that type itself (`local_fn_on`, R1494/R1540's local routes), nor,
-    /// for an unnamed trait, for a member std has by name (`is_std_method_name`). Unchained, the marker adds nothing: the
-    /// published behaviour. `CANDOR_R1757_OFF=1` disables it.
+    /// RUST'S ORDER, round 2. An inherent associated item beats every trait member, so for an UNNAMED trait the marker is
+    /// not formed where THIS std type has an inherent of that name (`std_assoc::has_inherent`, generated per type from
+    /// rust-src): `Duration::new(1, 0)` is std's even beside `impl dep::Load for Duration { fn new() }` (EXECUTED round-2
+    /// `go_dur_inherent`: pure, and the first cut joined it and read `Fs`), while `Instant::new()` and `u64::new()` (no
+    /// inherent) run the dependency's. Nor for a name a std trait declares (`default`, `from_str`), which std may implement
+    /// for the type; nor for an uppercase member (a variant); nor where the crate defines the member on that type itself
+    /// (`local_fn_on`). The first cut asked a per-NAME table of self-taking methods, which knows no associated fn at all.
+    /// Unchained, the marker adds nothing: the published behaviour. `CANDOR_R1757_OFF=1` disables it.
     fn r1757_std_type_dep_path(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
         if candor_report::env::switch("CANDOR_R1757_OFF") {
             return;
@@ -7422,7 +7428,8 @@ impl<'a> CallCollector<'a> {
                         || matches!(leaf.as_str(), "String" | "Vec" | "Option" | "Result" | "Box"))
                     && !self.uses.contains_key(leaf.as_str())
                     && !self.returns.contains_key(&crate::model::nominal_key(&leaf))));
-        if !std_typed || leaf.is_empty() || self.local_fn_on(&leaf, &member) {
+        // an uppercase member is a variant or an associated const/type (`Option::Some(x)`), never a trait fn
+        if !std_typed || leaf.is_empty() || self.local_fn_on(&leaf, &member) || member.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
             return;
         }
         // (crate, the trait leaves that may declare the member: `!Leaf` when the call NAMES the trait, else the
@@ -7438,7 +7445,9 @@ impl<'a> CallCollector<'a> {
                 vec![(r, format!("!{tl}"))]
             }
             None => {
-                if crate::std_methods::is_std_method_name(&member) {
+                // std's own for THIS type (an inherent, any receiver — Rust resolves it before any trait), or a name a std
+                // trait declares (`default`, `from_str`: std may implement it for the type): neither joined nor hedged.
+                if crate::std_assoc::has_inherent(&leaf, &member) || crate::std_assoc::is_std_trait_fn(&member) {
                     return;
                 }
                 self.trait_import_crates()
@@ -10016,6 +10025,70 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1754 (round 2) — is the dependency trait with this LEAF in scope here, as Rust requires for `T::m()` to
+    /// reach its member: a `use` (body-local or module) binding a dependency path whose last segment is the leaf (`use
+    /// dep::Tr;`, `use dep::Tr as Alias;`), an `as _` import of it, or a GLOB of a dependency (`use dep::*;`, which may bring
+    /// it). A glob of a LOCAL module (`use super::*;`) is not read as one — what it re-binds is not known here, so such a
+    /// call keeps the published (silent) reading rather than a charge that may be a derived member's.
+    fn r1754_trait_in_scope(&self, t: &str) -> bool {
+        let dep_root = |v: &str| {
+            let root = v.split("::").next().unwrap_or("");
+            !root.is_empty() && crate::lang::is_dependency_crate_root(root)
+        };
+        let names = |m: &HashMap<String, String>| {
+            m.iter().any(|(k, v)| {
+                if k == crate::lang::GLOB_KEY || k == crate::lang::ALLGLOB_KEY {
+                    v.split('\u{1}').any(dep_root)
+                } else {
+                    v.split('\u{1}').any(|p| dep_root(p) && p.rsplit("::").next() == Some(t))
+                }
+            })
+        };
+        names(&self.local_uses)
+            || names(&self.uses)
+            || self.use_alts.values().flatten().any(|p| dep_root(p) && p.rsplit("::").next() == Some(t))
+    }
+
+    /// SOUNDNESS R1759 — `<Q as dep::Tr>::m(..)` where `Q` is a crate-local type whose `impl dep::Tr for Q` DECLARES `m`:
+    /// Rust runs `Q::m`, never `Tr`'s provided body. The edge to `Q::m` is formed beside (R984, `edge_ufcs_foreign_trait`);
+    /// the WRITTEN trait path (`dep::Tr::m`) additionally joined the dependency's provided body and, through its
+    /// `dispatchesOn`, every local implementor of whatever that body calls — `go_ovr_quiet` (`twice` overridden pure,
+    /// `once` writes) read `Fs` on 0.42.0 and main while the program writes nothing (EXECUTED round 2). The TYPE-PATH
+    /// spelling `Q::m(..)` already resolves this way (`impl_does_not_declare`). Withheld only on R598's positive evidence
+    /// that the block declares `m` (seen, not opaque, member recorded) and only for a DEPENDENCY trait path, so a block the
+    /// index could not read keeps the join. `CANDOR_R1759_OFF=1` restores it.
+    fn r1759_ufcs_overridden(&self, p: &syn::ExprPath) -> bool {
+        let Some(q) = p.qself.as_ref().filter(|q| q.position > 0) else { return false };
+        if candor_report::env::switch("CANDOR_R1759_OFF") {
+            return false;
+        }
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segs.len() < 2 || q.position > segs.len() - 1 {
+            return false;
+        }
+        let Some(member) = segs.last() else { return false };
+        let tr_written = segs[..q.position].join("::");
+        let tr_full = expand(&tr_written, &self.uses);
+        let root = tr_full.split("::").next().unwrap_or("");
+        if !tr_full.contains("::") || !crate::lang::is_dependency_crate_root(root) {
+            return false;
+        }
+        let tr = tr_full.rsplit("::").next().unwrap_or(&tr_full);
+        let Some(ty) = crate::lang::type_path(&q.ty, &self.uses) else { return false };
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) || ty.contains('<') {
+            return false;
+        }
+        let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty);
+        let declares = self.impl_members.contains(&crate::model::impl_seen_key(tr, ty_leaf))
+            && !self.impl_members.contains(&crate::model::impl_opaque_key(tr, ty_leaf))
+            && self.impl_members.contains(&crate::model::impl_member_key(tr, ty_leaf, member))
+            && self.returns.contains_key(&crate::model::nominal_key(ty_leaf));
+        if declares && (crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1759_INSTR")) {
+            eprintln!("R1759UFCS\t{tr_full}::{member}\t{ty_leaf}"); // §E1 REACH COUNTER
+        }
+        declares
+    }
+
     fn trait_declares_method(&self, tr: &str, leaf: &str, depth: usize) -> bool {
         if depth > 16 {
             return false;
@@ -11956,6 +12029,7 @@ impl<'a> CallCollector<'a> {
                         !self.local_traits.contains_key(t)
                             && tys.iter().any(|ty| ty.rsplit("::").next().unwrap_or(ty) == tr)
                             && crate::model::impl_does_not_declare(self.impl_members, t, &tr, leaf)
+                            && self.r1754_trait_in_scope(t)
                     })
                 {
                     // SOUNDNESS R1754 — the same, for a DEPENDENCY trait's provided member: `V::visit_string(V, s)` with `impl
@@ -11968,11 +12042,30 @@ impl<'a> CallCollector<'a> {
                     // into every typed-call fallback (measured: tracing-subscriber's `Targets::new() { Self::default() }`,
                     // `impl FromStr for Targets`, edged to an unrelated `Layer::default` and read `Env`), and only the
                     // dependency-default lookup is this route's (`lazy::DEP_DEFAULT_PATH_MARKER`). `CANDOR_R1754P_OFF=1`.
+                    // ROUND 2 — RUST'S RULE: a type path reaches a trait's member only where that TRAIT IS IN SCOPE. `#[derive(
+                    // Default)] T` + `impl dep::Tr for T` with `Tr` (whose provided `default` writes) NOT imported: `T::default()`
+                    // runs the DERIVED `Default`, pure (EXECUTED round-2 `go_derive_default`), and the first cut joined `Tr`'s.
+                    // With `Tr` in scope the same call could not compile beside the derive (E0034), so only in-scope traits
+                    // are carried, and the call loop joins only those (`lazy::DEP_DEFAULT_PATH_MARKER`).
+                    let mut in_scope: Vec<&String> = self
+                        .trait_impls
+                        .iter()
+                        .filter(|(t, tys)| {
+                            !self.local_traits.contains_key(*t)
+                                && tys.iter().any(|ty| ty.rsplit("::").next().unwrap_or(ty) == tr)
+                                && crate::model::impl_does_not_declare(self.impl_members, t, &tr, leaf)
+                                && self.r1754_trait_in_scope(t)
+                        })
+                        .map(|(t, _)| t)
+                        .collect();
+                    in_scope.sort();
+                    let trs: Vec<&str> = in_scope.iter().map(|t| t.as_str()).collect();
+                    let trs = trs.join("~");
                     if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
-                        eprintln!("R1754TYPEPATH\t{path}"); // §E1 REACH COUNTER (a site; the join is counted in scan.rs)
+                        eprintln!("R1754TYPEPATH\t{path}\t{trs}"); // §E1 REACH COUNTER (a site; the join is counted in scan.rs)
                     }
                     self.calls.push(Call { assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
-                        path: format!("{}::{tr}::{leaf}", crate::lazy::DEP_DEFAULT_PATH_MARKER),
+                        path: format!("{}::{trs}::{tr}::{leaf}", crate::lazy::DEP_DEFAULT_PATH_MARKER),
                         leaf: leaf.to_string(), str_arg: None, typed: false, method: false,
                         is_macro: false, path_lits_partial: false, path_lit2: None });
                 }
@@ -14031,10 +14124,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 Some(q) => q.position == 0,
                             })
                         .then(String::new);
-                        self.calls.push(Call { assoc_via: None, cside, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: node.args.len().min(255) as u8,
-                                               entropy_arg: args_name_entropy_source(&node.args),
-                                               path, leaf, str_arg, typed: false, method,
-                                               is_macro: false, path_lits_partial, path_lit2 });
+                        if !self.r1759_ufcs_overridden(p) {
+                            self.calls.push(Call { assoc_via: None, cside, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: node.args.len().min(255) as u8,
+                                                   entropy_arg: args_name_entropy_source(&node.args),
+                                                   path, leaf, str_arg, typed: false, method,
+                                                   is_macro: false, path_lits_partial, path_lit2 });
+                        }
                     }
                 }
             }

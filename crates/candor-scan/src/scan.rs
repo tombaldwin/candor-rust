@@ -4338,29 +4338,51 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     } else {
                         if deps_idx.crates.contains(real) {
                             let member = rest.rsplit("::").next().unwrap_or("");
-                            // An UNNAMED trait is never hedged for a member std's own types have as an associated fn under
-                            // that name (`String::new()` beside an imported `Digest`, which declares `new`): a DENYLIST that
-                            // only withholds a disclosure the published engine never made.
-                            let std_ctor = matches!(member, "new" | "default" | "from" | "try_from" | "from_str" | "from_iter"
-                                | "with_capacity" | "now" | "empty" | "from_utf8" | "from_raw_parts" | "max_value" | "min_value");
+                            // The member is not std's for this TYPE (`collector::r1757_std_type_dep_path` refuses a member the
+                            // std type has an inherent of, or one a std trait declares — `std_assoc`), so what runs is a trait
+                            // impl from a trait in scope. Disclosed where that trait is known to be the dependency's: the call
+                            // names it; the lock-pinned source shows an imported trait declares it; or — lock or no lock — the
+                            // dependency's own report publishes this member on ANOTHER std type (`Duration::fetch` beside
+                            // `u8::fetch`'s macro-made impl, serde_core's `Duration::deserialize` beside `u64::deserialize`), the
+                            // shape of a trait it implements for std types. One candidate names the trait; several are `ambiguous:`.
+                            let cands: Vec<&str> = trs.split('~').filter(|t| *t != "-").collect();
                             let tr = match trs.strip_prefix('!') {
-                                Some(named) => Some(named.to_string()),
-                                None if std_ctor => None,
-                                None => trs.split('~').filter(|t| *t != "-").find(|t| {
-                                    let mut sigs = r1578_sigs.borrow_mut();
-                                    let d = sigs.trait_declares_locked(dir, head, real, t, member) == Some(true);
-                                    if d {
-                                        sigs.note_typed(head);
+                                Some(named) => Some(format!("dispatch:{named}.{member}")),
+                                None => {
+                                    let locked = cands.iter().find(|t| {
+                                        let mut sigs = r1578_sigs.borrow_mut();
+                                        let d = sigs.trait_declares_locked(dir, head, real, t, member) == Some(true);
+                                        if d {
+                                            sigs.note_typed(head);
+                                        }
+                                        d
+                                    });
+                                    let on_std = || {
+                                        deps_idx.members.get(member).is_some_and(|os| {
+                                            os.iter().any(|(pkg, owner)| {
+                                                let ol = owner.rsplit("::").next().unwrap_or(owner);
+                                                pkg == real
+                                                    && (crate::std_assoc::is_std_type(ol) || crate::model::PRIMITIVE_LEAVES.contains(&ol))
+                                            })
+                                        })
+                                    };
+                                    match (locked, cands.as_slice()) {
+                                        (Some(t), _) => Some(format!("dispatch:{t}.{member}")),
+                                        (None, []) => None,
+                                        (None, [one]) if on_std() => Some(format!("dispatch:{one}.{member}")),
+                                        (None, many) if on_std() => {
+                                            Some(format!("ambiguous:dependency trait member `{member}` on a std type ({})", many.join(", ")))
+                                        }
+                                        _ => None,
                                     }
-                                    d
-                                }).map(str::to_string),
+                                }
                             };
                             if let Some(tr) = tr {
                                 if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1757_INSTR") {
                                     eprintln!("R1757MISS\t{}\t{real}#{rest}\t{tr}", f.qual); // §E1 REACH COUNTER
                                 }
                                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                                unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr}.{member}"));
+                                unknown_why.entry(f.qual.clone()).or_default().insert(tr);
                             }
                         }
                         continue;
@@ -4374,9 +4396,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let r1754_owned: Call;
             let c = match c.path.strip_prefix(&format!("{}::", crate::lazy::DEP_DEFAULT_PATH_MARKER)) {
                 Some(rest) => {
+                    // `<depdefault>::<in-scope trait leaves, ~-joined>::<Type>::<member>` (round 2: only a trait in scope)
+                    let Some((trs, rest)) = rest.split_once("::") else { continue };
                     let Some((ty, m)) = rest.rsplit_once("::") else { continue };
+                    let trs: Vec<&str> = trs.split('~').collect();
                     let hit = dep_traits_by_ty.get(ty).into_iter().flatten().find_map(|(tr_leaf, tpath)| {
-                        if !crate::model::impl_does_not_declare(&merged.impl_members, tr_leaf, ty, m) {
+                        if !trs.contains(&tr_leaf.as_str()) || !crate::model::impl_does_not_declare(&merged.impl_members, tr_leaf, ty, m) {
                             return None;
                         }
                         let (root, trest) = tpath.split_once("::")?;

@@ -46,6 +46,7 @@ mod model;
 mod lang;
 mod lazy;
 mod std_methods;
+mod std_assoc;
 mod std_bounds;
 #[cfg(test)]
 mod std_bounds_gen;

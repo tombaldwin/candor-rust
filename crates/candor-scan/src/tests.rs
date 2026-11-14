@@ -18519,7 +18519,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev187/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev188/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28358,6 +28358,7 @@ pub fn go_gen() { let _: Loud = mbecore::de::use_missing::<Loud>(); }\n\
     fn r1754_a_dependency_traits_provided_member_by_type_path_reaches_the_default() {
         let prod = scan_crate_chained("r1754hp", "hwdef", "", "\
 pub trait Vis { fn s(&self); fn st(&self) { self.s() } }\n\
+pub trait Mk: Sized { fn req(&self); fn default() -> Self { let _ = std::fs::write(\"/tmp/r1754m\", \"x\"); loop {} } }\n\
 ", &DepIndex::default());
         let (idx, d) = chain("r1754h", "hwdef", &prod);
         let v = scan_crate_chained("r1754hc", "consumer", "\n[dependencies]\nhwdef = \"1\"\n", "\
@@ -28365,13 +28366,30 @@ pub struct V;\n\
 impl hwdef::Vis for V { fn s(&self) { let _ = std::fs::write(\"/tmp/r1754h\", \"x\"); } }\n\
 pub struct C;\n\
 impl hwdef::Vis for C { fn s(&self) {} }\n\
-pub fn go_path() { V::st(&V) }\n\
+pub fn go_path() { use hwdef::Vis; V::st(&V) }\n\
 pub fn go_method() { use hwdef::Vis; V.st() }\n\
+#[derive(Default)] pub struct D;\n\
+impl hwdef::Mk for D { fn req(&self) {} }\n\
+pub fn go_derived() -> D { D::default() }\n\
+pub fn go_mk() -> D { use hwdef::Mk as _; <D as hwdef::Mk>::default() }\n\
+pub struct Q;\n\
+impl hwdef::Vis for Q { fn s(&self) { let _ = std::fs::write(\"/tmp/r1759\", \"x\"); } fn st(&self) {} }\n\
+pub struct L;\n\
+impl hwdef::Vis for L { fn s(&self) {} fn st(&self) { let _ = std::fs::write(\"/tmp/r1759\", \"x\"); } }\n\
+pub fn go_ovr_quiet() { <Q as hwdef::Vis>::st(&Q) }\n\
+pub fn go_ovr_loud() { <L as hwdef::Vis>::st(&L) }\n\
 ", &idx);
         let _ = std::fs::remove_dir_all(&d);
         assert!(effects_of(&v, "go_method").contains(&"Fs".to_string()), "the method spelling (premise):\n{v:#}");
         assert!(effects_of(&v, "go_path").contains(&"Fs".to_string()),
                 "the type-path spelling runs the same provided body:\n{v:#}");
+        // ROUND 2 — a type path reaches a trait member only with the trait in scope: `D::default()` with `Mk` not
+        // imported runs the DERIVED `Default` (EXECUTED round-2 `go_derive_default`: pure), never `Mk`'s writing default.
+        assert!(effects_of(&v, "go_derived").is_empty(), "the derived Default runs, not the out-of-scope trait's:\n{v:#}");
+        assert!(effects_of(&v, "go_mk").contains(&"Fs".to_string()), "the named trait's provided default does run:\n{v:#}");
+        // R1759 — `<Q as Vis>::st` runs Q's OWN `st` (pure), never the provided body that would call the writing `s`.
+        assert!(effects_of(&v, "go_ovr_quiet").is_empty(), "an overriding implementor's own member runs:\n{v:#}");
+        assert!(effects_of(&v, "go_ovr_loud").contains(&"Fs".to_string()), "…and is charged when it writes:\n{v:#}");
     }
 
     /// SOUNDNESS R1757 — a PATH call on a STD type into a dependency trait's impl for it: `Duration::fetch_cfg(1)` and
@@ -28384,9 +28402,14 @@ pub fn go_method() { use hwdef::Vis; V.st() }\n\
     #[test]
     fn r1757_a_std_types_path_call_reaches_the_dependency_impl() {
         let prod = scan_crate_chained("r1757p", "stdimpl", "", "\
-pub trait Load: Sized { fn fetch_cfg(d: u8) -> Self; }\n\
+pub trait Load: Sized { fn fetch_cfg(d: u8) -> Self; fn new(a: u64, b: u32) -> Self; }\n\
 impl Load for std::time::Duration {\n\
     fn fetch_cfg(d: u8) -> Self { let _ = std::fs::write(\"/tmp/r1757\", \"x\"); std::time::Duration::from_secs(d as u64) }\n\
+    fn new(a: u64, _b: u32) -> Self { let _ = std::fs::write(\"/tmp/r1757\", \"x\"); std::time::Duration::from_secs(a) }\n\
+}\n\
+impl Load for std::time::Instant {\n\
+    fn fetch_cfg(_d: u8) -> Self { std::time::Instant::now() }\n\
+    fn new(_a: u64, _b: u32) -> Self { let _ = std::fs::write(\"/tmp/r1757\", \"x\"); std::time::Instant::now() }\n\
 }\n\
 ", &DepIndex::default());
         assert_eq!(effects_of(&prod, "Duration::fetch_cfg"), vec!["Fs".to_string()], "premise: the producer's impl row:\n{prod:#}");
@@ -28399,6 +28422,9 @@ pub fn go_full() { let _ = std::time::Duration::fetch_cfg(1); }\n\
 pub fn go_ufcs() { let _ = <Duration as Load>::fetch_cfg(1); }\n\
 pub fn calm() { let _ = Duration::from_secs(1); }\n\
 pub fn go_nohit() { let _ = <u8 as Load>::fetch_cfg(1); }\n\
+pub fn inherent_new() { let _ = Duration::new(1, 0); }\n\
+pub fn go_instant_new() { let _ = std::time::Instant::new(1, 0); }\n\
+pub fn go_prim_unnamed() { let _ = u8::fetch_cfg(1); }\n\
 ", &idx);
         let _ = std::fs::remove_dir_all(&d);
         for f in ["go_path", "go_full", "go_ufcs"] {
@@ -28408,6 +28434,15 @@ pub fn go_nohit() { let _ = <u8 as Load>::fetch_cfg(1); }\n\
         assert!(ts_entry(&v, "go_nohit").is_some_and(|e| e["unknownWhy"].as_array().into_iter().flatten()
                     .any(|w| w == "dispatch:Load.fetch_cfg")),
                 "a named dependency trait's member with no entry to join is disclosed, not read pure:\n{v:#}");
+        // ROUND 2 — Rust's order: `Duration::new` is std's INHERENT and wins (EXECUTED `go_dur_inherent`: pure); `Instant`
+        // has no inherent `new`, so the dependency's runs. Read per TYPE from rust-src (`std_assoc`), not per name.
+        assert!(effects_of(&v, "inherent_new").is_empty(), "std's inherent `Duration::new` runs, not the dependency's:\n{v:#}");
+        assert!(effects_of(&v, "go_instant_new").contains(&"Fs".to_string()), "no inherent `Instant::new`: the dependency's runs:\n{v:#}");
+        // …and an UNNAMED trait's member with no entry (a macro-made impl) is disclosed with no lockfile, because the
+        // dependency publishes that member on another std type (`Duration::fetch_cfg`).
+        assert!(ts_entry(&v, "go_prim_unnamed").is_some_and(|e| e["unknownWhy"].as_array().into_iter().flatten()
+                    .any(|w| w == "dispatch:Load.fetch_cfg")),
+                "an unnamed dependency trait's member on a std type with no entry is disclosed:\n{v:#}");
     }
 
     /// SOUNDNESS R1038 — `Box::<u32>::deserialize(d)` names no std fn: the body that runs is the DEPENDENCY's
