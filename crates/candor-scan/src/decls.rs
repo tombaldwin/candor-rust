@@ -2154,12 +2154,318 @@ pub(crate) const REEXPORT_VALUE_ONLY: char = '\u{7}';
 /// `collect_private_uses_in`). No real `use` alias can contain a control character.
 pub(crate) const EXT_GLOB_DECL_MARK: &str = "\u{1}declared";
 
+/// SOUNDNESS R1697/R1702 — marker edges carrying one module's namespace (`collect_private_uses_in`): its explicit names
+/// (`NS_SEP`-joined; `…OPAQUE` when an item macro or `include!` may bind more), an external glob's target, and an external
+/// named `use` (`alias NS_SEP target`). Their `from` is empty, so every reader of real edges skips them.
+pub(crate) const NS_NAMES_MARK: &str = "\u{1}ns-names";
+pub(crate) const NS_NAMES_OPAQUE_MARK: &str = "\u{1}ns-names-opaque";
+pub(crate) const NS_EXT_GLOB_MARK: &str = "\u{1}ns-ext-glob";
+pub(crate) const NS_EXT_USE_MARK: &str = "\u{1}ns-ext-use";
+pub(crate) const NS_SEP: char = '\u{1}';
+pub(crate) const NS_TWIN_MARK: &str = "\u{1}ns-twin";
+pub(crate) const NS_EXT_GLOB_PRIV_MARK: &str = "\u{1}ns-ext-glob-priv";
+pub(crate) const NS_EXT_USE_PRIV_MARK: &str = "\u{1}ns-ext-use-priv";
+
+/// SOUNDNESS R1697/R1702 — ONE MODULE NAMESPACE PER MODULE, for the question every re-export route answers in its own slice:
+/// "what does the name `x`, written in (or below) module `m`, denote?". Built once per scan from the merged edges and
+/// markers (`build_reexport_names`), installed beside the re-export table (`lang::ns_resolve`).
+///
+/// rustc's order, read from source: an explicit binding of `m` (a declaration, a named `use`) answers; otherwise the
+/// GLOBS of `m` answer, and only when exactly one distinct definition comes back through them. A placed (local) glob
+/// source answers for the names IT binds explicitly, or, recursively, through its own globs. An external glob answers
+/// `<target>::x` only where `m` has no local glob, no unplaced local glob, exactly one external glob, and no item macro
+/// or `include!` that could bind `x` itself (OPAQUE): a name that might be local is never sent to a dependency.
+/// Every refusal is "no answer", so the routes before this one stand. `CANDOR_R1697_OFF=1` disables it.
+/// The arms the re-export TABLE files under `q` (a `REEXPORT_VALUE_ONLY` mark stripped), if it has the key.
+pub(crate) fn table_arms(table: &HashMap<String, String>, q: &str) -> Option<Vec<String>> {
+    let v = table.get(q)?;
+    let v = v.strip_prefix(REEXPORT_VALUE_ONLY).unwrap_or(v);
+    Some(v.split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()).map(str::to_string).collect())
+}
+
+#[derive(Default, Debug)]
+pub(crate) struct NsIndex {
+    /// module -> explicit names (any namespace)
+    pub(crate) names: HashMap<String, std::collections::HashSet<String>>,
+    pub(crate) opaque: std::collections::HashSet<String>,
+    /// module -> placed (local) glob source modules
+    pub(crate) placed: HashMap<String, Vec<String>>,
+    /// module -> external glob targets
+    pub(crate) ext_globs: HashMap<String, Vec<String>>,
+    /// modules with a glob this scan could not place and whose target is not external (`use crate::?::*` unresolved)
+    pub(crate) unplaced_local: std::collections::HashSet<String>,
+    /// `module::alias` -> external targets of a named `use`
+    pub(crate) ext_uses: HashMap<String, Vec<String>>,
+    /// every module path the crate is known to have
+    pub(crate) mods: std::collections::HashSet<String>,
+    /// `module::alias` of every LOCAL named `use` (the re-export table's raw keys)
+    pub(crate) local_uses: std::collections::HashSet<String>,
+    /// `module::name` a module both declares and binds by a `use` (a `#[cfg]` twin): answered for neither
+    pub(crate) twins: std::collections::HashSet<String>,
+    /// `module::alias` of a named `use` whose target is neither local nor a dependency (a re-exported `macro_rules!`)
+    pub(crate) unknown_uses: std::collections::HashSet<String>,
+    /// SOUNDNESS R1697 — PRIVATE bindings (a `use` with no `pub`), visible only to the module and its descendants
+    /// (`a_private_use_does_not_reexport`): `(module, glob source)` of a private placed glob, modules whose external glob is
+    /// private, and `module::alias` of a private external named `use`.
+    pub(crate) private_placed: std::collections::HashSet<(String, String)>,
+    pub(crate) private_ext_glob: std::collections::HashSet<String>,
+    pub(crate) private_ext_use: std::collections::HashSet<String>,
+    /// Pass B answers of `resolve_memo` (the installed table no longer changes then), by caller and key
+    memo: std::sync::Mutex<HashMap<String, Option<Vec<String>>>>,
+}
+
+impl NsIndex {
+    /// `deps`: the crate's manifest dependency names. An external `use` / glob counts only when its target is headed by
+    /// one of them or by `std`/`core`/`alloc`: `pub(crate) use trace;` re-exports a textually scoped `macro_rules!`, not a
+    /// crate named `trace` (rustls `log::trace`, x11rb `tracing::implementation::event` lost their `Log`; first A/B).
+    pub(crate) fn from_edges(
+        edges: &[Reexport],
+        private: &[Reexport],
+        local_mods: &std::collections::HashSet<String>,
+        deps: &std::collections::HashSet<String>,
+    ) -> NsIndex {
+        let ext_head = |t: &str| {
+            let h = t.split("::").next().unwrap_or(t);
+            matches!(h, "std" | "core" | "alloc") || deps.contains(h)
+        };
+        let mut ns = NsIndex { mods: local_mods.clone(), ..Default::default() };
+        let mut unplaced: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for e in edges {
+            match e.alias.as_str() {
+                NS_NAMES_MARK | NS_NAMES_OPAQUE_MARK => {
+                    ns.mods.insert(e.module.clone());
+                    let set = ns.names.entry(e.module.clone()).or_default();
+                    set.extend(e.name.split(NS_SEP).filter(|n| !n.is_empty()).map(str::to_string));
+                    if e.alias == NS_NAMES_OPAQUE_MARK {
+                        ns.opaque.insert(e.module.clone());
+                    }
+                }
+                NS_TWIN_MARK => {
+                    for n in e.name.split(NS_SEP).filter(|n| !n.is_empty()) {
+                        ns.twins.insert(qualify(&e.module, n));
+                    }
+                }
+                NS_EXT_GLOB_MARK | NS_EXT_GLOB_PRIV_MARK if !ext_head(&e.name) => {
+                    // an external glob whose target this scan cannot place: the module may bind anything through it
+                    ns.unplaced_local.insert(e.module.clone());
+                }
+                NS_EXT_GLOB_MARK | NS_EXT_GLOB_PRIV_MARK => {
+                    if e.alias == NS_EXT_GLOB_PRIV_MARK && !ns.ext_globs.contains_key(&e.module) {
+                        ns.private_ext_glob.insert(e.module.clone());
+                    } else if e.alias == NS_EXT_GLOB_MARK {
+                        ns.private_ext_glob.remove(&e.module);
+                    }
+                    let v = ns.ext_globs.entry(e.module.clone()).or_default();
+                    if !v.contains(&e.name) {
+                        v.push(e.name.clone());
+                    }
+                }
+                NS_EXT_USE_MARK | NS_EXT_USE_PRIV_MARK => {
+                    if let Some((a, _)) = e.name.split_once(NS_SEP) {
+                        if e.alias == NS_EXT_USE_PRIV_MARK {
+                            ns.private_ext_use.insert(qualify(&e.module, a));
+                        }
+                    }
+                    if let Some((a, _)) = e.name.split_once(NS_SEP).filter(|(_, t)| !ext_head(t)) {
+                        ns.unknown_uses.insert(qualify(&e.module, a)); // bound, but to nothing this index can name
+                    }
+                    if let Some((a, t)) = e.name.split_once(NS_SEP).filter(|(_, t)| ext_head(t)) {
+                        let v = ns.ext_uses.entry(qualify(&e.module, a)).or_default();
+                        if !v.iter().any(|x| x == t) {
+                            v.push(t.to_string());
+                        }
+                    }
+                }
+                _ if e.name == "*" && e.from.is_empty() => {
+                    unplaced.insert(e.module.as_str());
+                }
+                _ if e.name != "*" && e.alias != "*" && !e.from.is_empty() => {
+                    ns.local_uses.insert(qualify(&e.module, &e.alias));
+                }
+                _ if e.name == "*" && !e.from.is_empty() => {
+                    let v = ns.placed.entry(e.module.clone()).or_default();
+                    for f in &e.from {
+                        if !v.contains(f) {
+                            v.push(f.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for e in private.iter().filter(|e| e.name == "*" && !e.from.is_empty()) {
+            for f in &e.from {
+                ns.private_placed.insert((e.module.clone(), f.clone()));
+            }
+        }
+        // an unplaced glob marker is one of the external globs counted above, or a local base this scan could not place
+        for m in unplaced {
+            if !ns.ext_globs.contains_key(m) {
+                ns.unplaced_local.insert(m.to_string());
+            }
+        }
+        ns
+    }
+
+    /// Is a PRIVATE binding of module `owner` visible to `requester` (the module itself or a descendant)? `None`: the
+    /// requester is not known, and only the crate root's private bindings (visible everywhere) are.
+    fn sees(owner: &str, requester: Option<&str>) -> bool {
+        owner.is_empty()
+            || requester.is_some_and(|r| r == owner || r.strip_prefix(owner).is_some_and(|t| t.starts_with("::")))
+    }
+
+    fn has_globs(&self, m: &str) -> bool {
+        self.placed.contains_key(m) || self.ext_globs.contains_key(m) || self.unplaced_local.contains(m)
+    }
+
+    /// What `x`, NOT bound explicitly in `m`, denotes through `m`'s globs: crate-rooted local arms or external paths.
+    /// `None`: no single answer (or `m` has no globs). `table` answers a source module's explicit re-export of `x`.
+    fn through_globs(&self, m: &str, x: &str, table: &HashMap<String, String>, caller: Option<&str>) -> Option<Vec<String>> {
+        let mut cands: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        self.collect_globs(m, x, table, caller, &mut visited, &mut cands).ok()?;
+        (cands.len() == 1).then(|| cands.into_iter().collect())
+    }
+
+    /// Every definition `x` may denote through `m`'s globs, into `cands`; `Err` when one of them is undetermined (an
+    /// unplaced local glob, a source that binds `x` by something this index cannot name, an OPAQUE source, or a module
+    /// with an external glob beside local ones where no local source supplies `x`). Each module is visited once, so a
+    /// glob CYCLE (`use super::*` / `use crate::*` between modules, legal in rustc) terminates and costs linear time —
+    /// the first cut recursed per path and did not finish rav1e 0.7.1 in 300s.
+    fn collect_globs(
+        &self,
+        m: &str,
+        x: &str,
+        table: &HashMap<String, String>,
+        requester: Option<&str>,
+        visited: &mut std::collections::HashSet<String>,
+        cands: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(), ()> {
+        if !visited.insert(m.to_string()) {
+            return Ok(());
+        }
+        if self.unplaced_local.contains(m) {
+            return Err(());
+        }
+        let before = cands.len();
+        let all_placed = self.placed.get(m).map(Vec::as_slice).unwrap_or(&[]);
+        // a private glob of `m` binds its names for `m` and its descendants only
+        let placed: Vec<&String> = all_placed
+            .iter()
+            .filter(|s| !self.private_placed.contains(&(m.to_string(), (*s).clone())) || Self::sees(m, requester))
+            .collect();
+        for s in placed.iter().copied() {
+            if s == m {
+                continue;
+            }
+            match self.explicit(s, x, table, Some(m)) {
+                Some(v) => cands.extend(v),
+                None => {
+                    if self.opaque.contains(s) || self.names.get(s).is_some_and(|n| n.contains(x)) {
+                        return Err(()); // `s` may bind `x` by something this index cannot name
+                    }
+                    if self.has_globs(s) {
+                        self.collect_globs(s, x, table, Some(m), visited, cands)?;
+                    }
+                }
+            }
+        }
+        let ext_visible = !self.private_ext_glob.contains(m) || Self::sees(m, requester);
+        match self.ext_globs.get(m).map(Vec::as_slice).filter(|_| ext_visible) {
+            None | Some([]) => {}
+            // an external glob answers only where no LOCAL glob exists and nothing in `m` itself may bind `x`
+            Some([t]) if placed.is_empty() && !self.opaque.contains(m) => {
+                cands.insert(format!("{t}::{x}"));
+            }
+            // beside local globs: a local answer is rustc's only compiling reading (two globs supplying `x` is E0659);
+            // no local answer means the external glob may be it, which this index cannot enumerate
+            Some(_) if !placed.is_empty() && cands.len() > before => {}
+            Some(_) => return Err(()),
+        }
+        Ok(())
+    }
+
+    /// `x` bound EXPLICITLY in `s`: a declaration (`crate::s::x`), a table key, or an external named `use`.
+    fn explicit(&self, s: &str, x: &str, table: &HashMap<String, String>, requester: Option<&str>) -> Option<Vec<String>> {
+        let q = qualify(s, x);
+        if self.unknown_uses.contains(&q) || self.twins.contains(&q) {
+            return None;
+        }
+        if self.local_uses.contains(&q) {
+            return table_arms(table, &q);
+        }
+        if let Some(t) = self.ext_uses.get(&q) {
+            if self.private_ext_use.contains(&q) && !Self::sees(s, requester) {
+                return None;
+            }
+            return Some(t.clone());
+        }
+        if self.names.get(s).is_some_and(|n| n.contains(x)) && !self.ext_uses.contains_key(&q) {
+            // declared here (a named local `use` is a table key above, so what is left is a declaration)
+            return Some(vec![format!("crate::{q}")]);
+        }
+        None
+    }
+
+    /// `resolve` against the INSTALLED table (Pass B), memoised: `expand` asks the same keys many times.
+    pub(crate) fn resolve_memo(&self, q: &str, table: &HashMap<String, String>, caller: Option<&str>) -> Option<Vec<String>> {
+        let mk = format!("{}\u{1}{q}", caller.unwrap_or("\u{2}"));
+        if let Some(v) = self.memo.lock().ok().and_then(|m| m.get(&mk).cloned()) {
+            return v;
+        }
+        let v = self.resolve(q, table, caller);
+        if let Ok(mut m) = self.memo.lock() {
+            m.insert(mk, v.clone());
+        }
+        v
+    }
+
+    /// Resolve a crate-rooted path (`q` without `crate::`) one module at a time: each segment that is not a known module
+    /// is looked up in the module before it — explicit first, then its globs. Returns the resolved arms (crate-rooted or
+    /// external), or `None` when no segment moved (or a lookup was undetermined).
+    pub(crate) fn resolve(&self, q: &str, table: &HashMap<String, String>, caller: Option<&str>) -> Option<Vec<String>> {
+        let segs: Vec<&str> = q.split("::").collect();
+        let mut cur = String::new();
+        for (i, x) in segs.iter().enumerate() {
+            let next = qualify(&cur, x);
+            if self.mods.contains(&next) {
+                cur = next;
+                continue;
+            }
+            let rest = &segs[i + 1..];
+            if self.twins.contains(&next) {
+                return None;
+            }
+            if self.names.get(&cur).is_some_and(|n| n.contains(*x)) {
+                // explicit in `cur`: only an external named `use` moves it (a local binding is the table's, a declaration
+                // is itself)
+                if !rest.is_empty() || self.private_ext_use.contains(&next) && !Self::sees(&cur, caller) {
+                    return None;
+                }
+                return self.ext_uses.get(&next).cloned();
+            }
+            if !self.has_globs(&cur) || i == 0 && cur.is_empty() && !self.has_globs("") {
+                return None;
+            }
+            // Only the LAST segment is answered here. A path continuing below a glob-resolved name is the caller's to
+            // assemble: every caller asks each prefix (`qualified_alias` from the longest down), and a prefix rewrite
+            // with an unresolved tail named nothing (h2: `…::peer::PollMessage::proto_err`, first A/B).
+            if !rest.is_empty() {
+                return None;
+            }
+            return self.through_globs(&cur, x, table, caller);
+        }
+        None
+    }
+}
+
 pub(crate) fn build_reexport_names(
     edges: &[Reexport],
     mod_aliases: &HashMap<String, String>,
     declared: &std::collections::HashSet<String>,
     local_mods: &std::collections::HashSet<String>,
     extern_aliases: &std::collections::BTreeMap<String, String>,
+    ns: Option<&NsIndex>,
 ) -> HashMap<String, String> {
     fn chaseable(k: &str) -> bool {
         !k.starts_with(REDIRECT_MOD_MARK) && !k.ends_with(MOD_GLOB_KEY) && !k.contains(ITEM_SENTINEL)
@@ -2277,6 +2583,7 @@ pub(crate) fn build_reexport_names(
         !(ext_declared.contains(q) && !placed_glob_mods.contains(m))
     };
     let mut table: HashMap<String, String> = HashMap::new();
+    let mut all_arms: HashMap<String, Vec<String>> = HashMap::new();
     for k in &keys {
         let mut out: Vec<String> = Vec::new();
         for a in raw[k].split(ALIAS_ALT_SEP).filter(|a| !a.is_empty()) {
@@ -2291,6 +2598,7 @@ pub(crate) fn build_reexport_names(
         if arms.is_empty() || arms.iter().all(|a| *a == own) {
             continue;
         }
+        all_arms.insert(k.clone(), arms.clone());
         if arms.iter().any(|a| undetermined(a)) {
             if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
                 eprintln!("R1657S2GLOBREFUSE\t{k}\t{}", arms.join("|")); // §E1 REACH COUNTER
@@ -2302,6 +2610,58 @@ pub(crate) fn build_reexport_names(
         }
         let v = arms.join(&ALIAS_ALT_SEP.to_string());
         table.insert(k.clone(), if local_mods.contains(k) { format!("{REEXPORT_VALUE_ONLY}{v}") } else { v });
+    }
+    // SOUNDNESS R1697/R1702 — every arm the chase left at a name the defining module binds only through a GLOB or an
+    // EXTERNAL named `use` (`crate::executor::quad_zz` behind `use consolidate::*`; `crate::Datetime` behind the root's
+    // `pub use toml_datetime::*`; `crate::go` behind `pub use dep::go`) is resolved through the module namespace (`NsIndex`):
+    // one answer, or the key keeps its stage-2 reading (refused when undetermined). Two passes, so a key whose resolution
+    // runs through another refused key settles.
+    if let Some(ns) = ns {
+        for _ in 0..2 {
+            let mut changed = false;
+            let mut ks: Vec<&String> = all_arms.keys().collect();
+            ks.sort_unstable();
+            let snapshot = table.clone();
+            for k in ks {
+                let arms = &all_arms[k];
+                let mut out: Vec<String> = Vec::new();
+                let mut moved = false;
+                let mut refuse = false;
+                for a in arms {
+                    let caller = k.rsplit_once("::").map_or("", |(m, _)| m);
+                    let r = a.strip_prefix("crate::").and_then(|q| ns.resolve(q, &snapshot, Some(caller)));
+                    match r {
+                        Some(v) => {
+                            moved = true;
+                            out.extend(v);
+                        }
+                        None => {
+                            if undetermined(a) {
+                                refuse = true;
+                            }
+                            out.push(a.clone());
+                        }
+                    }
+                }
+                if !moved || refuse {
+                    continue;
+                }
+                out.sort_unstable();
+                out.dedup();
+                let v = out.join(&ALIAS_ALT_SEP.to_string());
+                let v = if local_mods.contains(k) { format!("{REEXPORT_VALUE_ONLY}{v}") } else { v };
+                if table.get(k) != Some(&v) {
+                    if candor_report::env::trace("CANDOR_R1697_INSTR") {
+                        eprintln!("R1697NAME\t{k}\t{}", v.replace(ALIAS_ALT_SEP, "|")); // §E1 REACH COUNTER
+                    }
+                    table.insert(k.clone(), v);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
     }
     table
 }
@@ -2417,6 +2777,105 @@ fn collect_private_uses_in(
             }
             _ => {}
         }
+    }
+    // SOUNDNESS R1697/R1702 — THE MODULE'S OWN NAMESPACE, for the re-export table's glob and external-binding resolution
+    // (`build_reexport_names`, `NsIndex`): every name the module binds EXPLICITLY (a declaration in any namespace, a named
+    // `use` of any visibility, an `extern crate`), whether it has an item-position macro or `include!` that may bind more
+    // (OPAQUE), the target of every external glob (`use dep::*`, any visibility), and every named `use` of an EXTERNAL item
+    // (`use dep::X [as Y]`, any visibility — the private ones `mod_aliases` does not carry). Pass A fact (rev183).
+    if !crate::lang::r1697_off() {
+        let mut names: Vec<String> = Vec::new();
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut opaque = false;
+        for it in items {
+            match it {
+                syn::Item::Use(u) => {
+                    if !include_tests && is_cfg_test(&u.attrs) {
+                        continue;
+                    }
+                    let private = match &u.vis {
+                        syn::Visibility::Inherited => true,
+                        syn::Visibility::Restricted(r) => r.path.is_ident("self"),
+                        _ => false,
+                    };
+                    let mut leaves = Vec::new();
+                    use_leaves(&u.tree, Vec::new(), &mut leaves);
+                    for (segs, name, alias) in leaves {
+                        if name == "*" {
+                            let head = segs.first().map(String::as_str).unwrap_or("");
+                            if !segs.is_empty()
+                                && !matches!(head, "crate" | "self" | "super")
+                                && resolve_use_base(&segs, modpath, &mods).is_empty()
+                            {
+                                out.push(Reexport {
+                                    module: modpath.to_string(),
+                                    from: Vec::new(),
+                                    name: segs.join("::"),
+                                    alias: if private { NS_EXT_GLOB_PRIV_MARK } else { NS_EXT_GLOB_MARK }.to_string(),
+                                    cfg_gated: has_cfg(&u.attrs),
+                                });
+                            }
+                            continue;
+                        }
+                        if alias == "_" {
+                            continue;
+                        }
+                        let head = segs.first().map(String::as_str).unwrap_or(name.as_str());
+                        if !matches!(head, "crate" | "self" | "super")
+                            && resolve_use_base(&segs, modpath, &mods).is_empty()
+                            && !(segs.is_empty() && mods.contains_key(&name))
+                        {
+                            let target = if segs.is_empty() { name.clone() } else { format!("{}::{name}", segs.join("::")) };
+                            out.push(Reexport {
+                                module: modpath.to_string(),
+                                from: Vec::new(),
+                                name: format!("{alias}{NS_SEP}{target}"),
+                                alias: if private { NS_EXT_USE_PRIV_MARK } else { NS_EXT_USE_MARK }.to_string(),
+                                cfg_gated: has_cfg(&u.attrs),
+                            });
+                        }
+                        used.insert(alias.clone());
+                        names.push(alias);
+                    }
+                }
+                syn::Item::Macro(m) if m.ident.is_none() => opaque = true,
+                // a `macro_rules!` definition is textually scoped, not a path-namespace binding: recording it would let a
+                // glob lookup answer a bare macro name with a module path (h2's `proto_err!` inside a fn that globs an
+                // enum's variants read as `crate::proto::peer::PollMessage::proto_err` and lost its `Log`; first A/B)
+                syn::Item::Macro(_) => {}
+                other => {
+                    if let Some(n) = declared_item_name(other, include_tests) {
+                        declared.insert(n.clone());
+                        names.push(n);
+                    }
+                }
+            }
+        }
+        // A name the module both DECLARES and binds by a `use` is a `#[cfg]` twin (tokio-websockets `sha`: `fn digest` in
+        // the openssl/sha1_smol arms, `use ring::digest` in another): which one a path names depends on the build, so the
+        // namespace answers it for neither (first A/B: the `use` arm alone was taken and `invisible:[openssl, sha1_smol]`
+        // was lost).
+        let mut twins: Vec<&String> = declared.intersection(&used).collect();
+        if !twins.is_empty() {
+            twins.sort();
+            out.push(Reexport {
+                module: modpath.to_string(),
+                from: Vec::new(),
+                name: twins.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(&NS_SEP.to_string()),
+                alias: NS_TWIN_MARK.to_string(),
+                cfg_gated: false,
+            });
+        }
+        names.sort();
+        names.dedup();
+        out.push(Reexport {
+            module: modpath.to_string(),
+            from: Vec::new(),
+            name: names.join(&NS_SEP.to_string()),
+            alias: if opaque { NS_NAMES_OPAQUE_MARK } else { NS_NAMES_MARK }.to_string(),
+            cfg_gated: false,
+        });
     }
     // SOUNDNESS R1657 stage 2b — a module with such a glob DECLARES some names itself, and a name it declares is answered by
     // the declaration, not by the glob (an own item beats a glob import). The table's `declared` set is types only, so the

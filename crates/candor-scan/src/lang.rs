@@ -2673,10 +2673,20 @@ pub(crate) fn expand_noanchor(path: &str, uses: &HashMap<String, String>) -> Str
 }
 
 fn expand_with(path: &str, uses: &HashMap<String, String>, anchor: bool, follow: bool) -> String {
+    let prev = NS_CALLER.with(|c| c.replace(uses.get(MODPATH_KEY).cloned()));
+    let r = expand_with_in(path, uses, anchor, follow);
+    NS_CALLER.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
+fn expand_with_in(path: &str, uses: &HashMap<String, String>, anchor: bool, follow: bool) -> String {
     // A leading `::` (only `path_to_string_lc` produces one) is an EXTERN-crate path: no module anchor
     // applies to it. Everything else is answered exactly as before the colon was kept.
     if let Some(rest) = path.strip_prefix("::") {
-        return expand_with(rest, uses, false, follow);
+        // SOUNDNESS R1697 — and no crate-local alias or glob answers one: `::hex::encode` in serde_with's `mod hex` (which
+        // globs a prelude re-exporting `crate::hex`) is the `hex` CRATE. Once module globs resolved, following them read it
+        // as `crate::hex::encode`, a path naming nothing, and the `invisible:[hex]` disclosure was lost (first A/B).
+        return expand_with(rest, uses, false, follow && r1697_off());
     }
     let mut segs: Vec<&str> = path.split("::").collect();
     // SOUNDNESS R1710 — `self::ffi::f` where THIS module says `extern crate X as ffi;` is `X::f`: the module's own binding
@@ -3024,6 +3034,51 @@ pub(crate) fn reexport_names_cell() -> &'static std::sync::RwLock<ReexportNames>
     REEXPORT_NAMES.get_or_init(|| std::sync::RwLock::new(Default::default()))
 }
 
+/// SOUNDNESS R1697/R1702 — the crate's module namespaces (`decls::NsIndex`), installed with the re-export table; `None`
+/// during Pass A and under `CANDOR_R1697_OFF`.
+pub(crate) static NS_INDEX: std::sync::OnceLock<std::sync::RwLock<Option<crate::decls::NsIndex>>> = std::sync::OnceLock::new();
+
+pub(crate) fn ns_cell() -> &'static std::sync::RwLock<Option<crate::decls::NsIndex>> {
+    NS_INDEX.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+thread_local! {
+    /// SOUNDNESS R1697 — the module whose path `expand_with` is resolving (its `MODPATH_KEY`), for the namespace's privacy
+    /// rule: a private `use` binds a name for its module and that module's descendants only.
+    pub(crate) static NS_CALLER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// SOUNDNESS R1697/R1702 — the kill switch for module-namespace resolution (glob chains, external re-bindings).
+pub(crate) fn r1697_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1697_OFF"))
+}
+
+/// SOUNDNESS R1697/R1702 — a crate-rooted name (no `crate::`) the re-export table has no key for, resolved through the
+/// module namespaces: a name a module binds only through a glob or an external named `use`. `None` when nothing moves.
+pub(crate) fn ns_lookup(key: &str) -> Option<String> {
+    if r1697_off() || r1657s2_off() {
+        return None;
+    }
+    // a path a macro token stream produced can carry punctuation (`DeleteRowsEventV,crate`): never a name to resolve
+    if !key.split("::").all(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_')) {
+        return None;
+    }
+    let ns = ns_cell().read().ok()?;
+    let ns = ns.as_ref()?;
+    let table = reexport_names_cell().read().ok()?;
+    let caller = NS_CALLER.with(|c| c.borrow().clone());
+    let v = ns.resolve_memo(key, &table, caller.as_deref())?;
+    let own = format!("crate::{key}");
+    if v.iter().all(|a| *a == own) {
+        return None;
+    }
+    if candor_report::env::trace("CANDOR_R1697_INSTR") {
+        eprintln!("R1697NS\t{key}\t{}", v.join("|")); // §E1 REACH COUNTER
+    }
+    Some(v.join(&crate::decls::ALIAS_ALT_SEP.to_string()))
+}
+
 /// SOUNDNESS R1657 stage 2 — the kill switch for the re-export table (and every reader of it).
 pub(crate) fn r1657s2_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -3046,10 +3101,10 @@ pub(crate) fn reexport_lookup(key: &str) -> Option<String> {
 /// answers only as a whole name (`decls::REEXPORT_VALUE_ONLY`): below it, the module is what the path names.
 pub(crate) fn reexport_lookup_at(key: &str, below: bool) -> Option<String> {
     let cell = reexport_names_cell().read().ok()?;
-    if cell.is_empty() {
-        return None;
-    }
-    let v = cell.get(key)?;
+    let Some(v) = cell.get(key) else {
+        drop(cell);
+        return ns_lookup(key);
+    };
     match v.strip_prefix(crate::decls::REEXPORT_VALUE_ONLY) {
         Some(_) if below => None,
         Some(rest) => Some(rest.to_string()),
@@ -3124,6 +3179,10 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
     }
     let globs = uses.get(ALLGLOB_KEY)?;
     let mut hits: Vec<String> = Vec::new();
+    // SOUNDNESS R1702 — hits the re-export TABLE itself answered (a LOCAL named `use` chain the table followed to a
+    // dependency item: `pub(crate) use crate::go;` over the root's `pub use dep::go`). Not the extern-prelude question the
+    // refusal below is about: the chain was written by this crate, binding by binding.
+    let mut table_hits: Vec<String> = Vec::new();
     for g in globs.split('\u{1}').filter(|g| !g.is_empty()) {
         let gs: Vec<&str> = g.split("::").collect();
         let module: String = match gs[0] {
@@ -3148,6 +3207,10 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
         } else if let Some(v) = reexport_lookup_at(&key["crate::".len()..], segs.len() >= 2).filter(|v| !v.is_empty()) {
             // SOUNDNESS R1657 stage 2 — a name the glob's module re-exports by a LOCAL named `use` (`pub mod plat
             // { pub use crate::tu as sys; }`, `use crate::plat::*; sys::fx()`): the R1684 residual.
+            let in_table = reexport_names_cell().read().is_ok_and(|t| t.contains_key(&key["crate::".len()..]));
+            if in_table && !r1697_off() && !table_hits.contains(&v) {
+                table_hits.push(v.clone());
+            }
             if !hits.contains(&v) {
                 hits.push(v);
             }
@@ -3165,7 +3228,7 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
         let h = a.split("::").next().unwrap_or(a);
         h != "crate" && (matches!(h, "std" | "core" | "alloc") || deps.split('\u{1}').any(|d| d == h) || !a.contains("::") && h.is_empty())
     };
-    if hits[0].split(crate::decls::ALIAS_ALT_SEP).any(external) {
+    if hits[0].split(crate::decls::ALIAS_ALT_SEP).any(external) && !table_hits.contains(&hits[0]) {
         return None;
     }
     let r = alias_join(&hits[0], &segs[1..]);

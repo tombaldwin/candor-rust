@@ -1746,6 +1746,9 @@ pub(crate) struct Facade {
     pub(crate) declared: std::collections::HashSet<String>,
 }
 
+/// SOUNDNESS R1736 — the most module FILES one facade read follows (a facade is a re-export surface, not a whole crate).
+const FACADE_FILE_CAP: usize = 256;
+
 /// SOUNDNESS R1715 — a `macro_rules!` whose FIRST arm has an empty matcher: its transcriber, which an empty invocation
 /// (`crate_root!();`) re-emits verbatim. Any other shape is `None` (its expansion is not read).
 fn zero_arg_transcriber(ts: &proc_macro2::TokenStream) -> Option<proc_macro2::TokenStream> {
@@ -1763,6 +1766,21 @@ fn zero_arg_transcriber(ts: &proc_macro2::TokenStream) -> Option<proc_macro2::To
 
 impl Facade {
     fn walk(&mut self, items: &[syn::Item], module: &str, deps: &HashMap<String, String>, depth: usize) {
+        self.walk_in(items, module, deps, depth, None, &mut 0);
+    }
+
+    /// SOUNDNESS R1736 — `dir` is the directory a `mod x;` declared in `items` is read from (rustc's rule: the root file's
+    /// directory, `<dir>/x.rs` or `<dir>/x/mod.rs`, a `#[path]` relative to `dir`), `files` the number of module files read
+    /// so far (bounded by `FACADE_FILE_CAP`). `None`: only the item tree in hand is walked (the R1715 reading).
+    fn walk_in(
+        &mut self,
+        items: &[syn::Item],
+        module: &str,
+        deps: &HashMap<String, String>,
+        depth: usize,
+        dir: Option<&std::path::Path>,
+        files: &mut usize,
+    ) {
         let key = |n: &str| if module.is_empty() { n.to_string() } else { format!("{module}::{n}") };
         let mut zero: HashMap<String, proc_macro2::TokenStream> = HashMap::new();
         for it in items {
@@ -1798,16 +1816,61 @@ impl Facade {
                     }
                 }
                 syn::Item::Mod(m) => {
-                    self.declared.insert(key(&m.ident.to_string()));
-                    if let (Some((_, inner)), true) = (&m.content, matches!(m.vis, syn::Visibility::Public(_))) {
-                        self.walk(inner, &key(&m.ident.to_string()), deps, depth);
+                    let name = m.ident.to_string();
+                    self.declared.insert(key(&name));
+                    if !matches!(m.vis, syn::Visibility::Public(_)) {
+                        continue;
+                    }
+                    match &m.content {
+                        Some((_, inner)) => {
+                            let sub = dir.map(|d| d.join(&name));
+                            self.walk_in(inner, &key(&name), deps, depth, sub.as_deref(), files);
+                        }
+                        // SOUNDNESS R1736 — a FILE module (`pub mod body;`, hyper 1.x re-exports `http_body::Body` in
+                        // `src/body/mod.rs`). Unread, "no matching re-export" was taken as proof the traits are distinct: reqwest's
+                        // `impl hyper::body::Body` missed `http_body#Body::poll_frame` WITH a lockfile.
+                        None => {
+                            let Some(d) = dir else { continue };
+                            if *files >= FACADE_FILE_CAP || depth >= 8 {
+                                continue;
+                            }
+                            let explicit = m.attrs.iter().find(|a| a.path().is_ident("path")).and_then(|a| match &a.meta {
+                                syn::Meta::NameValue(nv) => match &nv.value {
+                                    syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => Some(d.join(s.value())),
+                                    _ => None,
+                                },
+                                _ => None,
+                            });
+                            let (file, sub) = match explicit {
+                                Some(f) => {
+                                    let sub = f.parent().map(|p| p.to_path_buf());
+                                    (f, sub)
+                                }
+                                None => {
+                                    let a = d.join(format!("{name}.rs"));
+                                    if a.is_file() {
+                                        (a, Some(d.join(&name)))
+                                    } else {
+                                        let b = d.join(&name).join("mod.rs");
+                                        (b, Some(d.join(&name)))
+                                    }
+                                }
+                            };
+                            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+                            let Ok(f) = syn::parse_file(&text) else { continue };
+                            *files += 1;
+                            if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
+                                eprintln!("DSFACADEMOD\t{}\t{}", key(&name), file.display()); // §E1 REACH COUNTER
+                            }
+                            self.walk_in(&f.items, &key(&name), deps, depth + 1, sub.as_deref(), files);
+                        }
                     }
                 }
                 syn::Item::Macro(m) if m.ident.is_none() && m.mac.tokens.is_empty() && depth < 4 => {
                     let Some(name) = m.mac.path.get_ident().map(|i| i.to_string()) else { continue };
                     let Some(t) = zero.get(&name) else { continue };
                     if let Ok(x) = syn::parse2::<Items>(t.clone()) {
-                        self.walk(&x.0, module, deps, depth + 1);
+                        self.walk_in(&x.0, module, deps, depth + 1, dir, files);
                     }
                 }
                 other => {
@@ -2527,7 +2590,12 @@ impl DepSigs {
                 }
             }
             let mut f = Facade::default();
-            f.walk(&file.items, "", &deps, 0);
+            let root_dir = src.dir.join(lib).parent().map(|p| p.to_path_buf());
+            if candor_report::env::switch("CANDOR_R1736_OFF") {
+                f.walk(&file.items, "", &deps, 0);
+            } else {
+                f.walk_in(&file.items, "", &deps, 0, root_dir.as_deref(), &mut 0);
+            }
             Some(std::rc::Rc::new(f))
         });
         if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {

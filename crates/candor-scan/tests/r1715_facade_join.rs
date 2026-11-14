@@ -63,7 +63,7 @@ fn scan(dir: &Path, deps: Option<&Path>, out: Option<&Path>, env: &[(&str, &str)
         None => cmd.arg("--json"),
     };
     cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY")
-        .env_remove("CANDOR_R1715_OFF").env_remove("CANDOR_R1711C_OFF").env_remove("CANDOR_R1710_OFF")
+        .env_remove("CANDOR_R1715_OFF").env_remove("CANDOR_R1711C_OFF").env_remove("CANDOR_R1743_OFF").env_remove("CANDOR_R1710_OFF")
         .env("CANDOR_CACHE", dir.join(".r1715-cache"));
     if let Some(d) = deps {
         cmd.env("CANDOR_DEPS", d);
@@ -161,7 +161,12 @@ fn a_facade_spelled_implementor_and_call_join_the_owners_keys() {
     let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1715_OFF", "1")]);
     assert!(!has(&off, "e_impl_join", "Fs"), "R1715 off still charged e_impl_join: {:?}", off.get("e_impl_join"));
     assert!(!has(&off, "e_call_join", "Env"), "R1715 off still charged e_call_join: {:?}", off.get("e_call_join"));
-    assert!(!has(&off, "e_rev_join", "Env"), "R1715 off still charged e_rev_join: {:?}", off.get("e_rev_join"));
+    // SOUNDNESS R1743 re-keys the facade-keyed producer entry under the owner at load, a second route to the same join;
+    // the reverse join's reach is shown with both off (and R1743's own reach in `tests/r1697_namespace_resolution.rs`).
+    let (off2, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1715_OFF", "1"), ("CANDOR_R1743_OFF", "1")]);
+    assert!(!has(&off2, "e_rev_join", "Env"), "R1715+R1743 off still charged e_rev_join: {:?}", off2.get("e_rev_join"));
+    let (off3, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1743_OFF", "1")]);
+    assert!(has(&off3, "e_rev_join", "Env"), "R1715's reverse join alone must still charge e_rev_join: {:?}", off3.get("e_rev_join"));
 }
 
 #[test]

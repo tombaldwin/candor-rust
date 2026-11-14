@@ -11129,6 +11129,72 @@
       ]
     },
     {
+      "fn": "depsig::Facade::walk",
+      "loc": "crates/candor-scan/src/depsig.rs:1768:5: 1768:104",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "891a33a8dc973fb61504e51c55ec4bbc",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::Facade::walk_in"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "depsig::Facade::walk_in",
+      "loc": "crates/candor-scan/src/depsig.rs:1775:5: 1783:6",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "891a33a8dc973fb690b81028ed849475",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "decls::declared_item_name",
+        "depsig::Facade::walk_in"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "depsig::SrcIndex::assoc_bound_declares",
       "loc": "crates/candor-scan/src/depsig.rs:518:5: 518:93",
       "inferred": [
@@ -17797,6 +17863,39 @@
         "syn",
         "toml",
         "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "scan::r1743_facade_owner_keys",
+      "loc": "crates/candor-scan/src/scan.rs:12203:1: 12203:82",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "891a33a8dc973fb68286acd31cd1e55c",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::DepSigs::facade",
+        "depsig::DepSigs::facade_owners"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml"
       ],
       "incomplete": [
         "Fs"

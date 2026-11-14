@@ -314,6 +314,9 @@ pub(crate) struct DepIndex {
     /// ⟨0.40⟩ `<member leaf>` -> `(package, owner qual)` of every entry publishing it — the in-scope-trait
     /// question (`typesurf::in_scope_publishes`) asks this.
     pub(crate) members: HashMap<String, Vec<(String, String)>>,
+    /// SOUNDNESS R1743 — the facade packages whose lock-pinned source re-keyed an entry under its owner
+    /// (`scan::r1743_facade_owner_keys`), for the report's `dependencySources`.
+    pub(crate) r1743_read: std::collections::BTreeSet<String>,
 }
 
 /// ⟨0.21⟩ Does this dep report DECLARE ITSELF INCOMPLETE — does its `unanalyzed` manifest name source the

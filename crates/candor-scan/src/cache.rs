@@ -44,6 +44,11 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev183 (rustagent-reexport): SOUNDNESS R1697/R1702 — Pass A's `private_uses` gains one module-namespace marker edge per
+    // module (its explicit names, OPAQUE when an item macro or `include!` may bind more), an external glob's target and every
+    // external named `use`, which `decls::NsIndex` reads to resolve a name bound only through a glob or an external `use`. A
+    // rev182 entry lacks them and replays the stage-2 reading (the name names nothing) — the stale direction is SILENCE.
+    // Mandatory. (If another lane also took rev183, the join renumbers; the token only has to differ.)
     // rev182 (rustagent-r1715): SOUNDNESS R1710/R1715/R1711(c) on top of rev181. Pass A's `FileDecls` gains `extern_aliases`
     // (every renamed `extern crate X as Y;`) and the module `use` maps bind `Y -> X`, so the root's `root_reexports` gain `Y`
     // too; a rev181 entry replays `ffi::f()` as the local path naming nothing — the stale direction is SILENCE. Mandatory.
@@ -665,7 +670,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev182/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev183/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -993,7 +993,8 @@ pub(crate) fn scan_main() {
     // of them covers inherits that function's recorded effects + literal surfaces. The stable
     // scanner's half of the dep-scan story: scan the dep once, chain it everywhere.
     let deps_spec = candor_report::env::operator("CANDOR_DEPS").ok().or_else(|| cfg.get("deps").cloned());
-    let deps_idx = load_dep_reports(deps_spec.as_deref());
+    let mut deps_idx = load_dep_reports(deps_spec.as_deref());
+    r1743_facade_owner_keys(&mut deps_idx, &dir);
     // scan_target handles both a single crate and a `[workspace]` root (one report per member under
     // one prefix — candor-query's multi-crate merge consumes them together; the policy gates each).
     let code = scan_target(&dir, prefix, want_json, include_tests, policy, baseline, &deps_idx, &run_tok);
@@ -1409,6 +1410,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     *crate::lang::dyn_alias_cell().write().unwrap() = Default::default();
     // SOUNDNESS R1657 stage 2 — likewise empty for Pass A; installed after the merge (`decls::build_reexport_names`).
     *crate::lang::reexport_names_cell().write().unwrap() = Default::default();
+    // SOUNDNESS R1697/R1702 — and the module namespaces, so a workspace member's Pass A never reads the previous member's.
+    *crate::lang::ns_cell().write().unwrap() = None;
 
     // Parse every in-scope .rs file ONCE (syn parses are reused across both passes below). The walk +
     // path-shape filters run SEQUENTIALLY (cheap directory traversal, and the filter set is the report's
@@ -1882,10 +1885,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     .reexports
                     .iter()
                     .chain(merged.private_uses.iter())
-                    .filter(|e| !r1657s2_deps.contains(&e.name) && !matches!(e.name.as_str(), "std" | "core" | "alloc"))
+                    .filter(|e| {
+                        // SOUNDNESS R1697/R1702 — a namespace MARKER names a module's bindings, not a re-exported item
+                        (e.from.is_empty() && e.alias.starts_with('\u{1}'))
+                            || !r1657s2_deps.contains(&e.name) && !matches!(e.name.as_str(), "std" | "core" | "alloc")
+                    })
                     .cloned()
                     .collect();
-                crate::decls::build_reexport_names(&edges, &merged.mod_aliases, &r1657s2_declared, &r1657s2_mods, &merged.extern_aliases)
+                let ns = (!crate::lang::r1697_off()).then(|| crate::decls::NsIndex::from_edges(&edges, &merged.private_uses, &r1657s2_mods, &r1657s2_deps));
+                let t = crate::decls::build_reexport_names(
+                    &edges,
+                    &merged.mod_aliases,
+                    &r1657s2_declared,
+                    &r1657s2_mods,
+                    &merged.extern_aliases,
+                    ns.as_ref(),
+                );
+                *crate::lang::ns_cell().write().unwrap() = ns;
+                t
             }
         };
         let n = t.len();
@@ -2197,6 +2214,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // alone, as is any member the local type declares. No lock-pinned source: nothing is filed, the value stays untyped, and
     // the `<untyped>` marker the call leaves is disclosed in the call loop instead (`r1605_ty_traits`).
     let r1578_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
+    // SOUNDNESS R1743 — the facades `r1743_facade_owner_keys` read to re-key chained entries answer this scan's joins, so
+    // they are recorded in its `dependencySources` (SPEC §2 ⟨0.42⟩: a lock-pinned source read to answer a join is named).
+    for p in &deps_idx.r1743_read {
+        let mut s = r1578_sigs.borrow_mut();
+        if s.facade(dir, p, p).is_some() {
+            s.note_typed(p);
+        }
+    }
     let r1605_ty_traits: HashMap<String, Vec<(String, String)>> = {
         let mut m: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for k in &merged.impl_members {
@@ -12156,10 +12181,115 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
         Ok(extra) if !extra.is_empty() => format!("{deps_dir}:{extra}"),
         _ => deps_dir.clone(),
     };
-    let idx = load_dep_reports(Some(&spec));
+    let mut idx = load_dep_reports(Some(&spec));
+    r1743_facade_owner_keys(&mut idx, dir);
     // The final root scan goes through scan_target so `--deps <workspace>` fans out over members
     // too — the nested-package filter would otherwise prune them all into an empty, gate-passing report.
     scan_target(dir, prefix, want_json, include_tests, policy, baseline, &idx, run)
+}
+
+/// SOUNDNESS R1743 — A CHAINED ENTRY KEYED UNDER A FACADE, JOINED BY A CONSUMER THAT SPELLS THE OWNER. Every producer that
+/// depends on `serde` (not `serde_core`) keys its dispatch and its union rows from its own `use` map: serde-xml-rs 0.8.2
+/// publishes `serde#de::Visitor::visit_u32` and a union row `serde#de::Deserializer::deserialize_u32`. A consumer that
+/// implements and bounds the trait under its true owner (`impl serde_core::de::Visitor`, `D: serde_core::Deserializer`)
+/// asks `serde_core#…` and joins neither: EXECUTED, its `Visitor` deletes a file and `deny Fs` read 0 on 0.41.3, 0.42.0 and
+/// b805747a. [[R1715]]'s reverse join resolves the producer's key only for a facade the consumer itself depends on, and a
+/// consumer of `serde_core` does not depend on `serde`.
+///
+/// The facade is the same one R1715 reads (`DepSigs::facade_owners`, the lock-pinned root re-exports — here the CONSUMER's
+/// Cargo.lock, which pins the producer's `serde` transitively). Every chained key `F#p` whose facade `F` re-exports `p`'s
+/// trait from an owner `O` is ALSO filed under `O#p'` (and its tail2), and every `dispatchesOn` member `F#p` gains `O#p'`
+/// beside it. ADDITIVE ONLY (a key already present is unioned, nothing is renamed or withdrawn), so a consumer that spells
+/// the facade joins exactly as before. No lock-pinned source for `F`: nothing is added (the reading may only add). The
+/// packages read are recorded on the index and named in `dependencySources` by `scan_one`. `CANDOR_R1743_OFF=1` disables it.
+pub(crate) fn r1743_facade_owner_keys(idx: &mut crate::deps::DepIndex, dir: &str) {
+    if candor_report::env::switch("CANDOR_R1743_OFF") || idx.by_key.is_empty() {
+        return;
+    }
+    let mut sigs = crate::depsig::DepSigs::default();
+    // per facade package: does it re-export anything at all (else every key under it is its own)
+    let mut fac: HashMap<String, bool> = HashMap::new();
+    let mut memo: HashMap<String, Vec<String>> = HashMap::new();
+    // `F#path::m` -> the owner keys it also names (full and tail2), `[]` when it names only itself
+    let mut owner_keys = |k: &str, sigs: &mut crate::depsig::DepSigs, fac: &mut HashMap<String, bool>| -> Vec<String> {
+        if let Some(v) = memo.get(k) {
+            return v.clone();
+        }
+        let mut out: Vec<String> = Vec::new();
+        if let Some((f, path)) = k.split_once('#') {
+            let live = *fac.entry(f.to_string()).or_insert_with(|| {
+                sigs.facade(dir, f, f).is_some_and(|x| !x.names.is_empty() || !x.globs.is_empty())
+            });
+            if let (true, Some((tp, m))) = (live, path.rsplit_once("::")) {
+                for (o, rest, _) in sigs.facade_owners(dir, f, f, tp) {
+                    if o == f {
+                        continue;
+                    }
+                    out.push(format!("{o}#{rest}::{m}"));
+                    if let Some(t2) = tail2(&format!("{rest}::{m}")) {
+                        out.push(format!("{o}#{t2}"));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        memo.insert(k.to_string(), out.clone());
+        out
+    };
+    let keys: Vec<String> = idx.by_key.keys().cloned().collect();
+    let mut adds: Vec<(String, String)> = Vec::new(); // (new key, source key)
+    for k in &keys {
+        for nk in owner_keys(k, &mut sigs, &mut fac) {
+            adds.push((nk, k.clone()));
+        }
+    }
+    let mut member_adds: Vec<(String, String, Vec<String>)> = Vec::new(); // (entry key, member, owner members)
+    for (k, d) in idx.by_key.iter() {
+        for mem in &d.dispatches_on {
+            let om: Vec<String> = owner_keys(mem, &mut sigs, &mut fac).into_iter().filter(|o| !d.dispatches_on.contains(o)).collect();
+            if !om.is_empty() {
+                member_adds.push((k.clone(), mem.clone(), om));
+            }
+        }
+    }
+    if adds.is_empty() && member_adds.is_empty() {
+        return;
+    }
+    let mut read: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (k, mem, om) in member_adds {
+        if let Some(f) = mem.split_once('#').map(|x| x.0) {
+            read.insert(f.to_string());
+        }
+        let d = idx.by_key.get_mut(&k).expect("key from the same map");
+        let union = d.union_dispatches_on.contains(&mem);
+        for o in om {
+            if candor_report::env::trace("CANDOR_R1743_INSTR") {
+                eprintln!("R1743MEMBER\t{k}\t{mem}\t{o}"); // §E1 REACH COUNTER
+            }
+            if union {
+                d.union_dispatches_on.insert(o.clone());
+            }
+            d.dispatches_on.insert(o);
+        }
+    }
+    for (nk, src) in adds {
+        let Some(d) = idx.by_key.get(&src).cloned() else { continue };
+        if let Some(f) = src.split_once('#').map(|x| x.0) {
+            read.insert(f.to_string());
+        }
+        if candor_report::env::trace("CANDOR_R1743_INSTR") {
+            eprintln!("R1743KEY\t{src}\t{nk}"); // §E1 REACH COUNTER
+        }
+        idx.by_key.entry(nk.clone()).or_default().union_with(&d);
+        if let Some(own) = idx.by_key_own.get(&src).cloned() {
+            idx.by_key_own.entry(nk.clone()).or_default().union_with(&own);
+        }
+        if idx.union_keys.contains(&src) {
+            idx.union_keys.insert(nk);
+        }
+    }
+    idx.r1743_read.extend(read);
 }
 
 /// SOUNDNESS R145 — does this call's callee get looked up in a module of `scope`? The CALLER's module is
