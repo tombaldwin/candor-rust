@@ -1527,6 +1527,13 @@ pub(crate) fn impl_owner_key(trait_leaf: &str, ty: &str, owner: &str, members: &
     format!("\u{1f}owner\u{1f}{trait_leaf}\u{1f}{ty}\u{1f}{owner}\u{1f}{}\u{1f}{written}", members.join(","))
 }
 
+/// SOUNDNESS R1759 (round 3) — `\u{1f}ownertp\u{1f}<tr>\u{1f}<ty>\u{1f}<m1,m2,..>\u{1f}<expanded trait path>`: one `impl` block of
+/// a trait for a type with its members and the trait path as written there (expanded through that scope's `use` map). Read
+/// only by `CallCollector::r1759_ufcs_overridden`, which needs EVERY block of one trait for one type.
+pub(crate) fn impl_owner_trait_key(trait_leaf: &str, ty: &str, members: &[String], trait_path: &str) -> String {
+    format!("\u{1f}ownertp\u{1f}{trait_leaf}\u{1f}{ty}\u{1f}{}\u{1f}{trait_path}", members.join(","))
+}
+
 /// SOUNDNESS R1246 — one implementor block read back from `impl_owner_key`: its self-type key, owner qual, members.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ImplOwner {

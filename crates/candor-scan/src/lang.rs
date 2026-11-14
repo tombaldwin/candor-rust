@@ -7662,6 +7662,10 @@ pub(crate) fn collect_local_impl_members(
                         .map(|w| crate::model::norm_type_path(&w))
                         .unwrap_or_default();
                     out.insert(crate::model::impl_owner_key(&tr_leaf, &key, &crate::decls::qualify(modpath, &key), &mem, &written));
+                    // SOUNDNESS R1759 (round 3) — the same block with its EXPANDED trait path, so a reader can take the
+                    // blocks of ONE trait (`serde_core::de::Error`) apart from a same-leaf one (`std::error::Error`).
+                    let tw: String = tr.segments.iter().map(|sg| sg.ident.to_string()).collect::<Vec<_>>().join("::");
+                    out.insert(crate::model::impl_owner_trait_key(&tr_leaf, &key, &mem, &expand(&tw, uses)));
                 }
                 let Some(ty) = impl_type_name(&im.self_ty) else { continue };
                 let Some(seg) = tr.segments.last() else { continue };

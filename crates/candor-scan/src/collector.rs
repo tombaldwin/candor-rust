@@ -10118,10 +10118,18 @@ impl<'a> CallCollector<'a> {
         // so `impl Tr<A> for Q { fn m }` and `impl Tr<B> for Q {}` were one set in which "declares `m`" held, and
         // `<Q as Tr<B>>::m(&Q)` — the provided body, which writes — read 0 (EXECUTED round-3 `go_b`; 1 on 0.42.0). The
         // owner index keeps one entry per BLOCK (R1246); a block with an unreadable item (`*`) is not proof.
-        let blocks: Vec<&crate::model::ImplOwner> =
-            self.impl_owners.get(tr).map(|v| v.iter().filter(|o| o.ty == ty_leaf).collect()).unwrap_or_default();
-        let every_block = !blocks.is_empty()
-            && blocks.iter().all(|o| o.members.iter().any(|x| x == member) && !o.members.iter().any(|x| x == "*"));
+        // Only the blocks of THIS dependency's trait: a same-leaf std trait (`impl std::error::Error for DeR {}` beside
+        // `impl serde_core::de::Error for DeR`) is another trait and has no say in which body `<DeR as de::Error>::m` runs.
+        let opre = format!("\u{1f}ownertp\u{1f}{tr}\u{1f}{ty_leaf}\u{1f}");
+        let blocks: Vec<Vec<&str>> = self
+            .impl_members
+            .iter()
+            .filter_map(|k| k.strip_prefix(&opre))
+            .filter_map(|rest| rest.split_once('\u{1f}'))
+            .filter(|(_, path)| path.split("::").next() == Some(root))
+            .map(|(mem, _)| mem.split(',').filter(|m| !m.is_empty()).collect())
+            .collect();
+        let every_block = !blocks.is_empty() && blocks.iter().all(|ms| ms.contains(&member.as_str()) && !ms.contains(&"*"));
         let declares = same_dep
             && every_block
             && !twin
