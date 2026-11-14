@@ -12220,9 +12220,13 @@ pub(crate) fn r1743_facade_owner_keys(idx: &mut crate::deps::DepIndex, dir: &str
             let live = *fac.entry(f.to_string()).or_insert_with(|| {
                 sigs.facade(dir, f, f).is_some_and(|x| !x.names.is_empty() || !x.globs.is_empty())
             });
-            if let (true, Some((tp, m))) = (live, path.rsplit_once("::")) {
+            // a trait the facade DECLARES itself is its own, even where it also re-exports a same-named item from another
+            // crate (zerocopy's `trait FromBytes` beside `pub use zerocopy_derive::FromBytes`, the derive macro; serde's
+            // `Serialize` derive): the re-export is the macro namespace, never the trait's owner
+            let own = |tp: &str, sigs: &mut crate::depsig::DepSigs| sigs.facade(dir, f, f).is_some_and(|x| x.declared.contains(tp));
+            if let (true, Some((tp, m))) = (live, path.rsplit_once("::").filter(|(tp, _)| !own(tp, sigs))) {
                 for (o, rest, _) in sigs.facade_owners(dir, f, f, tp) {
-                    if o == f {
+                    if o == f || sigs.facade(dir, &o, &o).is_some_and(|x| x.proc_macro) {
                         continue;
                     }
                     out.push(format!("{o}#{rest}::{m}"));

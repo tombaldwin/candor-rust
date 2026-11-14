@@ -1744,6 +1744,9 @@ pub(crate) struct Facade {
     pub(crate) globs: HashMap<String, Vec<String>>,
     /// the names the root file itself DECLARES in each module (an item shadows a glob in rustc)
     pub(crate) declared: std::collections::HashSet<String>,
+    /// SOUNDNESS R1743 — the package is a `proc-macro` crate (`[lib] proc-macro = true`): it exports macros only, never a
+    /// trait, so a facade's same-named re-export from it (`pub use serde_derive::Serialize`) is the derive, not the owner
+    pub(crate) proc_macro: bool,
 }
 
 /// SOUNDNESS R1736 — the most module FILES one facade read follows (a facade is a re-export surface, not a whole crate).
@@ -2589,7 +2592,10 @@ impl DepSigs {
                     }
                 }
             }
-            let mut f = Facade::default();
+            let mut f = Facade {
+                proc_macro: manifest.get("lib").and_then(|l| l.get("proc-macro")).and_then(|p| p.as_bool()) == Some(true),
+                ..Facade::default()
+            };
             let root_dir = src.dir.join(lib).parent().map(|p| p.to_path_buf());
             if candor_report::env::switch("CANDOR_R1736_OFF") {
                 f.walk(&file.items, "", &deps, 0);
