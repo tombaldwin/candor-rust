@@ -2424,7 +2424,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         TraitIndexes { impls: trait_impls, decls: trait_decls, fields: trait_fields, dyn_fields: &merged.dyn_trait_fields,
                        foreign_impls: &merged.foreign_impls, written_quals: &merged.written_trait_quals,
                        impl_members: &merged.impl_members, unbound_gen_fields: &merged.unbound_gen_fields,
-                       owners: &impl_owners };
+                       owners: &impl_owners, mbe_traits: &merged.mbe_traits };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
     let local_macros = &merged.local_macros;
@@ -4315,6 +4315,53 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 .or_else(|| r1617_chain_type(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs));
             let r1578_twin = r1578_owned.as_ref().is_some_and(|(_, t)| *t);
             let c = r1578_owned.as_ref().map(|(c, _)| c).unwrap_or(c);
+            // SOUNDNESS R1757 — a std type's PATH call into a dependency trait's impl for it (`STD_PATH_JOIN_MARKER`, see
+            // `collector::r1757_std_type_dep_path`): where the chained report has the type's entry, the call IS the plain
+            // dependency call and goes down the ordinary join below (its `dispatchesOn` followed); otherwise it is nothing here.
+            // A MISS on a chained, covered crate: the impl that runs is not an entry of its report (a `macro_rules!`-made impl —
+            // serde_core's `u64`'s — is never a unit), so the call is DISCLOSED where the trait is known to declare the member:
+            // the call names it (`<u64 as Deserialize>::deserialize`), or the module imports one from that crate whose
+            // lock-pinned declaration names it (`DepSigs::trait_declares_locked`, the owner's ⟨0.42⟩ rule; the source read is
+            // recorded). With neither the call is left as it was: a std associated fn (`Duration::from_secs`) shares the
+            // spelling and must not be hedged on a guess. Unchained, nothing here (the published behaviour).
+            let r1757_owned: Call;
+            let c = match c.path.split_once(&format!("::{}::", crate::lazy::STD_PATH_JOIN_MARKER)) {
+                Some((head, rest)) => {
+                    let real = dep_renames.get(head).map(String::as_str).unwrap_or(head);
+                    let Some((trs, rest)) = rest.split_once("::") else { continue };
+                    if deps_idx.crates.contains(real) && deps_idx.by_key.contains_key(&format!("{real}#{rest}")) {
+                        if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1757_INSTR") {
+                            eprintln!("R1757JOIN\t{}\t{real}#{rest}", f.qual); // §E1 REACH COUNTER
+                        }
+                        r1757_owned = Call { path: format!("{head}::{rest}"), ..c.clone() };
+                        &r1757_owned
+                    } else {
+                        if deps_idx.crates.contains(real) {
+                            let member = rest.rsplit("::").next().unwrap_or("");
+                            let tr = match trs.strip_prefix('!') {
+                                Some(named) => Some(named.to_string()),
+                                None => trs.split('~').filter(|t| *t != "-").find(|t| {
+                                    let mut sigs = r1578_sigs.borrow_mut();
+                                    let d = sigs.trait_declares_locked(dir, head, real, t, member) == Some(true);
+                                    if d {
+                                        sigs.note_typed(head);
+                                    }
+                                    d
+                                }).map(str::to_string),
+                            };
+                            if let Some(tr) = tr {
+                                if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1757_INSTR") {
+                                    eprintln!("R1757MISS\t{}\t{real}#{rest}\t{tr}", f.qual); // §E1 REACH COUNTER
+                                }
+                                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                                unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr}.{member}"));
+                            }
+                        }
+                        continue;
+                    }
+                }
+                None => c,
+            };
             // SOUNDNESS R1605 — …AND WHERE THE MEMBER'S RETURN WAS NOT FILED (no lock-pinned source to read, a member whose
             // declared return cannot be placed, a spelling the typed routes do not reach), the value is untyped and the method
             // on it formed only this crate-rooted `<untyped>` marker, which reached nothing: the caller ABSENT over a query

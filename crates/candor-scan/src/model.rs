@@ -1790,6 +1790,9 @@ pub(crate) struct TraitIndexes<'a> {
     /// SOUNDNESS R1246 — trait leaf -> its implementor BLOCKS with their owner quals (`impl_owners_by_trait`). Read by
     /// the bounded-CHA dispatch to name a same-leaf implementor's unit exactly instead of by its two-claimant tail.
     pub(crate) owners: &'a HashMap<String, Vec<ImplOwner>>,
+    /// SOUNDNESS R1754 — the traits a local macro expansion declares (`cache::MergedDecls::mbe_traits`, R1748 (a)): module
+    /// qual -> fn members. Read by the collector's trait-member path route to recognise a call naming such a member.
+    pub(crate) mbe_traits: &'a HashMap<String, std::collections::BTreeSet<String>>,
 }
 
 /// The collection/enum indexes Pass A builds (collection-field element types, single-payload enum

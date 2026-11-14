@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev187 (rustagent-r1754): SOUNDNESS R1754/R1757 — Pass B's units gain a macro-generated trait's PROVIDED bodies
+    // (`mbe::mbe_trait_body_marker`), its `FnInfo::dispatch` gains the sites naming such a member (`r1754_mbe_declares`), its
+    // `calls` gain the typed path to a dependency trait's inherited member (`R1754TYPEPATH`) and the std-type path marker
+    // (`lazy::STD_PATH_JOIN_MARKER`). A rev186 entry has none of them and reads every such call SILENT. Mandatory.
     // rev186 (rustagent-r1748, round 2): SOUNDNESS R1748 (b) — Pass A's `rets` gains `model::r1748_selfret_key` (a crate-local
     // impl's dependency-trait member returning `Self`) and `model::r1748_alias_anchor_key` (a `Result` alias whose error type its
     // own module declares); a rev185 entry has neither, so (b) would refuse warm and fire cold. Mandatory.
@@ -680,7 +684,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev186/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev187/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

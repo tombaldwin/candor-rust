@@ -839,6 +839,16 @@ impl Ctx<'_> {
                                 _ => None,
                             })
                             .collect();
+                        // SOUNDNESS R1754 — …and the generated trait's PROVIDED bodies, which run for every implementor that
+                        // does not override them (serde_core's `de::Error::invalid_type`/`missing_field`/… each call
+                        // `Error::custom`). One inert marker per trait with a default body (`mbe_trait_body_marker`), read
+                        // ONLY by the unit walk and its loc mirror (`decls.rs`), so the bodies become units under the trait's
+                        // qual while every decl index (`trait_decls`, the leaf CHA, `local_traits`) stays exactly as R1748 left
+                        // it. The invocation's own attributes (`#[cfg]`) ride on the trait, as on every spliced item.
+                        markers.extend(gen.iter().filter_map(|g| match g {
+                            syn::Item::Trait(t) => mbe_trait_body_marker(t, &m.attrs),
+                            _ => None,
+                        }));
                         // FUNCTIONS ONLY — free `fn`s and `extern` blocks, which is what a call BY PATH
                         // reaches and what R1004 is. A macro-generated `impl`/`struct`/`mod` stays
                         // unindexed exactly as before: expanding impls RESOLVES dispatch onto their
@@ -1301,6 +1311,45 @@ fn mbe_trait_marker(t: &syn::ItemTrait) -> Option<syn::Item> {
         }
     }
     s.parse::<TokenStream>().ok().map(syn::Item::Verbatim)
+}
+
+/// SOUNDNESS R1754 — the marker ident of a generated trait's BODY marker (see `mbe_trait_body_marker`).
+const MBE_TRAIT_BODY_MARK: &str = "__candor_mbe_trait_body";
+
+/// SOUNDNESS R1754 — an inert `Item::Verbatim` carrying a macro-generated trait WHOLE (with the invocation's outer
+/// attributes), emitted only where the trait has at least one PROVIDED body. No decl walk reads a `Verbatim` item; the unit
+/// walk (`decls::scan_items`) and its loc mirror (`decls::fn_locs`) decode it with `mbe_trait_body_of` and treat it as the
+/// trait it carries, so each default body is a unit (`de::Error::missing_field`) and nothing else about the trait is
+/// indexed. The trait's tokens keep their spans, so the units' locs are the macro definition's lines.
+/// `CANDOR_R1754D_OFF=1` disables it.
+fn mbe_trait_body_marker(t: &syn::ItemTrait, attrs: &[syn::Attribute]) -> Option<syn::Item> {
+    if candor_report::env::switch("CANDOR_R1754D_OFF")
+        || !t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Fn(f) if f.default.is_some()))
+    {
+        return None;
+    }
+    let mut t = t.clone();
+    let mut na = attrs.to_vec();
+    na.append(&mut t.attrs);
+    t.attrs = na;
+    if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
+        eprintln!("R1754MBEBODY\t{}", t.ident); // §E1 REACH COUNTER
+    }
+    let mut ts = TokenStream::new();
+    ts.extend([TokenTree::Ident(Ident::new(MBE_TRAIT_BODY_MARK, proc_macro2::Span::call_site()))]);
+    ts.extend(syn::__private::ToTokens::to_token_stream(&t));
+    Some(syn::Item::Verbatim(ts))
+}
+
+/// SOUNDNESS R1754 — read a marker `mbe_trait_body_marker` wrote back into the trait it carries.
+pub(crate) fn mbe_trait_body_of(it: &syn::Item) -> Option<syn::ItemTrait> {
+    let syn::Item::Verbatim(ts) = it else { return None };
+    let mut it = ts.clone().into_iter();
+    match it.next()? {
+        TokenTree::Ident(i) if i == MBE_TRAIT_BODY_MARK => {}
+        _ => return None,
+    }
+    syn::parse2::<syn::ItemTrait>(it.collect()).ok()
 }
 
 /// SOUNDNESS R1748 (a) — read a marker `mbe_trait_marker` wrote: `(trait ident, fn members)`.

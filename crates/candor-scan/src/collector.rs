@@ -290,6 +290,8 @@ pub(crate) struct CallCollector<'a> {
     pub(crate) impl_members: &'a std::collections::HashSet<String>,
     /// SOUNDNESS R1246 — see `TraitIndexes::owners`.
     pub(crate) impl_owners: &'a HashMap<String, Vec<crate::model::ImplOwner>>,
+    /// SOUNDNESS R1754 — see `TraitIndexes::mbe_traits`.
+    pub(crate) mbe_traits: &'a HashMap<String, std::collections::BTreeSet<String>>,
     /// Trait leaf -> the multi-segment path this signature WROTE the bound with (`&dyn deplib::Handler`).
     /// `bound_leaves` keeps only the leaf, so a FULLY-QUALIFIED receiver otherwise loses its crate
     /// identity entirely and never forms the crate-qualified key — R6. See `lang::sig_trait_quals`.
@@ -7361,6 +7363,113 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1757 — A PATH CALL ON A STD TYPE INTO A DEPENDENCY TRAIT'S IMPL FOR THAT TYPE. `Duration::deserialize(m)`,
+    /// `<Duration as Deserialize>::deserialize(m)` and `u64::deserialize(d)` run serde_core's `impl Deserialize for Duration`
+    /// (or for `u64`), which drives the CALLER's deserializer `m` — and with `m`'s `Error = DeLoud`, serde_core's overflow
+    /// check reaches `DeLoud::custom`, a file deletion (EXECUTED c47_dedur `go_dur`/`go_ufcs`). The written path names a
+    /// std type, which the classifier reads as std's own pure call; R1038 edges it only when THIS crate implements the
+    /// member itself (`foreign_impls`), and R1540 answers only the METHOD spelling. So the caller formed no edge and left
+    /// `functions[]` — on 0.42.0, main, chained, lock and lock-less.
+    ///
+    /// The body that runs is the dependency's impl for that std type, filed under the type's leaf (`serde_core#Duration::
+    /// deserialize`; the orphan rule puts it in the trait's crate). One `STD_PATH_JOIN_MARKER` per candidate crate: the crate
+    /// the written trait path names (UFCS), else every crate the module imports a trait-shaped name from (R1540's set). The
+    /// call loop rewrites it into the plain dependency call where the chained report HAS that entry, so the ordinary join
+    /// answers it and follows its `dispatchesOn` (the resolution: `de::Error::custom` joins the caller's `DeLoud::custom`).
+    /// A miss on a chained crate is disclosed (`dispatch:<Trait>.<member>`) only where the trait is known to declare the
+    /// member: the call names it, or a trait the module imports from that crate declares it in the lock-pinned source.
+    ///
+    /// Not formed where the crate defines the member on that type itself (`local_fn_on`, R1494/R1540's local routes), nor,
+    /// for an unnamed trait, for a member std has by name (`is_std_method_name`). Unchained, the marker adds nothing: the
+    /// published behaviour. `CANDOR_R1757_OFF=1` disables it.
+    fn r1757_std_type_dep_path(&mut self, p: &syn::ExprPath, args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>) {
+        if candor_report::env::switch("CANDOR_R1757_OFF") {
+            return;
+        }
+        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let Some(member) = segs.last().cloned() else { return };
+        // (the type's path, the written trait path when the call names one)
+        let (ty, tr_written): (String, Option<String>) = match &p.qself {
+            Some(q) => {
+                let Some(t) = crate::lang::type_path(&q.ty, &self.uses) else { return };
+                let tr = (q.position > 0 && segs.len() >= 2).then(|| segs[..segs.len() - 1].join("::"));
+                (t, tr)
+            }
+            None => {
+                if segs.len() < 2 {
+                    return;
+                }
+                let written = crate::lang::path_to_string_lc(&p.path);
+                let full = expand(&written, &self.uses);
+                let Some((t, _)) = full.rsplit_once("::") else { return };
+                (t.to_string(), None)
+            }
+        };
+        if ty.contains(crate::decls::ALIAS_ALT_SEP) {
+            return;
+        }
+        let ty = ty.split('<').next().unwrap_or(&ty).to_string();
+        let leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+        let root = ty.split("::").next().unwrap_or(&ty);
+        let std_typed = (ty.contains("::") && matches!(root, "std" | "core" | "alloc"))
+            || (!ty.contains("::")
+                && (crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str())
+                    || leaf == "str"
+                    || matches!(leaf.as_str(), "String" | "Vec" | "Option" | "Result" | "Box"))
+                && !self.uses.contains_key(leaf.as_str())
+                && !self.returns.contains_key(&crate::model::nominal_key(&leaf)));
+        if !std_typed || leaf.is_empty() || self.local_fn_on(&leaf, &member) {
+            return;
+        }
+        // (crate, the trait leaves that may declare the member: `!Leaf` when the call NAMES the trait, else the
+        // trait-shaped names this module imports from that crate, which the call loop asks the lock-pinned source about)
+        let crates: Vec<(String, String)> = match &tr_written {
+            Some(tw) => {
+                let full = expand(tw, &self.uses);
+                let r = full.split("::").next().unwrap_or("").to_string();
+                if !full.contains("::") || !crate::lang::is_dependency_crate_root(&r) {
+                    return;
+                }
+                let tl = full.rsplit("::").next().unwrap_or("").to_string();
+                vec![(r, format!("!{tl}"))]
+            }
+            None => {
+                if crate::std_methods::is_std_method_name(&member) {
+                    return;
+                }
+                self.trait_import_crates()
+                    .into_iter()
+                    .map(|cr| {
+                        let mut trs: Vec<&str> = self
+                            .uses
+                            .iter()
+                            .filter(|(k, v)| {
+                                k.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                                    && v.split("::").next() == Some(cr.as_str())
+                                    && v.contains("::")
+                            })
+                            .map(|(k, _)| k.as_str())
+                            .collect();
+                        trs.sort_unstable();
+                        trs.dedup();
+                        let trs = if trs.is_empty() { "-".to_string() } else { trs.join("~") };
+                        (cr, trs)
+                    })
+                    .collect()
+            }
+        };
+        let argc = args.len().min(255) as u8;
+        for (cr, trs) in crates {
+            if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1757_INSTR") {
+                eprintln!("R1757SITE\t{cr}\t{leaf}::{member}\t{trs}"); // §E1 REACH COUNTER (a site; the join is counted in scan.rs)
+            }
+            self.calls.push(Call { assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc, entropy_arg: false,
+                path: format!("{cr}::{}::{trs}::{leaf}::{member}", crate::lazy::STD_PATH_JOIN_MARKER),
+                leaf: member.clone(), str_arg: None, typed: false, method: false, is_macro: false,
+                path_lits_partial: false, path_lit2: None });
+        }
+    }
+
     /// SOUNDNESS R1098 — a COMPARISON whose left operand is a std CONTAINER or WRAPPER of a type runs that
     /// type's own comparison: `Option<T> == Option<T>`, `Vec<T>`, `[T]`, `[T; N]`, `Result<T, E>`,
     /// `RefCell<T>`, a map's values, and `Weak::upgrade()`'s `Option<Arc<T>>` all delegate to
@@ -9822,6 +9931,87 @@ impl<'a> CallCollector<'a> {
         hit
     }
 
+    /// SOUNDNESS R1754 — does the trait this call site NAMES (`r1748_name_trait`'s module qual, e.g. `de::Error`) sit in
+    /// the index of MACRO-declared traits (`mbe_traits`) with `leaf` among its members, under the same leaf `tr` the walk
+    /// resolved? serde_core's `declare_error_trait!` declares `de::Error` with seven PROVIDED members (`invalid_type`,
+    /// `missing_field`, …) that no impl in the crate overrides, so neither `trait_declares_method` (the hand-written
+    /// `std_error::Error` declares none of them) nor R1685's impl-declared fallback admitted the call: 94 call sites
+    /// (`Err(Error::invalid_type(..))` in every default `Visitor` method, `E::missing_field` in the derive-shaped visitors)
+    /// formed no dispatch, no key and no hedge, and a consumer's `de::Error` whose `custom` (or override) deletes a file
+    /// read SILENT through them (EXECUTED c46_deinv `go_visit`). The call now dispatches like `custom` does: the site is
+    /// recorded under its NAMED trait (`scan.rs` keys it `serde_core#de::Error::invalid_type`) and the bounded CHA reaches
+    /// each local implementor's inherited default (the units `mbe_trait_body_marker` supplies). Additive: a site this
+    /// admits formed nothing before. `CANDOR_R1754K_OFF=1` disables it.
+    fn r1754_mbe_declares(&self, named: Option<&str>, tr: &str, leaf: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1754K_OFF") {
+            return false;
+        }
+        let hit = named.is_some_and(|n| {
+            n.rsplit("::").next() == Some(tr) && self.mbe_traits.get(n).is_some_and(|ms| ms.contains(leaf))
+        });
+        if hit && (crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR")) {
+            eprintln!("R1754MBEKEY\t{tr}::{leaf}\t{}", named.unwrap_or("")); // §E1 REACH COUNTER
+        }
+        hit
+    }
+
+    /// SOUNDNESS R1754 (C2, the lone-trait half) — a call naming a member of a MACRO-declared trait whose leaf has NO
+    /// hand-written trait in the crate (`local_traits` lacks it, so the bounded-CHA route below never sees the call): the
+    /// trait's own provided body (`$n::custom(f)` in `declare_err!`), a generic's `E::missing(..)` under `E: Error`, a
+    /// `<E as Error>::m(..)` on an unnamed implementor. Recorded as a dispatch site under the NAMED trait, which `scan.rs`
+    /// keys exactly as it keys R1748 (a)'s sites (`crate#de::Error::missing`). A concrete implementor (`<Loud as Error>::m`)
+    /// is not a dispatch and is left to the edge routes. Where a hand-written trait shares the leaf, `r1754_mbe_declares`
+    /// admits the call into the ordinary route instead, so a site is recorded once.
+    fn r1754_mbe_site(&mut self, p: &syn::ExprPath, segs: &[String], path: &str, leaf: &str) {
+        if candor_report::env::switch("CANDOR_R1754K_OFF") || self.mbe_traits.is_empty() {
+            return;
+        }
+        let generic = |s: &Self, n: &str| -> Option<Vec<String>> {
+            s.generic_bounds.get(n).or_else(|| s.impl_generic_bounds.get(n)).cloned()
+        };
+        let mut names: Vec<(String, Option<String>)> = Vec::new();
+        if let Some(q) = p.qself.as_ref().filter(|q| q.position > 0) {
+            let qid = match &*q.ty {
+                syn::Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().map(|i| i.to_string()),
+                _ => None,
+            };
+            if qid.as_deref().is_some_and(|i| i == "Self" || generic(self, i).is_some()) {
+                names.push((segs[segs.len() - 2].clone(), self.r1748_name_trait(&segs[..segs.len() - 1].join("::"))));
+            }
+        } else if p.qself.is_none() && segs.len() == 2 && generic(self, &segs[0]).is_some() {
+            for b in generic(self, &segs[0]).unwrap_or_default() {
+                let w = self
+                    .trait_quals_by_param
+                    .get(&segs[0])
+                    .and_then(|m| m.get(&b))
+                    .filter(|q| !q.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| b.clone());
+                let n = self.r1748_name_trait(&w);
+                names.push((b, n));
+            }
+        } else if p.qself.is_none() {
+            let rs: Vec<&str> = path.split("::").collect();
+            if rs.len() >= 2 {
+                names.push((rs[rs.len() - 2].to_string(), self.r1748_name_trait(&rs[..rs.len() - 1].join("::"))));
+            }
+        }
+        for (tr, n) in names {
+            let Some(n) = n else { continue };
+            if n.rsplit("::").next() != Some(tr.as_str())
+                || self.local_traits.contains_key(&tr)
+                || !self.mbe_traits.get(&n).is_some_and(|ms| ms.contains(leaf))
+            {
+                continue;
+            }
+            if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
+                eprintln!("R1754MBESITE\t{tr}::{leaf}\t{n}"); // §E1 REACH COUNTER
+            }
+            self.dispatch_sites.insert((tr.clone(), leaf.to_string()));
+            self.dispatch_named.insert((tr, leaf.to_string(), n));
+        }
+    }
+
     fn trait_declares_method(&self, tr: &str, leaf: &str, depth: usize) -> bool {
         if depth > 16 {
             return false;
@@ -11124,7 +11314,11 @@ impl<'a> CallCollector<'a> {
         // The leaf must be a method the trait declares OR INHERITS from a (local) SUPERTRAIT — a `Super`
         // method is callable on a `Sub`-bound/`dyn Sub` receiver (or passed as `Sub::base_method`), and
         // the sub's impls (which provide the super method) resolve it via `trait_impls[tr]` below.
-        if !(self.trait_declares_method(tr, leaf, 0) || (assoc && lt.assoc.contains(leaf)) || (assoc && self.r1685_impl_declared(tr, leaf))) {
+        if !(self.trait_declares_method(tr, leaf, 0)
+            || (assoc && lt.assoc.contains(leaf))
+            || (assoc && self.r1685_impl_declared(tr, leaf))
+            || (assoc && self.r1754_mbe_declares(self.r1748_named.as_deref(), tr, leaf)))
+        {
             // SOUNDNESS R1347 (sea-query half, rustagent-0415) — …UNLESS a STD supertrait declares it. `pub trait
             // SqlWriter: Write + ..` (`std::fmt::Write`) and `fn prepare_column_type(.., sql: &mut impl SqlWriter) {
             // write!(sql, ..) }`: the member that runs is the IMPLEMENTOR's `fmt::Write::write_str`, and a `pub` trait's
@@ -11629,6 +11823,7 @@ impl<'a> CallCollector<'a> {
         if segs.len() < 2 {
             return;
         }
+        self.r1754_mbe_site(p, &segs, path, leaf);
         // (trait leaf, Some(concrete implementor) | None)
         let mut targets: Vec<(String, Option<String>)> = Vec::new();
         let generic = |s: &Self, n: &str| -> Option<Vec<String>> {
@@ -11750,6 +11945,28 @@ impl<'a> CallCollector<'a> {
                     self.calls.push(Call { assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: path.to_string(),
                         leaf: leaf.to_string(), str_arg: str_arg.clone(), typed: true, method: true,
                         is_macro: false, path_lits_partial: false, path_lit2: None });
+                } else if !candor_report::env::switch("CANDOR_R1754P_OFF")
+                    && self.returns.contains_key(&crate::model::nominal_key(&tr))
+                    && !self.local_fn_on(&tr, leaf)
+                    && self.trait_impls.iter().any(|(t, tys)| {
+                        !self.local_traits.contains_key(t)
+                            && tys.iter().any(|ty| ty.rsplit("::").next().unwrap_or(ty) == tr)
+                            && crate::model::impl_does_not_declare(self.impl_members, t, &tr, leaf)
+                    })
+                {
+                    // SOUNDNESS R1754 — the same, for a DEPENDENCY trait's provided member: `V::visit_string(V, s)` with `impl
+                    // serde::de::Visitor for V` not declaring `visit_string`, or `DeLoud::missing_field("f")`. The written
+                    // path names no unit (the body is the dependency's default), the UFCS spelling `<V as Visitor>::m` and the
+                    // method spelling `v.m()` were already answered by the chained join, and this one read ABSENT (EXECUTED
+                    // c49_matrix `go_hw_path`, `go_mac_path`). Pushed TYPED, so Pass B's dependency-default route (`scan.rs`
+                    // VEIN C) asks the chained report for exactly the member this type inherits; a report that does not
+                    // answer it adds nothing, as for the method spelling. `CANDOR_R1754P_OFF=1` disables it.
+                    if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
+                        eprintln!("R1754TYPEPATH\t{path}"); // §E1 REACH COUNTER
+                    }
+                    self.calls.push(Call { assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: path.to_string(),
+                        leaf: leaf.to_string(), str_arg: str_arg.clone(), typed: true, method: true,
+                        is_macro: false, path_lits_partial: false, path_lit2: None });
                 }
             }
         }
@@ -11822,7 +12039,9 @@ impl<'a> CallCollector<'a> {
                 continue;
             }
             let Some(lt) = self.local_traits.get(&tr) else { continue };
-            let is_method = self.trait_declares_method(&tr, leaf, 0) || self.r1685_impl_declared(&tr, leaf);
+            let is_method = self.trait_declares_method(&tr, leaf, 0)
+                || self.r1685_impl_declared(&tr, leaf)
+                || self.r1754_mbe_declares(named.get(&tr).cloned().flatten().as_deref(), &tr, leaf);
             let is_assoc = lt.assoc.contains(leaf);
             if !is_method && !is_assoc {
                 continue; // not this trait's member — a blanket/unrelated name, left as it was
@@ -13533,6 +13752,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.edge_ufcs_foreign_trait(p, &node.args);
             self.r1616_ufcs_dep_type(p);
             self.edge_std_type_dep_trait_member(p, &node.args);
+            self.r1757_std_type_dep_path(p, &node.args);
             self.edge_ufcs_operator(p, &node.args);
             // `std::cmp::max(a, b)` / `min` (R1111's spelling list) is the std bound table's `fn:core::cmp max/min` row now
             // (`charge_std_path_call`).

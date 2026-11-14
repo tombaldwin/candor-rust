@@ -106,6 +106,16 @@ pub(crate) fn scan_items(
     crate::lang::collect_item_uses(items, include_tests, uses, &mut use_alts);
     let qual = |name: &str| if modpath.is_empty() { name.to_string() } else { format!("{modpath}::{name}") };
     for it in items {
+        // SOUNDNESS R1754 — a macro-generated trait's PROVIDED bodies (`mbe::mbe_trait_body_marker`): the marker is read
+        // as the trait it carries, so the `Item::Trait` arm below makes each default body a unit. Mirrored in `fn_locs`.
+        let decoded;
+        let it = match crate::mbe::mbe_trait_body_of(it) {
+            Some(t) => {
+                decoded = syn::Item::Trait(t);
+                &decoded
+            }
+            None => it,
+        };
         // SOUNDNESS R977 — an item compiled OUT of the default build (`#[cfg(feature = "aio")] mod aio`,
         // a feature-gated fn or impl) is still walked and reported; inside it the default-build filter
         // must keep every nested feature arm, not decide them against a build the item is not part of.
@@ -3445,6 +3455,15 @@ fn fn_locs_labeled(items: &[syn::Item], file: &str, label: &str, include_tests: 
         format!("{label}:{}:{}", s.line, s.column + 1)
     };
     for it in items {
+        // SOUNDNESS R1754 — in lockstep with `scan_items`: a macro-generated trait's body marker is the trait it carries.
+        let decoded;
+        let it = match crate::mbe::mbe_trait_body_of(it) {
+            Some(t) => {
+                decoded = syn::Item::Trait(t);
+                &decoded
+            }
+            None => it,
+        };
         let spliced = match it {
             syn::Item::Fn(f) => crate::lang::included_label(&f.attrs),
             syn::Item::Impl(i) => crate::lang::included_label(&i.attrs),
@@ -4570,6 +4589,7 @@ pub(crate) fn fninfo(
         trait_self: if impl_generics.is_none() { self_ty.map(str::to_string) } else { None },
         impl_members: traits.impl_members,
         impl_owners: traits.owners,
+        mbe_traits: traits.mbe_traits,
         // The crate-qualified spelling of any bound written in full (`&dyn deplib::Handler`) — R6.
         trait_quals: crate::lang::sig_trait_quals(sig),
         bound_trait_leaves: {

@@ -238,7 +238,7 @@
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
@@ -291,7 +291,7 @@
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars,
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
@@ -626,7 +626,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let macros = std::collections::HashMap::new();
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
@@ -9536,7 +9536,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
                 vars,
                 trait_vars,
-                dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+                dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
                 dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
@@ -9593,7 +9593,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -9619,7 +9619,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                 let mut c = CallCollector {
             modpath: String::new(),
                     uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -9654,7 +9654,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
@@ -9693,7 +9693,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(),
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
-                dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
+                dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
                 dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
@@ -14641,7 +14641,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
-        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new() };
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new() };
         let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), field_borrows: None, drop_types: None, twin_type_leaves: None, fields_q: None };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
@@ -14676,7 +14676,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
-        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new() };
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new() };
         let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), field_borrows: None, drop_types: None, twin_type_leaves: None, fields_q: None };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
@@ -14709,7 +14709,7 @@ pub fn with_salt(a: &Argon2, pw: &[u8], salt: &[u8]) { let _ = a.hash_password_w
         let mut enum_variant_traits: EnumVariantTraitIndex =
             enum_variant_traits_tmp.into_iter().filter_map(|(k, v)| v.map(|t| (k, t))).collect();
         let ambiguous_enum_leaves = drop_cross_ambiguous_enum_leaves(&mut enum_variants, &mut enum_variant_traits);
-        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new() };
+        let traits = TraitIndexes { impls: &ti, decls: &td, fields: &tf, dyn_fields: &tf, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new() };
         let elems = ElemIndexes { field_elem: &field_elem, field_elem_trait: &field_elem_trait, enum_variants: &enum_variants, enum_variant_traits: &enum_variant_traits, ambiguous_enum_leaves: &ambiguous_enum_leaves, callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), field_borrows: None, drop_types: None, twin_type_leaves: None, fields_q: None };
         let mut fns: Vec<FnInfo> = Vec::new();
         let mut us2 = HashMap::new();
@@ -18519,7 +18519,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev186/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev187/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -18625,7 +18625,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let mut li = 0usize;
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
-                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new() },
+                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new() },
                 ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), field_borrows: None, drop_types: None, twin_type_leaves: None, fields_q: None },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), true, &mut uses, &mut out,
             );
@@ -18676,7 +18676,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             let (mut uses, mut out, mut li) = (HashMap::new(), Vec::new(), 0usize);
             scan_items(
                 &parsed.0.items, "", &locs, &mut li, false, &fields, &returns,
-                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new() },
+                TraitIndexes { impls: &impls, decls: &tdecls, fields: &tfields, dyn_fields: &tfields, foreign_impls: &std::collections::HashMap::new(), written_quals: &std::collections::HashMap::new(), impl_members: &std::collections::HashSet::new(), unbound_gen_fields: &TraitFieldIndex::new(), owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new() },
                 ElemIndexes { field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), ambiguous_return_leaves: &std::collections::HashMap::new(), macro_twins: &std::collections::HashSet::new(), ambiguous_type_leaves: &std::collections::HashSet::new(), field_borrows: None, drop_types: None, twin_type_leaves: None, fields_q: None },
                 empty_lazy(), &consts, &lmac, &std::collections::HashSet::new(), true, &mut uses, &mut out,
             );
@@ -23253,7 +23253,7 @@ pub fn go() {{ imp::doit(); }}
         let macros = std::collections::HashMap::new();
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
-            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(),
+            dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(),
             dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
@@ -28294,6 +28294,120 @@ pub fn real_struct() { a::V(1).kick() }\n";
         }
         assert!(fixture_effects(&v, "variant_path").is_empty(), "{v:#}");
         assert!(floor_only(&v, "b::variant_glob"), "a glob-imported variant is not the struct:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1754 — a trait a `macro_rules!` expansion declares (serde_core's `declare_error_trait!`) has PROVIDED
+    /// members whose bodies run for every implementor that does not override them. Producer half: each provided body is a
+    /// unit (C1, `mbe::mbe_trait_body_marker`) whose row carries the `custom` key, and a call naming such a member through a
+    /// generic (`E::missing(..)`) publishes that member's key (C2, `r1754_mbe_declares`). Consumer half: a consumer `Error`
+    /// whose `custom` writes a file is charged through the UFCS spelling (C1's row joined) and through the TYPE PATH (`B`,
+    /// `R1754TYPEPATH`, asking the dependency default route). EXECUTED on real serde_core (`~/candor-handoff/rust-r1754`,
+    /// `c46_deinv go_missing`, `c49_matrix go_mac_path/go_mac_ufcs`): every arm deleted its mark and read ABSENT on 0.42.0
+    /// and main. Controls: `Calm` (pure `custom`, inherits `missing`) stays pure; the producer's provided body itself is
+    /// never charged an effect it does not perform.
+    #[test]
+    fn r1754_a_macro_declared_traits_provided_member_is_a_unit_and_joins() {
+        let dep_src = "\
+pub mod de {\n\
+    macro_rules! declare_err {\n\
+        ($n:ident) => {\n\
+            pub trait $n: Sized {\n\
+                fn custom(m: &str) -> Self;\n\
+                fn missing(f: &'static str) -> Self { $n::custom(f) }\n\
+            }\n\
+        };\n\
+    }\n\
+    declare_err!(Error);\n\
+    pub fn use_missing<E: Error>() -> E { E::missing(\"f\") }\n\
+}\n\
+";
+        let prod = scan_crate_chained("r1754p", "mbecore", "", dep_src, &DepIndex::default());
+        let row = |n: &str| ts_entry(&prod, n).cloned().unwrap_or(serde_json::Value::Null);
+        let missing = row("de::Error::missing");
+        assert!(missing != serde_json::Value::Null, "C1: the provided body is a unit with a row:\n{prod:#}");
+        assert_eq!(missing["dispatchesOn"], serde_json::json!(["mbecore#de::Error::custom"]),
+                   "C1: the provided body dispatches on the trait's own `custom`:\n{prod:#}");
+        assert!(!effects_of(&prod, "de::Error::missing").iter().any(|e| e != "Unknown"),
+                "C1: no concrete effect is charged to a body that performs none:\n{prod:#}");
+        assert!(row("de::use_missing")["dispatchesOn"].as_array().into_iter().flatten()
+                    .any(|k| k == "mbecore#de::Error::missing"),
+                "C2: a generic call naming the macro trait's provided member publishes its key:\n{prod:#}");
+
+        let (idx, d) = chain("r1754", "mbecore", &prod);
+        let v = scan_crate_chained("r1754c", "consumer", "\n[dependencies]\nmbecore = \"1\"\n", "\
+pub struct Loud;\n\
+impl mbecore::de::Error for Loud { fn custom(_m: &str) -> Self { let _ = std::fs::write(\"/tmp/r1754\", \"x\"); Loud } }\n\
+pub struct Calm;\n\
+impl mbecore::de::Error for Calm { fn custom(_m: &str) -> Self { Calm } }\n\
+pub fn go_ufcs() { let _: Loud = <Loud as mbecore::de::Error>::missing(\"f\"); }\n\
+pub fn go_path() { use mbecore::de::Error as _; let _: Loud = Loud::missing(\"f\"); }\n\
+pub fn go_gen() { let _: Loud = mbecore::de::use_missing::<Loud>(); }\n\
+", &idx);
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["go_ufcs", "go_path", "go_gen"] {
+            assert!(effects_of(&v, f).contains(&"Fs".to_string()),
+                    "`{f}` runs the provided `missing`, which calls `Loud::custom`'s write:\n{v:#}");
+        }
+        assert!(effects_of(&v, "Calm::custom").is_empty(), "the pure implementor stays pure:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1754 (B) — the TYPE-PATH spelling of a HAND-WRITTEN dependency trait's provided member, `V::st(&v)` with
+    /// `impl dep::Vis for V` not declaring `st`: the method spelling `v.st()` and the UFCS spelling were answered by the
+    /// chained default row (VEIN C), this one formed no edge (EXECUTED c49_matrix `go_hw_path`: 0 on 0.42.0 and main).
+    #[test]
+    fn r1754_a_dependency_traits_provided_member_by_type_path_reaches_the_default() {
+        let prod = scan_crate_chained("r1754hp", "hwdef", "", "\
+pub trait Vis { fn s(&self); fn st(&self) { self.s() } }\n\
+", &DepIndex::default());
+        let (idx, d) = chain("r1754h", "hwdef", &prod);
+        let v = scan_crate_chained("r1754hc", "consumer", "\n[dependencies]\nhwdef = \"1\"\n", "\
+pub struct V;\n\
+impl hwdef::Vis for V { fn s(&self) { let _ = std::fs::write(\"/tmp/r1754h\", \"x\"); } }\n\
+pub struct C;\n\
+impl hwdef::Vis for C { fn s(&self) {} }\n\
+pub fn go_path() { V::st(&V) }\n\
+pub fn go_method() { use hwdef::Vis; V.st() }\n\
+", &idx);
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(effects_of(&v, "go_method").contains(&"Fs".to_string()), "the method spelling (premise):\n{v:#}");
+        assert!(effects_of(&v, "go_path").contains(&"Fs".to_string()),
+                "the type-path spelling runs the same provided body:\n{v:#}");
+    }
+
+    /// SOUNDNESS R1757 — a PATH call on a STD type into a dependency trait's impl for it: `Duration::fetch_cfg(1)` and
+    /// `<Duration as Load>::fetch_cfg(1)` run `dep`'s `impl Load for Duration`, which writes. The written path named std's type,
+    /// R1038 edged it only for a member this crate implements, R1540 answers only the method spelling, and the caller read
+    /// ABSENT (EXECUTED on real serde_core, c47_dedur `go_dur`/`go_ufcs`: `Duration::deserialize` reaching the caller's
+    /// `de::Error::custom`). Joined to `dep#Duration::load` exactly as an explicit dependency path is. Controls: a std
+    /// associated fn of no dependency trait (`Duration::from_secs`) stays pure, and a UFCS call on a std type the
+    /// dependency's report has no entry for is DISCLOSED (`dispatch:Load.load`), never read pure.
+    #[test]
+    fn r1757_a_std_types_path_call_reaches_the_dependency_impl() {
+        let prod = scan_crate_chained("r1757p", "stdimpl", "", "\
+pub trait Load: Sized { fn fetch_cfg(d: u8) -> Self; }\n\
+impl Load for std::time::Duration {\n\
+    fn fetch_cfg(d: u8) -> Self { let _ = std::fs::write(\"/tmp/r1757\", \"x\"); std::time::Duration::from_secs(d as u64) }\n\
+}\n\
+", &DepIndex::default());
+        assert_eq!(effects_of(&prod, "Duration::fetch_cfg"), vec!["Fs".to_string()], "premise: the producer's impl row:\n{prod:#}");
+        let (idx, d) = chain("r1757", "stdimpl", &prod);
+        let v = scan_crate_chained("r1757c", "consumer", "\n[dependencies]\nstdimpl = \"1\"\n", "\
+use stdimpl::Load;\n\
+use std::time::Duration;\n\
+pub fn go_path() { let _ = Duration::fetch_cfg(1); }\n\
+pub fn go_full() { let _ = std::time::Duration::fetch_cfg(1); }\n\
+pub fn go_ufcs() { let _ = <Duration as Load>::fetch_cfg(1); }\n\
+pub fn calm() { let _ = Duration::from_secs(1); }\n\
+pub fn go_nohit() { let _ = <u8 as Load>::fetch_cfg(1); }\n\
+", &idx);
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["go_path", "go_full", "go_ufcs"] {
+            assert_eq!(effects_of(&v, f), vec!["Fs".to_string()], "`{f}` runs the dependency's impl for Duration:\n{v:#}");
+        }
+        assert!(effects_of(&v, "calm").is_empty(), "a std associated fn is not hedged on a guess:\n{v:#}");
+        assert!(ts_entry(&v, "go_nohit").is_some_and(|e| e["unknownWhy"].as_array().into_iter().flatten()
+                    .any(|w| w == "dispatch:Load.fetch_cfg")),
+                "a named dependency trait's member with no entry to join is disclosed, not read pure:\n{v:#}");
     }
 
     /// SOUNDNESS R1038 — `Box::<u32>::deserialize(d)` names no std fn: the body that runs is the DEPENDENCY's
