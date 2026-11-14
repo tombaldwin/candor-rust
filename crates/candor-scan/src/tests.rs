@@ -28380,7 +28380,7 @@ pub fn go_method() { use hwdef::Vis; V.st() }\n\
     /// ABSENT (EXECUTED on real serde_core, c47_dedur `go_dur`/`go_ufcs`: `Duration::deserialize` reaching the caller's
     /// `de::Error::custom`). Joined to `dep#Duration::load` exactly as an explicit dependency path is. Controls: a std
     /// associated fn of no dependency trait (`Duration::from_secs`) stays pure, and a UFCS call on a std type the
-    /// dependency's report has no entry for is DISCLOSED (`dispatch:Load.load`), never read pure.
+    /// dependency's report has no entry for is DISCLOSED (`dispatch:Load.fetch_cfg`), never read pure.
     #[test]
     fn r1757_a_std_types_path_call_reaches_the_dependency_impl() {
         let prod = scan_crate_chained("r1757p", "stdimpl", "", "\
