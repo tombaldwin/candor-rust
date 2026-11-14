@@ -686,6 +686,11 @@ impl Ctx<'_> {
         let cross_file = !self.defs.contains_key(&name);
         let arms = self.arms_of(&name)?;
         let ts = expand(&arms, &mac.tokens)?;
+        // SOUNDNESS R1748 (a) — §E1 REACH COUNTER for the two-character separator: a macro with such a separator in ANY
+        // arm was refused whole before (`rep_tail`), so every expansion of it is new.
+        if crate::lang::reach_debug() && arms.iter().any(|a| uses_sep2(&a.matcher)) {
+            eprintln!("R1748SEP\t{name}");
+        }
         let ts = if cross_file {
             if candor_report::env::trace("CANDOR_R1004_INSTR") {
                 eprintln!("R1004XFILE\t{name}"); // §E1 REACH COUNTER, on the CHANGED branch only
@@ -1257,6 +1262,15 @@ pub(crate) fn splice_derived_comparisons(items: &mut Vec<syn::Item>) {
         }
     }
     *items = out;
+}
+
+/// SOUNDNESS R1748 (a) — does this matcher hold a repetition with a two-token separator?
+fn uses_sep2(ms: &[M]) -> bool {
+    ms.iter().any(|m| match m {
+        M::Rep(inner, sep, _) => sep.as_ref().is_some_and(|s| s.len() > 1) || uses_sep2(inner),
+        M::Group(_, inner) => uses_sep2(inner),
+        _ => false,
+    })
 }
 
 /// SOUNDNESS R1748 (a) — the first token of the inert marker `splice` leaves for a trait a local macro declares.

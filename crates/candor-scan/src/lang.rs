@@ -7151,6 +7151,76 @@ pub(crate) fn collect_trait_decl_quals(
     }
 }
 
+/// SOUNDNESS R1748 (b) — is this WRITTEN type a crate-local nominal type, by what the scope SHOWS rather than by its leaf?
+/// A bare name the module itself declares (an item shadows any glob); a `crate::`/`self::`/`super::` path; or a name an
+/// explicit `use` binds to such a path. Anything else — a bare name only a glob, the prelude or a dependency `use` can
+/// supply — is refused. The resolved path must not be a dependency's (`expand` follows a crate-local re-export of one).
+pub(crate) fn r1748_local_type_written(t: &syn::Type, uses: &HashMap<String, String>) -> bool {
+    let syn::Type::Path(tp) = t else { return false };
+    if tp.qself.is_some() || tp.path.leading_colon.is_some() {
+        return false;
+    }
+    let segs: Vec<String> = tp.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    let Some(head) = segs.first() else { return false };
+    let local_prefix = |v: &str| v.starts_with("crate::") || v.starts_with("self::") || v.starts_with("super::") || v == "crate";
+    let declared = |key: &str, n: &str| uses.get(key).is_some_and(|d| d.split('\u{1}').any(|x| x == n));
+    let shown = if matches!(head.as_str(), "crate" | "self" | "super") || (segs.len() == 1 && declared(MODDECL_KEY, head)) {
+        true
+    } else if let Some(v) = uses.get(head.as_str()) {
+        // `use crate::x::E` / `use self::x::E`, or `use x::E` where `x` is a module this one declares
+        local_prefix(v) || v.split("::").next().is_some_and(|r| r != v && declared(MODDECL_ALL_KEY, r))
+    } else {
+        segs.len() > 1 && declared(MODDECL_ALL_KEY, head)
+    };
+    if !shown {
+        return false;
+    }
+    let full = expand(&segs.join("::"), uses);
+    let root = full.split("::").next().unwrap_or("");
+    let dep = uses.get(DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == root));
+    !dep && !matches!(root, "std" | "core" | "alloc")
+}
+
+/// SOUNDNESS R1748 (b) — for every `impl <dependency trait> for T` member this file declares returning `Self` (or `T`),
+/// record `model::r1748_selfret_key`. Same key authority (`foreign_trait_owner_qual`) and the same inline-module scoping as
+/// `collect_foreign_trait_impls`.
+pub(crate) fn collect_r1748_selfret(
+    items: &[syn::Item],
+    include_tests: bool,
+    uses: &HashMap<String, String>,
+    rets: &mut HashMap<String, Option<String>>,
+) {
+    for it in items {
+        match it {
+            syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
+                let Some((None, tr, _)) = &im.trait_ else { continue };
+                let Some(ty) = impl_type_name(&im.self_ty) else { continue };
+                let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
+                let Some((root, qual)) = foreign_trait_owner_qual(tr, uses) else { continue };
+                for ii in &im.items {
+                    let syn::ImplItem::Fn(m) = ii else { continue };
+                    let syn::ReturnType::Type(_, rt) = &m.sig.output else { continue };
+                    let syn::Type::Path(rp) = &**rt else { continue };
+                    if rp.qself.is_some() || rp.path.segments.len() != 1 {
+                        continue;
+                    }
+                    let id = rp.path.segments[0].ident.to_string();
+                    if id == "Self" || id == ty_leaf {
+                        rets.insert(crate::model::r1748_selfret_key(&format!("{root}#{qual}::{}", m.sig.ident)), Some("1".to_string()));
+                    }
+                }
+            }
+            syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    let sub = inner_module_impl_uses(uses, inner, include_tests);
+                    collect_r1748_selfret(inner, include_tests, &sub, rets);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// SOUNDNESS R1748 (a) — the MODULE-QUALIFIED path of every trait a local `macro_rules!` expansion in this file declares
 /// (`mbe::mbe_trait_of`'s markers), with the `fn` members its declaration writes. A separate index from
 /// `collect_trait_decl_quals` on purpose: those traits are NOT in `trait_decls`, so the leaf-keyed CHA and the ambiguity

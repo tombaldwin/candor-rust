@@ -128,7 +128,8 @@ fn ocore(root: &Path) {
         pub fn poison<S: Serializer>() -> Result<(), S::Error> { Err(S::Error::custom(2)) }\n\
         pub struct SE;\nimpl core::fmt::Display for SE { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { f.write_str(\"s\") } }\n\
         impl Error for SE { fn custom(_m: u8) -> Self { SE } }\n";
-    let d = pkg(root, "ocore", &[], "pub mod lib { pub use core::fmt::Display; }\nmod std_error;\npub mod de;\npub mod ser;\n");
+    let d = pkg(root, "ocore", &[], "pub mod lib { pub use core::fmt::Display; }\nmod std_error;\npub mod de;\npub mod ser;\n\
+        pub trait Conv { type Out; fn conv(x: &Self) -> Self::Out; }\n");
     write(&d.join("src/std_error.rs"), "pub trait Error: core::fmt::Debug + core::fmt::Display { fn source(&self) -> Option<u8> { None } }\n");
     write(&d.join("src/de.rs"), de);
     write(&d.join("src/ser.rs"), ser);
@@ -195,7 +196,11 @@ fn a_call_whose_self_is_the_declared_error_type_publishes_no_dispatch() {
          pub fn emit() -> Result<()> { Err(ocore::ser::Error::custom(1)) }\n\
          pub fn two() -> core::result::Result<(), Error> { if true { return Err(ocore::ser::Error::custom(1)); } Ok(()) }\n\
          pub fn open<X: ocore::ser::Error>() -> core::result::Result<(), X> { Err(ocore::ser::Error::custom(1)) }\n\
-         pub fn bound<X: ocore::ser::Error>() -> Result<()> { let r: core::result::Result<(), X> = Err(ocore::ser::Error::custom(1)); let _ = r; Ok(()) }\n");
+         pub fn bound<X: ocore::ser::Error>() -> Result<()> { let r: core::result::Result<(), X> = Err(ocore::ser::Error::custom(1)); let _ = r; Ok(()) }\n\
+         pub fn clos() -> Result<()> { let f = || -> Result<()> { return Err(ocore::ser::Error::custom(1)); }; f() }\n\
+         pub fn asy() -> Result<()> { let _f = async { return Err::<(), Error>(ocore::ser::Error::custom(1)); }; Ok(()) }\n\
+         impl ocore::Conv for Error { type Out = Error; fn conv(_x: &Self) -> Self::Out { Error } }\n\
+         pub fn viaconv<X: ocore::Conv<Out = Error>>(x: &X) -> core::result::Result<(), Error> { Err(ocore::Conv::conv(x)) }\n");
     let rep = root.join("reps");
     std::fs::create_dir_all(&rep).unwrap();
     scan(&root.join("ocore"), None, Some(&rep.join("ocore")), &[]);
@@ -208,6 +213,13 @@ fn a_call_whose_self_is_the_declared_error_type_publishes_no_dispatch() {
     for f in ["open", "bound"] {
         assert!(keys(&rows, f).iter().any(|x| x == k), "{f}: an open Self lost its key: {:?}", rows.get(f));
     }
+    // a `return` inside a closure or an async block returns from THAT, whose type the fn's signature does not fix
+    for f in ["clos", "asy"] {
+        assert!(keys(&rows, f).iter().any(|x| x == k), "{f}: a closure/async `return` was read as the fn's: {:?}", rows.get(f));
+    }
+    // a member that does not return `Self` (`fn conv(x: &Self) -> Self::Out`): `Self` is the argument's, the caller's `X`,
+    // even though the declared error type is the crate's own and implements the member
+    assert!(keys(&rows, "viaconv").iter().any(|x| x == "ocore#Conv::conv"), "viaconv: a non-Self member lost its key: {:?}", rows.get("viaconv"));
     let (off, _) = scan(&root.join("pjs"), Some(&rep), None, &[("CANDOR_R1748B_OFF", "1")]);
     assert!(keys(&off, "emit").iter().any(|x| x == k), "R1748B off: the fixture does not reach the change: {:?}", off.get("emit"));
     // the consumer: its ser implementor joins only the open dispatch
@@ -220,4 +232,33 @@ fn a_call_whose_self_is_the_declared_error_type_publishes_no_dispatch() {
     let (a, _) = scan(&app, Some(&rep), None, &[]);
     assert!(!has(&a, "e_emit", "Fs"), "a consumer implementor joined a call whose Self is the producer's own type: {:?}", a.get("e_emit"));
     assert!(has(&a, "e_open", "Fs"), "the open dispatch lost the consumer's implementor: {:?}", a.get("e_open"));
+}
+
+#[test]
+fn a_glob_supplied_error_type_does_not_fix_self() {
+    // Fable (R1748 round 2): `use dep_e::*; fn f() -> Result<(), Error>` names dep_e's `Error` through the glob, and the
+    // crate ALSO has a local `Error` implementing the trait. The leaf matched; `Self` is dep_e's. The key must stay, and a
+    // chained consumer must stay charged by dep_e's file-deleting `custom`.
+    let root = tmpdir("glob");
+    ocore(&root);
+    pkg(&root, "dep_e", &["ocore"],
+        "pub struct Error;\nimpl core::fmt::Display for Error { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { f.write_str(\"d\") } }\n\
+         impl ocore::ser::Error for Error { fn custom(_m: u8) -> Self { let _ = std::fs::remove_file(\"/nonexistent/r1748glob\"); Error } }\n");
+    pkg(&root, "pglob", &["ocore", "dep_e"],
+        "pub mod a {\n pub struct Error;\n impl core::fmt::Display for Error { fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result { f.write_str(\"a\") } }\n\
+          impl ocore::ser::Error for Error { fn custom(_m: u8) -> Self { Error } }\n\
+          pub fn g() -> Result<(), Error> { Err(ocore::ser::Error::custom(1)) }\n}\n\
+         pub mod b {\n use dep_e::*;\n pub fn f() -> Result<(), Error> { Err(ocore::ser::Error::custom(1)) }\n}\n");
+    let rep = root.join("reps");
+    std::fs::create_dir_all(&rep).unwrap();
+    scan(&root.join("ocore"), None, Some(&rep.join("ocore")), &[]);
+    scan(&root.join("dep_e"), Some(&rep), Some(&rep.join("dep_e")), &[]);
+    let (rows, _) = scan(&root.join("pglob"), Some(&rep), Some(&rep.join("pglob")), &[]);
+    let k = "ocore#ser::Error::custom";
+    assert!(keys(&rows, "b::f").iter().any(|x| x == k), "b::f: a glob-supplied error type was read as crate-local: {:?}", rows.get("b::f"));
+    assert!(!keys(&rows, "a::g").iter().any(|x| x == k), "a::g: the module's own error type no longer fixes Self: {:?}", rows.get("a::g"));
+    let app = pkg(&root, "app", &["ocore", "dep_e", "pglob"], "pub fn go() { let _ = pglob::b::f(); }\n");
+    lock(&app, &["app", "dep_e", "ocore", "pglob"]);
+    let (a, _) = scan(&app, Some(&rep), None, &[]);
+    assert!(has(&a, "go", "Fs"), "the glob shape lost dep_e's effect: {:?}", a.get("go"));
 }

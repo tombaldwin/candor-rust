@@ -5544,6 +5544,29 @@ fn note_result_alias(it: &syn::ItemType, uses_ty: &HashMap<String, String>, rets
         _ => return,
     };
     let Some(e) = crate::lang::result_err_type(&ty, uses_ty, &generics) else { return };
+    // SOUNDNESS R1748 (b) — is the error type a name THIS module declares (or a `crate::`/`self::`/`super::` path)? Only then
+    // is it this crate's type rather than whatever a glob or a dependency `use` supplies under that name.
+    if !candor_report::env::switch("CANDOR_R1748B_OFF") {
+        let anchored = match &ty {
+            syn::Type::Path(p) => p.path.segments.last().and_then(|s| match &s.arguments {
+                syn::PathArguments::AngleBracketed(a) => a.args.iter().filter_map(|g| match g {
+                    syn::GenericArgument::Type(t) => Some(t),
+                    _ => None,
+                }).nth(1),
+                _ => None,
+            // STRICT here: Pass A has no dependency list, so only a name the alias's own module DECLARES counts.
+            }).is_some_and(|et| matches!(et, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.leading_colon.is_none()
+                && tp.path.segments.len() == 1
+                && uses_ty.get(crate::lang::MODDECL_KEY).is_some_and(|d| d.split('\u{1}').any(|x| tp.path.segments[0].ident == x)))),
+            _ => false,
+        };
+        let ak = crate::model::r1748_alias_anchor_key(&it.ident.to_string());
+        let v = if anchored { "1" } else { "0" };
+        match rets.get(&ak) {
+            Some(Some(prev)) if prev != v => { rets.insert(ak, Some("0".to_string())); }
+            _ => { rets.insert(ak, Some(v.to_string())); }
+        }
+    }
     let k = crate::model::result_alias_key(&it.ident.to_string());
     let v = match rets.get(&k) {
         Some(Some(prev)) => crate::model::union_err_types(prev, &e),

@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev186 (rustagent-r1748, round 2): SOUNDNESS R1748 (b) — Pass A's `rets` gains `model::r1748_selfret_key` (a crate-local
+    // impl's dependency-trait member returning `Self`) and `model::r1748_alias_anchor_key` (a `Result` alias whose error type its
+    // own module declares); a rev185 entry has neither, so (b) would refuse warm and fire cold. Mandatory.
     // rev185 (rustagent-r1748): SOUNDNESS R1748 — `FileDecls` gains `mbe_traits` (the traits a local macro expansion declares)
     // and Pass B's `FnInfo` gains `dispatch_named` (the trait path a dispatch site names) and drops `foreign_dispatch` keys whose
     // Self an `Err(..)` in return position fixes. A rev184 entry has neither and keys every such site the old way. Mandatory.
@@ -677,7 +680,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev185/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev186/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1068,6 +1071,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // file's assembled `use` map, which is what `collect_decls` has just finished producing.
     let mut foreign_impls = HashMap::new();
     crate::lang::collect_foreign_trait_impls(items, include_tests, &uses, &mut foreign_impls);
+    if !candor_report::env::switch("CANDOR_R1748B_OFF") {
+        crate::lang::collect_r1748_selfret(items, include_tests, &uses, &mut rets); // R1748 (b)
+    }
     // SOUNDNESS R557 — the declared TYPE of every module-level `static`/`const`. Walked here, beside the
     // two walks above and for their reason: it resolves the annotation through `type_path`, which needs
     // the file's ASSEMBLED `use` map (`static C: Client` where `use dep::Client;` is written below it).
@@ -1409,6 +1415,20 @@ pub(crate) fn rekey_root_extern_owners(m: &mut MergedDecls) -> usize {
                     set.insert(g);
                 }
             }
+        }
+    }
+    // SOUNDNESS R1748 (b) — the `Self`-returning witness is keyed by the same member key, so it moves with it.
+    let sr: Vec<(String, String)> = m
+        .rets
+        .keys()
+        .filter_map(|k| {
+            let mk = k.strip_prefix(&crate::model::r1748_selfret_key(""))?;
+            canon(mk).map(|c| (k.clone(), crate::model::r1748_selfret_key(&c)))
+        })
+        .collect();
+    for (k, nk) in sr {
+        if let Some(v) = m.rets.remove(&k) {
+            m.rets.entry(nk).or_insert(v);
         }
     }
     n

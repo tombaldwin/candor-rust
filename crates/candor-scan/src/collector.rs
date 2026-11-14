@@ -11888,6 +11888,19 @@ impl<'a> CallCollector<'a> {
             return false;
         }
         let Some(raw) = &self.r1748_err_ty else { return false };
+        // The member must return `Self` — otherwise `Self` is not fixed by the expected type at all (a crate-local impl's
+        // signature is the trait's with `Self` substituted, `lang::collect_r1748_selfret`).
+        if !self.returns.get(&crate::model::r1748_selfret_key(key)).is_some_and(|v| v == "1") {
+            return false;
+        }
+        // An alias's error type counts only where every crate alias of that name declares it in its own module.
+        for t in raw.split(crate::model::RET_ERR_SEP) {
+            if let Some(name) = t.strip_prefix(crate::model::RESULT_ALIAS_MARK) {
+                if !self.returns.get(&crate::model::r1748_alias_anchor_key(name)).is_some_and(|v| v == "1") {
+                    return false;
+                }
+            }
+        }
         let resolved = self.resolve_err_markers(raw);
 
         let tys: Vec<&str> = resolved.split(crate::model::RET_ERR_SEP).filter(|t| !t.is_empty()).collect();
@@ -19358,6 +19371,20 @@ pub(crate) fn r1748_sig_err(
                     }
                 }
             }
+        }
+    }
+    // The written error argument must be a type the scope SHOWS is crate-local (Fable, R1748 round 2: `use dep_e::*; fn f()
+    // -> Result<(), Error>` named dep_e's `Error` through the glob, and the leaf matched a local `impl ser::Error for Error`).
+    if let syn::Type::Path(p) = &**ty {
+        let targs: Vec<&syn::Type> = match p.path.segments.last().map(|s| &s.arguments) {
+            Some(syn::PathArguments::AngleBracketed(a)) => a.args.iter().filter_map(|g| match g {
+                syn::GenericArgument::Type(t) => Some(t),
+                _ => None,
+            }).collect(),
+            _ => Vec::new(),
+        };
+        if targs.len() >= 2 && !crate::lang::r1748_local_type_written(targs[1], uses) {
+            return None;
         }
     }
     if let Some(e) = crate::lang::result_err_type(ty, uses, &generics) {

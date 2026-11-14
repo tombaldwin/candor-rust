@@ -1545,6 +1545,20 @@ pub(crate) const TRAIT_DECL_TY: &str = "\u{1f}decl";
 /// the leaf is resolved in the module that DECLARES the bound trait, which only `scan.rs` knows crate-wide.
 pub(crate) const R1748_PROJ: &str = "\u{1}";
 
+/// SOUNDNESS R1748 (b) — `rets` key: some crate-local `impl <dep trait> for T` declares this member (`<owner>#<trait
+/// qual>::<member>`) returning `Self` (or `T` itself). The impl's signature is the trait's with `Self` substituted, so the
+/// trait member returns `Self`, which is what lets an `Err(Tr::m(..))`'s `Self` be read off the declared error type.
+pub(crate) fn r1748_selfret_key(member_key: &str) -> String {
+    format!("<r1748selfret>{member_key}")
+}
+
+/// SOUNDNESS R1748 (b) — `rets` key: every crate-local `Result` alias of this name writes its error type as a name the
+/// alias's OWN module declares (`"1"`), so the alias's error type is that crate-local type and not one a glob or a
+/// `use` brought in from a dependency (`"0"`; across files a disagreement is ambiguous, i.e. refused).
+pub(crate) fn r1748_alias_anchor_key(alias: &str) -> String {
+    format!("<r1748anchor>{alias}")
+}
+
 /// SOUNDNESS R1246 — the trait's own declaration qual, where exactly one declaration has this leaf.
 pub(crate) fn trait_decl_qual<'a>(owners: &'a HashMap<String, Vec<ImplOwner>>, trait_leaf: &str) -> Option<&'a str> {
     owners.get(trait_leaf)?.iter().find(|o| o.ty == TRAIT_DECL_TY).map(|o| o.owner.as_str())
