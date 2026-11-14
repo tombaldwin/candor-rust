@@ -10025,28 +10025,55 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    /// SOUNDNESS R1754 (round 2) — is the dependency trait with this LEAF in scope here, as Rust requires for `T::m()` to
-    /// reach its member: a `use` (body-local or module) binding a dependency path whose last segment is the leaf (`use
-    /// dep::Tr;`, `use dep::Tr as Alias;`), an `as _` import of it, or a GLOB of a dependency (`use dep::*;`, which may bring
-    /// it). A glob of a LOCAL module (`use super::*;`) is not read as one — what it re-binds is not known here, so such a
-    /// call keeps the published (silent) reading rather than a charge that may be a derived member's.
-    fn r1754_trait_in_scope(&self, t: &str) -> bool {
+    /// SOUNDNESS R1754 (rounds 2–3) — is the dependency trait `t` (implemented for the local type `ty`) in scope here, as Rust
+    /// requires for `T::m()` to reach its member? Answered against the trait's WRITTEN path in the `impl` (R652's `!` key,
+    /// e.g. `pdep::Tr`), so a glob or an import of another crate never counts (round 3: `use odep::*;` beside an `impl
+    /// pdep::Tr` read `pdep::Tr` as in scope and joined its writing `default` over the derived one — EXECUTED pure):
+    ///   * 2, CERTAIN — a `use` (body-local or module, renamed or `as _`) whose value IS that path, or names the same crate
+    ///     and leaf (a re-export path); or a glob of the trait's own module (`use pdep::*;` for `pdep::Tr`);
+    ///   * 1, MAY — a glob of ANOTHER module of the same crate (`use pdep::prelude::*;`), which may or may not re-export it;
+    ///   * 1 also for a glob of a LOCAL module (`use super::*;`): its re-bindings are not read here, so a parent's `use
+    ///     dep::*;` reaching the call is DISCLOSED (round 3, `go_super_glob`: both-arms silence before) rather than joined;
+    ///   * 0 — anything else.
+    fn r1754_trait_in_scope(&self, t: &str, ty: &str) -> u8 {
+        let pre = format!("{t}\u{1f}{ty}\u{1f}!");
+        let paths: Vec<&str> = self.impl_members.iter().filter_map(|k| k.strip_prefix(&pre)).collect();
         let dep_root = |v: &str| {
             let root = v.split("::").next().unwrap_or("");
             !root.is_empty() && crate::lang::is_dependency_crate_root(root)
         };
-        let names = |m: &HashMap<String, String>| {
-            m.iter().any(|(k, v)| {
-                if k == crate::lang::GLOB_KEY || k == crate::lang::ALLGLOB_KEY {
-                    v.split('\u{1}').any(dep_root)
-                } else {
-                    v.split('\u{1}').any(|p| dep_root(p) && p.rsplit("::").next() == Some(t))
+        let mut best = 0u8;
+        for tp in paths.iter().filter(|p| dep_root(p)) {
+            let root = tp.split("::").next().unwrap_or("");
+            let module = tp.rsplit_once("::").map_or("", |x| x.0);
+            let named = |v: &str| v == *tp || (v.split("::").next() == Some(root) && v.rsplit("::").next() == Some(t));
+            let mut scan = |m: &HashMap<String, String>| {
+                for (k, v) in m {
+                    for p in v.split('\u{1}') {
+                        if k == crate::lang::GLOB_KEY || k == crate::lang::ALLGLOB_KEY {
+                            let g = p.trim_end_matches("::*");
+                            if g == module {
+                                best = best.max(2);
+                            } else if g.split("::").next() == Some(root)
+                                || matches!(g.split("::").next(), Some("crate" | "self" | "super"))
+                            {
+                                // a same-crate glob of another module, or a LOCAL glob (`use super::*;`, which re-binds
+                                // whatever that module imported): it may bring the trait — disclosed, never joined
+                                best = best.max(1);
+                            }
+                        } else if named(p) {
+                            best = best.max(2);
+                        }
+                    }
                 }
-            })
-        };
-        names(&self.local_uses)
-            || names(&self.uses)
-            || self.use_alts.values().flatten().any(|p| dep_root(p) && p.rsplit("::").next() == Some(t))
+            };
+            scan(&self.local_uses);
+            scan(&self.uses);
+            if self.use_alts.values().flatten().any(|p| named(p)) {
+                best = 2;
+            }
+        }
+        best
     }
 
     /// SOUNDNESS R1759 — `<Q as dep::Tr>::m(..)` where `Q` is a crate-local type whose `impl dep::Tr for Q` DECLARES `m`:
@@ -10087,7 +10114,16 @@ impl<'a> CallCollector<'a> {
             k.strip_prefix(&pre).is_some_and(|path| path.split("::").next() == Some(root))
         });
         let twin = self.assign_drop.twin_leaves.is_none_or(|t| t.contains(ty_leaf));
+        // ROUND 3 — EVERY impl BLOCK of that trait for that type declares `m`. The member index above is keyed by trait LEAF,
+        // so `impl Tr<A> for Q { fn m }` and `impl Tr<B> for Q {}` were one set in which "declares `m`" held, and
+        // `<Q as Tr<B>>::m(&Q)` — the provided body, which writes — read 0 (EXECUTED round-3 `go_b`; 1 on 0.42.0). The
+        // owner index keeps one entry per BLOCK (R1246); a block with an unreadable item (`*`) is not proof.
+        let blocks: Vec<&crate::model::ImplOwner> =
+            self.impl_owners.get(tr).map(|v| v.iter().filter(|o| o.ty == ty_leaf).collect()).unwrap_or_default();
+        let every_block = !blocks.is_empty()
+            && blocks.iter().all(|o| o.members.iter().any(|x| x == member) && !o.members.iter().any(|x| x == "*"));
         let declares = same_dep
+            && every_block
             && !twin
             && self.impl_members.contains(&crate::model::impl_seen_key(tr, ty_leaf))
             && !self.impl_members.contains(&crate::model::impl_opaque_key(tr, ty_leaf))
@@ -12039,7 +12075,7 @@ impl<'a> CallCollector<'a> {
                         !self.local_traits.contains_key(t)
                             && tys.iter().any(|ty| ty.rsplit("::").next().unwrap_or(ty) == tr)
                             && crate::model::impl_does_not_declare(self.impl_members, t, &tr, leaf)
-                            && self.r1754_trait_in_scope(t)
+                            && self.r1754_trait_in_scope(t, &tr) > 0
                     })
                 {
                     // SOUNDNESS R1754 — the same, for a DEPENDENCY trait's provided member: `V::visit_string(V, s)` with `impl
@@ -12057,20 +12093,30 @@ impl<'a> CallCollector<'a> {
                     // runs the DERIVED `Default`, pure (EXECUTED round-2 `go_derive_default`), and the first cut joined `Tr`'s.
                     // With `Tr` in scope the same call could not compile beside the derive (E0034), so only in-scope traits
                     // are carried, and the call loop joins only those (`lazy::DEP_DEFAULT_PATH_MARKER`).
-                    let mut in_scope: Vec<&String> = self
+                    // `Tr` = certainly in scope (joined), `?Tr` = a same-crate glob that may bring it (disclosed, never joined).
+                    let mut in_scope: Vec<String> = self
                         .trait_impls
                         .iter()
                         .filter(|(t, tys)| {
                             !self.local_traits.contains_key(*t)
                                 && tys.iter().any(|ty| ty.rsplit("::").next().unwrap_or(ty) == tr)
                                 && crate::model::impl_does_not_declare(self.impl_members, t, &tr, leaf)
-                                && self.r1754_trait_in_scope(t)
                         })
-                        .map(|(t, _)| t)
+                        .filter_map(|(t, _)| match self.r1754_trait_in_scope(t, &tr) {
+                            2 => Some(t.clone()),
+                            1 => {
+                                if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
+                                    let local = [crate::lang::ALLGLOB_KEY].iter().filter_map(|k| self.uses.get(*k).or_else(|| self.local_uses.get(*k)))
+                                        .any(|v| v.split('\u{1}').any(|g| matches!(g.split("::").next(), Some("crate" | "self" | "super"))));
+                                    eprintln!("R1754MAYSITE\t{tr}::{leaf}\t{t}\tlocalglob={local}"); // §E1 REACH COUNTER (the hedge population)
+                                }
+                                Some(format!("?{t}"))
+                            }
+                            _ => None,
+                        })
                         .collect();
                     in_scope.sort();
-                    let trs: Vec<&str> = in_scope.iter().map(|t| t.as_str()).collect();
-                    let trs = trs.join("~");
+                    let trs = in_scope.join("~");
                     if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
                         eprintln!("R1754TYPEPATH\t{path}\t{trs}"); // §E1 REACH COUNTER (a site; the join is counted in scan.rs)
                     }

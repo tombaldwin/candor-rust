@@ -4400,6 +4400,27 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     let Some((trs, rest)) = rest.split_once("::") else { continue };
                     let Some((ty, m)) = rest.rsplit_once("::") else { continue };
                     let trs: Vec<&str> = trs.split('~').collect();
+                    // the type as the call wrote it, else its leaf (a `use super::*` path keeps the bare name)
+                    let ty = if dep_traits_by_ty.contains_key(ty) { ty } else { ty.rsplit("::").next().unwrap_or(ty) };
+                    // Round 3 — a trait only a same-crate glob MAY bring into scope (`?Tr`): the member exists in the chained
+                    // report, but whether this call reaches it or a derived/other member is not decidable here — disclosed.
+                    let maybe = dep_traits_by_ty.get(ty).into_iter().flatten().find(|(tr_leaf, tpath)| {
+                        trs.contains(&format!("?{tr_leaf}").as_str())
+                            && crate::model::impl_does_not_declare(&merged.impl_members, tr_leaf, ty, m)
+                            && tpath.split_once("::").is_some_and(|(root, trest)| {
+                                deps_idx.by_key.contains_key(&format!("{root}#{trest}::{m}"))
+                                    || tail2(&format!("{trest}::{m}")).is_some_and(|t| deps_idx.by_key.contains_key(&format!("{root}#{t}")))
+                            })
+                    });
+                    if let Some((tr_leaf, _)) = maybe {
+                        if !trs.contains(&tr_leaf.as_str()) {
+                            if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
+                                eprintln!("R1754MAYGLOB\t{}\t{tr_leaf}::{m}", f.qual); // §E1 REACH COUNTER
+                            }
+                            direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                            unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{tr_leaf}.{m}"));
+                        }
+                    }
                     let hit = dep_traits_by_ty.get(ty).into_iter().flatten().find_map(|(tr_leaf, tpath)| {
                         if !trs.contains(&tr_leaf.as_str()) || !crate::model::impl_does_not_declare(&merged.impl_members, tr_leaf, ty, m) {
                             return None;

@@ -18519,7 +18519,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev188/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev189/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28359,9 +28359,10 @@ pub fn go_gen() { let _: Loud = mbecore::de::use_missing::<Loud>(); }\n\
         let prod = scan_crate_chained("r1754hp", "hwdef", "", "\
 pub trait Vis { fn s(&self); fn st(&self) { self.s() } }\n\
 pub trait Mk: Sized { fn req(&self); fn default() -> Self { let _ = std::fs::write(\"/tmp/r1754m\", \"x\"); loop {} } }\n\
+pub trait Gt<X> { fn req(&self) -> u8; fn m(&self) { let _ = std::fs::write(\"/tmp/r1759g\", \"x\"); } }\n\
 ", &DepIndex::default());
         let (idx, d) = chain("r1754h", "hwdef", &prod);
-        let v = scan_crate_chained("r1754hc", "consumer", "\n[dependencies]\nhwdef = \"1\"\n", "\
+        let v = scan_crate_chained("r1754hc", "consumer", "\n[dependencies]\nhwdef = \"1\"\nodep = \"1\"\n", "\
 pub struct V;\n\
 impl hwdef::Vis for V { fn s(&self) { let _ = std::fs::write(\"/tmp/r1754h\", \"x\"); } }\n\
 pub struct C;\n\
@@ -28378,6 +28379,11 @@ pub struct L;\n\
 impl hwdef::Vis for L { fn s(&self) {} fn st(&self) { let _ = std::fs::write(\"/tmp/r1759\", \"x\"); } }\n\
 pub fn go_ovr_quiet() { <Q as hwdef::Vis>::st(&Q) }\n\
 pub fn go_ovr_loud() { <L as hwdef::Vis>::st(&L) }\n\
+mod og { use odep::*; #[derive(Default)] pub struct D2; impl hwdef::Mk for D2 { fn req(&self) {} } pub fn go_other_glob() -> D2 { noop(); D2::default() } }\n\
+pub struct Q2;\n\
+impl hwdef::Gt<u8> for Q2 { fn req(&self) -> u8 { 0 } fn m(&self) {} }\n\
+impl hwdef::Gt<u16> for Q2 { fn req(&self) -> u8 { 0 } }\n\
+pub fn go_trb() { <Q2 as hwdef::Gt<u16>>::m(&Q2) }\n\
 ", &idx);
         let _ = std::fs::remove_dir_all(&d);
         assert!(effects_of(&v, "go_method").contains(&"Fs".to_string()), "the method spelling (premise):\n{v:#}");
@@ -28390,6 +28396,11 @@ pub fn go_ovr_loud() { <L as hwdef::Vis>::st(&L) }\n\
         // R1759 — `<Q as Vis>::st` runs Q's OWN `st` (pure), never the provided body that would call the writing `s`.
         assert!(effects_of(&v, "go_ovr_quiet").is_empty(), "an overriding implementor's own member runs:\n{v:#}");
         assert!(effects_of(&v, "go_ovr_loud").contains(&"Fs".to_string()), "…and is charged when it writes:\n{v:#}");
+        // ROUND 3 — a glob of an UNRELATED dependency brings no `hwdef` trait into scope: the derived `Default` runs.
+        assert!(effects_of(&v, "og::go_other_glob").is_empty(), "an unrelated crate's glob is not the trait's import:\n{v:#}");
+        // ROUND 3 — `impl Gt<u8> for Q2` overrides `m`, `impl Gt<u16> for Q2` inherits it: `<Q2 as Gt<u16>>::m` runs the
+        // provided body, which writes (EXECUTED round-3 `go_trb`). The withholding needs EVERY block to declare `m`.
+        assert!(effects_of(&v, "go_trb").contains(&"Fs".to_string()), "the inheriting impl's provided body runs:\n{v:#}");
     }
 
     /// SOUNDNESS R1757 — a PATH call on a STD type into a dependency trait's impl for it: `Duration::fetch_cfg(1)` and
@@ -28407,6 +28418,10 @@ impl Load for std::time::Duration {\n\
     fn fetch_cfg(d: u8) -> Self { let _ = std::fs::write(\"/tmp/r1757\", \"x\"); std::time::Duration::from_secs(d as u64) }\n\
     fn new(a: u64, _b: u32) -> Self { let _ = std::fs::write(\"/tmp/r1757\", \"x\"); std::time::Duration::from_secs(a) }\n\
 }\n\
+impl Load for std::sync::atomic::AtomicUsize {\n\
+    fn fetch_cfg(_d: u8) -> Self { std::sync::atomic::AtomicUsize::new(0) }\n\
+    fn new(_a: u64, _b: u32) -> Self { let _ = std::fs::write(\"/tmp/r1757\", \"x\"); std::sync::atomic::AtomicUsize::new(0) }\n\
+}\n\
 impl Load for std::time::Instant {\n\
     fn fetch_cfg(_d: u8) -> Self { std::time::Instant::now() }\n\
     fn new(_a: u64, _b: u32) -> Self { let _ = std::fs::write(\"/tmp/r1757\", \"x\"); std::time::Instant::now() }\n\
@@ -28423,6 +28438,7 @@ pub fn go_ufcs() { let _ = <Duration as Load>::fetch_cfg(1); }\n\
 pub fn calm() { let _ = Duration::from_secs(1); }\n\
 pub fn go_nohit() { let _ = <u8 as Load>::fetch_cfg(1); }\n\
 pub fn inherent_new() { let _ = Duration::new(1, 0); }\n\
+pub fn atomic_new() { let _ = std::sync::atomic::AtomicUsize::new(0); }\n\
 pub fn go_instant_new() { let _ = std::time::Instant::new(1, 0); }\n\
 pub fn go_prim_unnamed() { let _ = u8::fetch_cfg(1); }\n\
 ", &idx);
@@ -28437,6 +28453,8 @@ pub fn go_prim_unnamed() { let _ = u8::fetch_cfg(1); }\n\
         // ROUND 2 — Rust's order: `Duration::new` is std's INHERENT and wins (EXECUTED `go_dur_inherent`: pure); `Instant`
         // has no inherent `new`, so the dependency's runs. Read per TYPE from rust-src (`std_assoc`), not per name.
         assert!(effects_of(&v, "inherent_new").is_empty(), "std's inherent `Duration::new` runs, not the dependency's:\n{v:#}");
+        // ROUND 3 — an inherent std writes inside a macro (`atomic_int!`): `AtomicUsize::new` is std's too.
+        assert!(effects_of(&v, "atomic_new").is_empty(), "std's macro-written inherent `AtomicUsize::new` runs:\n{v:#}");
         assert!(effects_of(&v, "go_instant_new").contains(&"Fs".to_string()), "no inherent `Instant::new`: the dependency's runs:\n{v:#}");
         // …and an UNNAMED trait's member with no entry (a macro-made impl) is disclosed with no lockfile, because the
         // dependency publishes that member on another std type (`Duration::fetch_cfg`).

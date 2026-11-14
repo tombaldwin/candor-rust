@@ -112,6 +112,106 @@ for crate in ('core', 'alloc', 'std'):
                 e = block_end(s, b)
                 for m in any_fn.finditer(s[b:e+1]):
                     trait_fns.add(m.group(1))
+# ROUND 3 — INHERENT IMPLS A `macro_rules!` WRITES. std writes many inherent impls inside macros whose self type is a
+# macro parameter (`atomic_int!` -> `impl $atomic_type { pub const fn new(..) }`), and names the type only at the
+# invocation (`atomic_int! { .., i8 AtomicI8 }`); an alias family is minted the same way (`nonzero_integer! { Self =
+# NonZeroU8, .. }` -> `pub type $Ty = NonZero<$Int>`). The first cut read neither, so `AtomicUsize::new` had no row and
+# the R1757 join fired where Rust picks std's inherent (EXECUTED). Each macro whose body holds an inherent impl files its
+# fns — the `$`-typed blocks' own, plus every fn of a CONCRETE type its impl headers or `type` aliases name — under EVERY
+# capitalised identifier any invocation of it passes. Over-inclusion (an identifier that is not a type) only withholds.
+macro_def = re.compile(r'\bmacro_rules!\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{')
+defs = {}   # name -> (set of fns, set of concrete leaves)
+invocations = {}   # name -> set of capitalised idents in its arguments
+texts = []
+for crate in ('core', 'alloc', 'std'):
+    for root, dirs, files in os.walk(os.path.join(lib, crate, 'src')):
+        dirs[:] = [d for d in dirs if d not in ('tests', 'benches')]
+        for f in files:
+            if f.endswith('.rs') and f not in ('tests.rs', 'benches.rs'):
+                texts.append(strip_comments(open(os.path.join(root, f), errors='replace').read()))
+for s in texts:
+    for md in macro_def.finditer(s):
+        e = block_end(s, md.end() - 1)
+        body = s[md.end() - 1:e + 1]
+        fns = set(); leaves = set(); any_impl = False
+        for m in impl_kw.finditer(body):
+            b = body.find('{', m.end()); semi = body.find(';', m.end())
+            if b < 0 or (0 <= semi < b): continue
+            hdr = body[m.end():b]
+            if re.search(r'\bfor\b', re.sub(r'<[^<>]*>', '', hdr)):
+                continue   # a trait impl
+            any_impl = True
+            raw = hdr.strip()
+            leaf = self_leaf(hdr)
+            if leaf:
+                leaves.add(leaf)
+            elif '$' in raw:
+                eb = block_end(body, b)
+                for n in depth1_pub_fns(body[b:eb + 1]):
+                    fns.add(n)
+        for ta in re.finditer(r'\btype\s+\$[A-Za-z_]+\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*<', body):
+            leaves.add(ta.group(1)); any_impl = True
+        if any_impl:
+            d = defs.setdefault(md.group(1), (set(), set()))
+            d[0].update(fns); d[1].update(leaves)
+inv_re = re.compile(r'(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*)!\s*([({\[])')
+for s in texts:
+    for m in inv_re.finditer(s):
+        name = m.group(1)
+        if name not in defs or name == 'macro_rules':
+            continue
+        o = m.end() - 1; close = {'(': ')', '{': '}', '[': ']'}[m.group(2)]
+        d = 0; e = o
+        while e < len(s):
+            if s[e] in '({[': d += 1
+            elif s[e] in ')}]':
+                d -= 1
+                if d == 0: break
+            e += 1
+        args = s[o + 1:e]
+        invocations.setdefault(name, set()).update(re.findall(r'(?<![A-Za-z0-9_$"])([A-Z][A-Za-z0-9_]*)(?![A-Za-z0-9_"])', args))
+by_leaf = {}
+for l, n in inh:
+    by_leaf.setdefault(l, set()).add(n)
+for name, (fns, leaves) in defs.items():
+    allf = set(fns)
+    for l in leaves:
+        allf |= by_leaf.get(l, set())
+    for t in invocations.get(name, ()):
+        for n in allf:
+            inh.add((t, n))
+# A top-level `pub type A = B<..>;` (outside any macro) — the alias leaf is what a consumer writes.
+for s in texts:
+    for ta in re.finditer(r'\bpub\s+type\s+([A-Z][A-Za-z0-9_]*)\s*(?:<[^=]*>)?\s*=\s*([A-Za-z_][A-Za-z0-9_:]*)\s*[<;]', s):
+        tgt = ta.group(2).split('::')[-1]
+        for n in by_leaf.get(tgt, ()):
+            inh.add((ta.group(1), n))
+
+# SELF-CHECK — a sibling family std generates from ONE macro must come out with ONE fn set. A family whose members
+# disagree (or one missing outright) means a macro this generator does not read: refuse to write the table.
+fam = {
+    'atomic ints': ['AtomicI8', 'AtomicI16', 'AtomicI32', 'AtomicI64', 'AtomicIsize',
+                    'AtomicU8', 'AtomicU16', 'AtomicU32', 'AtomicU64', 'AtomicUsize'],
+    'nonzero': ['NonZeroI8', 'NonZeroI16', 'NonZeroI32', 'NonZeroI64', 'NonZeroI128', 'NonZeroIsize',
+                'NonZeroU8', 'NonZeroU16', 'NonZeroU32', 'NonZeroU64', 'NonZeroU128', 'NonZeroUsize'],
+    'signed ints': SIGNED, 'unsigned ints': UNSIGNED,
+}
+if os.environ.get('STD_ASSOC_SELFCHECK_DROP'):   # calibration: drop one leaf's rows, the check must refuse
+    inh = {(l, n) for (l, n) in inh if l != os.environ['STD_ASSOC_SELFCHECK_DROP']}
+cur = {}
+for l, n in inh:
+    cur.setdefault(l, set()).add(n)
+bad = []
+for fname, leaves in fam.items():
+    sets = [frozenset(cur.get(l, ())) for l in leaves]
+    core_set = frozenset.intersection(*sets)
+    for l, st in zip(leaves, sets):
+        if not st or len(st) < 0.8 * max(len(x) for x in sets) or not core_set:
+            bad.append(f"{fname}: {l} has {len(st)} fns (family max {max(len(x) for x in sets)})")
+if bad:
+    sys.stderr.write("std_assoc.py: SELF-CHECK FAILED — a sibling family is incomplete:\n  " + "\n  ".join(bad) + "\n")
+    sys.exit(3)
+
 for l, n in sorted(inh):
     print(f"I\t{l}\t{n}")
 for n in sorted(trait_fns):
