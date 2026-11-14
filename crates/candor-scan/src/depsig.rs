@@ -528,10 +528,16 @@ impl SrcIndex {
     /// engine keys under the projection's BASE trait (`Store::commit`), and the answer names the trait that really declares it.
     /// `Some(true)` only on a positive read; everything else is `None` (the caller treats it as a doubt, never as drift).
     fn assoc_bound_declares(&self, leaf: &str, member: &str, depth: usize) -> Option<String> {
+        self.assoc_bound_all(leaf, member, depth).pop()
+    }
+
+    /// SOUNDNESS R1715 (F2) — EVERY trait bounding one of `leaf`'s associated types that positively declares `member`
+    /// (`Serializer::end` is declared by all eight `Serialize*` traits its associated types are bounded by), in source order.
+    fn assoc_bound_all(&self, leaf: &str, member: &str, depth: usize) -> Vec<String> {
         if depth > 8 {
-            return None;
+            return Vec::new();
         }
-        let mut found: Option<String> = None;
+        let mut found: Vec<String> = Vec::new();
         for f in &self.files {
             for it in &f.items {
                 fn walk<'a>(it: &'a syn::Item, leaf: &str, out: &mut Vec<&'a syn::ItemTrait>) {
@@ -553,8 +559,8 @@ impl SrcIndex {
                         for b in &ty.bounds {
                             let syn::TypeParamBound::Trait(tb) = b else { continue };
                             let Some(bl) = tb.path.segments.last().map(|s| s.ident.to_string()) else { continue };
-                            if self.trait_answer(&bl, member, depth + 1) == Some(true) {
-                                found = Some(bl);
+                            if self.trait_answer(&bl, member, depth + 1) == Some(true) && !found.contains(&bl) {
+                                found.push(bl);
                             }
                         }
                     }
@@ -2310,6 +2316,26 @@ impl DepSigs {
             }
         }
         None
+    }
+
+    /// SOUNDNESS R1715 (F2) — the traits `leaf`'s ASSOCIATED TYPES are bounded by that declare `member`, read from the
+    /// LOCK-PINNED source only (`lock_source`), and only where that source does not show `leaf` itself declaring it. serde's
+    /// `S::SerializeMap` is bounded `SerializeMap<..>`, so `s.serialize_map(n)?.serialize_entry(k, v)` — a call the consumer
+    /// keyed `Serializer::serialize_entry` by carrying `S`'s bound onto the returned value — names `SerializeMap::
+    /// serialize_entry`. `None` with no lock-pinned source, an unparsed file, or any doubt.
+    pub(crate) fn assoc_member_traits_locked(&mut self, dir: &str, alias: &str, real: &str, leaf: &str, member: &str) -> Vec<String> {
+        let Some(src) = self.lock_source(dir, alias, real) else { return Vec::new() };
+        let Some(ix) = self.index(&src.dir) else { return Vec::new() };
+        // A member the trait PROVABLY declares is its own; anything else ("does not", or a doubt from a macro in the trait
+        // body) may be an associated type's, and those positively declaring it are ADDED beside the key — never instead of it.
+        if ix.trait_answer(leaf, member, 0) == Some(true) {
+            return Vec::new();
+        }
+        let v = ix.assoc_bound_all(leaf, member, 0);
+        if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
+            eprintln!("DSASSOC\t{alias}\t{leaf}.{member}\t{v:?}"); // §E1 REACH COUNTER
+        }
+        v
     }
 
     /// SOUNDNESS R1186 — what the dependency's callee can CONVERT the value at `pos` into, as `(kind, target leaf)`:

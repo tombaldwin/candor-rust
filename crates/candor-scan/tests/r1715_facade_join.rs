@@ -165,37 +165,45 @@ fn a_facade_spelled_implementor_and_call_join_the_owners_keys() {
 }
 
 #[test]
-fn without_a_lockfile_the_lost_join_is_hedged_with_the_members_dispatch_reason() {
+fn without_a_lockfile_the_lost_join_is_made_by_tail() {
+    // R1715 (F4): with no lock-pinned source the facade cannot be read, so whether `fac::de::Visitor` IS `fac_core::de::Visitor`
+    // is unknowable. The consumer's same-tail implementor is joined as one more bounded-CHA candidate (an effectful one
+    // charges where the join was lost; a pure one adds nothing), and a call answered by nothing under the facade's own key is
+    // unioned with the entry a chained report publishes for the member it dispatches under another owner.
     let root = tmpdir("nolock");
     let reps = world(&root);
     let app = pkg(&root, "app", &["fac", "fac_core", "prod", "prodf"], CONSUMER);
     let (rows, _) = scan(&app, Some(&reps), None, &[]);
-    for f in ["e_impl_join", "e_call_join"] {
-        let r = rows.get(f).unwrap_or_else(|| panic!("{f} ABSENT without a lockfile: a silent purity claim"));
-        assert!(r.0.iter().any(|x| x == "Unknown"), "{f}: no hedge without a lockfile: {r:?}");
-        assert!(r.1.iter().any(|w| w == "dispatch:de::Visitor.visit" || w == "dispatch:Visitor.visit"),
-            "{f}: the hedge does not name the lost member: {r:?}");
-    }
-    // reach: the hedges are this change's. The CALL half reads pure with the switch off (a silent purity claim — the
-    // assertion above can fail); the implementor half's row also carries prod's own `drive` residue, so its hedge is
-    // proved by the §E1 reach counter firing on that unit with the switch on and not with it off.
+    assert!(has(&rows, "e_impl_join", "Fs"), "lockless: the implementor join was lost: {:?}", rows.get("e_impl_join"));
+    assert!(has(&rows, "e_call_join", "Env"), "lockless: the call join was lost: {:?}", rows.get("e_call_join"));
     let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1715_OFF", "1")]);
-    assert!(!off.get("e_call_join").is_some_and(|r| r.0.iter().any(|x| x == "Unknown")),
-        "the lockless call was hedged with R1715 off — the fixture does not reach the change: {:?}", off.get("e_call_join"));
-    let blind = |env: &[(&str, &str)]| -> bool {
-        let mut cmd = Command::new(bin());
-        cmd.arg(app.to_string_lossy().as_ref()).arg("--json").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY")
-            .env_remove("CANDOR_R1715_OFF").env("CANDOR_DEPS", &reps).env("CANDOR_R977_DEBUG", "1")
-            .env("CANDOR_CACHE", app.join(".r1715-cache"));
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let o = cmd.output().expect("run candor-scan");
-        let _ = std::fs::remove_dir_all(app.join(".r1715-cache"));
-        String::from_utf8_lossy(&o.stderr).lines().any(|l| l.starts_with("R1715BLIND\te_impl_join\t"))
-    };
-    assert!(blind(&[]), "the lockless implementor join was not hedged by R1715");
-    assert!(!blind(&[("CANDOR_R1715_OFF", "1")]), "R1715BLIND fired with the switch off");
+    assert!(!has(&off, "e_impl_join", "Fs"), "R1715 off still charged e_impl_join: {:?}", off.get("e_impl_join"));
+    assert!(!has(&off, "e_call_join", "Env"), "R1715 off still charged e_call_join: {:?}", off.get("e_call_join"));
+}
+
+#[test]
+fn a_member_of_an_associated_types_bound_is_joined_under_that_trait() {
+    // R1715 (F2): `s.ser_map().entry()` on `S: fac::Ser` — the consumer carries `Ser`'s bound onto the returned value and keys
+    // `Ser::entry`, which `Ser` does not declare; `type Map: SerMap` does. The lock-pinned owner source names `SerMap`, and the
+    // join reaches the producer's `SerMap::entry` union (prod's `PM::entry` reads the environment). serde's shape:
+    // `s.serialize_map(n)?.serialize_entry(k, v)` through a consumer `Formatter` (EXECUTED: `deny Fs` 1 on 0.42.0, 0 without).
+    let root = tmpdir("assoc");
+    pkg(&root, "fac_core", &[], "pub trait SerMap { fn entry(&mut self); }\npub trait Ser { type Map: SerMap; fn ser_map(self) -> Self::Map; }\n");
+    pkg(&root, "fac", &["fac_core"], "pub use fac_core::{Ser, SerMap};\n");
+    pkg(&root, "prod", &["fac_core"],
+        "pub struct PM;\nimpl fac_core::SerMap for PM { fn entry(&mut self) { let _ = std::env::var(\"R1715A\"); } }\n\
+         pub struct PS;\nimpl fac_core::Ser for PS { type Map = PM; fn ser_map(self) -> PM { PM } }\n");
+    let reps = root.join("reps");
+    std::fs::create_dir_all(&reps).unwrap();
+    scan(&root.join("fac_core"), None, Some(&reps.join("fac_core")), &[]);
+    scan(&root.join("prod"), Some(&reps), Some(&reps.join("prod")), &[]);
+    let app = pkg(&root, "app", &["fac", "fac_core", "prod"],
+        "pub fn go<S: fac::Ser>(s: S) { let mut m = s.ser_map(); m.entry(); }\npub fn e_assoc() { go(prod::PS) }\n");
+    lock(&app, &["app", "fac", "fac_core", "prod"]);
+    let (on, _) = scan(&app, Some(&reps), None, &[]);
+    assert!(has(&on, "go", "Env"), "the associated type's member was not joined: {:?}", on.get("go"));
+    let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1715_OFF", "1")]);
+    assert!(!has(&off, "go", "Env"), "R1715 off still charged go: {:?}", off.get("go"));
 }
 
 #[test]
