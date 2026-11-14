@@ -10079,7 +10079,17 @@ impl<'a> CallCollector<'a> {
             return false;
         }
         let ty_leaf = ty.rsplit("::").next().unwrap_or(&ty);
-        let declares = self.impl_members.contains(&crate::model::impl_seen_key(tr, ty_leaf))
+        // The index is keyed by trait LEAF and type LEAF, so two more facts pin it to THIS trait and THIS type: an impl of
+        // that leaf for that type whose written trait path roots at the SAME dependency (R652's `!` key — a local trait of
+        // the same leaf is not the dependency's), and a type leaf no other crate type shares (`twin_leaves`).
+        let pre = format!("{tr}\u{1f}{ty_leaf}\u{1f}!");
+        let same_dep = self.impl_members.iter().any(|k| {
+            k.strip_prefix(&pre).is_some_and(|path| path.split("::").next() == Some(root))
+        });
+        let twin = self.assign_drop.twin_leaves.is_none_or(|t| t.contains(ty_leaf));
+        let declares = same_dep
+            && !twin
+            && self.impl_members.contains(&crate::model::impl_seen_key(tr, ty_leaf))
             && !self.impl_members.contains(&crate::model::impl_opaque_key(tr, ty_leaf))
             && self.impl_members.contains(&crate::model::impl_member_key(tr, ty_leaf, member))
             && self.returns.contains_key(&crate::model::nominal_key(ty_leaf));
