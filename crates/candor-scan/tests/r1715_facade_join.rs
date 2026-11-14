@@ -63,7 +63,7 @@ fn scan(dir: &Path, deps: Option<&Path>, out: Option<&Path>, env: &[(&str, &str)
         None => cmd.arg("--json"),
     };
     cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY")
-        .env_remove("CANDOR_R1715_OFF").env_remove("CANDOR_R1711C_OFF").env_remove("CANDOR_R1739_OFF").env_remove("CANDOR_R1740_OFF").env_remove("CANDOR_R1745_OFF").env_remove("CANDOR_R1743_OFF").env_remove("CANDOR_R1710_OFF")
+        .env_remove("CANDOR_R1715_OFF").env_remove("CANDOR_R1711C_OFF").env_remove("CANDOR_R1739_OFF").env_remove("CANDOR_R1740_OFF").env_remove("CANDOR_R1745_OFF").env_remove("CANDOR_R1748_OFF").env_remove("CANDOR_R1743_OFF").env_remove("CANDOR_R1710_OFF")
         .env("CANDOR_CACHE", dir.join(".r1715-cache"));
     if let Some(d) = deps {
         cmd.env("CANDOR_DEPS", d);
@@ -377,4 +377,52 @@ fn an_inline_modules_own_trait_is_not_keyed_through_the_parents_import() {
     lock(&app2, &["app2", "fac", "fac_core", "prod"]);
     let (rows2, _) = scan(&app2, Some(&reps), None, &[]);
     assert!(has(&rows2, "e_glob", "Fs"), "a glob-importing module's implementor of the dependency trait lost its join: {:?}", rows2.get("e_glob"));
+}
+
+#[test]
+fn a_same_owner_same_leaf_trait_in_another_module_is_not_joined() {
+    // R1748: `fac_core` declares `de::Error` and (through a `macro_rules!`, as serde_core's `declare_error_trait!` does)
+    // `ser::Error`, both with `custom`. prod dispatches `fac_core#de::Error::custom`; the consumer implements only
+    // `fac_core::ser::Error` (deleting a file). The exact key misses and the tail fallback `fac_core#Error::custom` joined the
+    // ser implementor. The owner's lock-pinned source declares both traits, so they are two items. A `de::Error` implementor
+    // keeps its join (positive control); lock-less there is no tree source and the over-approximation stands.
+    let root = tmpdir("r1748");
+    pkg(&root, "fac_core", &[], "pub mod de {\n pub trait Error { fn custom(m: u8) -> Self; }\n}\n\
+        pub mod ser {\n macro_rules! decl { ($n:ident) => { pub trait Error { fn custom(m: u8) -> Self; } }; }\n decl!(Error);\n}\n\
+        pub struct E;\nimpl de::Error for E { fn custom(_m: u8) -> Self { E } }\n");
+    pkg(&root, "prod", &["fac_core"], "pub fn fail<X: fac_core::de::Error>() -> X { X::custom(1) }\n");
+    let reps = root.join("reps");
+    std::fs::create_dir_all(&reps).unwrap();
+    scan(&root.join("fac_core"), None, Some(&reps.join("fac_core")), &[]);
+    scan(&root.join("prod"), Some(&reps), Some(&reps.join("prod")), &[]);
+    let app = pkg(&root, "app", &["fac_core", "prod"],
+        "pub struct SerE;\nimpl fac_core::ser::Error for SerE { fn custom(_m: u8) -> Self { let _ = std::fs::remove_file(\"/nonexistent/r1748\"); SerE } }\n\
+         pub fn e_quiet() { let _: fac_core::E = prod::fail::<fac_core::E>(); }\n");
+    lock(&app, &["app", "fac_core", "prod"]);
+    let (on, _) = scan(&app, Some(&reps), None, &[]);
+    assert!(!has(&on, "e_quiet", "Fs"), "a ser::Error implementor joined a de::Error dispatch: {:?}", on.get("e_quiet"));
+    let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1748_OFF", "1")]);
+    assert!(has(&off, "e_quiet", "Fs"), "R1748 off: the fixture does not reach the change: {:?}", off.get("e_quiet"));
+    let app2 = pkg(&root, "app2", &["fac_core", "prod"],
+        "pub struct DeL;\nimpl fac_core::de::Error for DeL { fn custom(_m: u8) -> Self { let _ = std::fs::remove_file(\"/nonexistent/r1748d\"); DeL } }\n\
+         pub fn e_loud() { let _: DeL = prod::fail::<DeL>(); }\n");
+    lock(&app2, &["app2", "fac_core", "prod"]);
+    let (rows2, _) = scan(&app2, Some(&reps), None, &[]);
+    assert!(has(&rows2, "e_loud", "Fs"), "a de::Error implementor lost its join: {:?}", rows2.get("e_loud"));
+}
+
+#[test]
+fn a_renamed_alias_is_never_a_second_owner() {
+    // Fable F1 (R1739): `sc = { package = "fac_core" }` is fac_core, one package. The
+    // lock-less tail join keeps the renamed-spelling implementor (main's behaviour); the ownership proof must not read the
+    // alias and the real name as two owners that each declare the trait.
+    let root = tmpdir("r1739alias");
+    let reps = world(&root);
+    let app = root.join("app");
+    write(&app.join("Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\n\
+        prod = { path = \"../prod\" }\nfac_core = { path = \"../fac_core\" }\nsc = { package = \"fac_core\", path = \"../fac_core\" }\n");
+    write(&app.join("src/lib.rs"), "pub struct V;\nimpl sc::de::Visitor for V { fn visit(&self) { let _ = std::fs::remove_file(\"/nonexistent/r1739a\"); } }\n\
+        pub fn e_alias() { prod::drive(V) }\n");
+    let (rows, _) = scan(&app, Some(&reps), None, &[]);
+    assert!(has(&rows, "e_alias", "Fs"), "a renamed alias of the dispatch owner lost its join: {:?}", rows.get("e_alias"));
 }

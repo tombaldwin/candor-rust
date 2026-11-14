@@ -1817,7 +1817,7 @@ pub(crate) struct DepSigs {
     probes: HashMap<(String, String), Result<(), String>>,
     /// SOUNDNESS R1715 — `facade` answers, per package (real name): the paths its root file re-exports from its dependencies
     facades: HashMap<String, Option<std::rc::Rc<Facade>>>,
-    /// SOUNDNESS R1739 — `facade_at` answers per SOURCE DIRECTORY, for `owns_trait_unlocked` (never for a join)
+    /// SOUNDNESS R1739 — `facade_at` answers per SOURCE DIRECTORY, for `distinct_in_tree` (never for a join)
     facades_at: HashMap<std::path::PathBuf, Option<std::rc::Rc<Facade>>>,
 }
 
@@ -1874,6 +1874,21 @@ pub(crate) struct Facade {
     /// SOUNDNESS R1743 — the package is a `proc-macro` crate (`[lib] proc-macro = true`): it exports macros only, never a
     /// trait, so a facade's same-named re-export from it (`pub use serde_derive::Serialize`) is the derive, not the owner
     pub(crate) proc_macro: bool,
+    /// SOUNDNESS R1748 — `{module}::{Trait}` for a trait a `macro_rules!` DEFINED in that module emits at its transcriber's top
+    /// level and that module INVOKES (serde_core's `declare_error_trait!(Error: ..)` in both `de` and `ser`). Read only by the
+    /// distinctness proofs (`declares_own_at`), never by a join.
+    pub(crate) macro_declared: std::collections::HashSet<String>,
+    /// SOUNDNESS R1748 — the same three facts for PRIVATE modules (`mod std_error;`), walked with their own file budget so the
+    /// public surface's reading is unchanged. A private module's path is no consumer's spelling, so no join reads these; the
+    /// distinctness proofs do (an item in a private module is still an item, and a `pub use` there still makes it a re-export).
+    pub(crate) pdeclared: std::collections::HashSet<String>,
+    pub(crate) pnames: HashMap<String, Vec<String>>,
+    pub(crate) pglobs: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R1748 — `{module}::{Trait}` -> the fn members that declaration writes (plain or macro-emitted, public or
+    /// private). A trait path with no entry has an unknown member list.
+    pub(crate) trait_members: HashMap<String, std::collections::HashSet<String>>,
+    private: bool,
+    private_files: usize,
 }
 
 /// SOUNDNESS R1736 — the most module FILES one facade read follows (a facade is a re-export surface, not a whole crate).
@@ -1945,6 +1960,60 @@ impl Facade {
                 }
             }
         }
+        // SOUNDNESS R1748 — the trait names each `macro_rules!` of this level emits at the top of a transcriber (`pub trait
+        // Error ..`, not one nested in a `mod {}`), and the ones this level invokes.
+        let mut decl_macros: HashMap<String, Vec<(String, std::collections::HashSet<String>)>> = HashMap::new();
+        for it in items {
+            if let syn::Item::Macro(m) = it {
+                if let (Some(id), true) = (&m.ident, m.mac.path.is_ident("macro_rules")) {
+                    let mut names = Vec::new();
+                    for tt in m.mac.tokens.clone() {
+                        let proc_macro2::TokenTree::Group(g) = tt else { continue };
+                        if g.delimiter() != proc_macro2::Delimiter::Brace && g.delimiter() != proc_macro2::Delimiter::Parenthesis {
+                            continue;
+                        }
+                        let toks: Vec<proc_macro2::TokenTree> = g.stream().into_iter().collect();
+                        for (i, w) in toks.windows(2).enumerate() {
+                            if let (proc_macro2::TokenTree::Ident(a), proc_macro2::TokenTree::Ident(b)) = (&w[0], &w[1]) {
+                                if a == "trait" {
+                                    // the members: `fn <ident>` at the top of the trait's body, the first brace group after it
+                                    let mut mem = std::collections::HashSet::new();
+                                    if let Some(body) = toks[i + 2..].iter().find_map(|t| match t {
+                                        proc_macro2::TokenTree::Group(g) if g.delimiter() == proc_macro2::Delimiter::Brace => Some(g.stream()),
+                                        _ => None,
+                                    }) {
+                                        let bt: Vec<proc_macro2::TokenTree> = body.into_iter().collect();
+                                        for w2 in bt.windows(2) {
+                                            if let (proc_macro2::TokenTree::Ident(f), proc_macro2::TokenTree::Ident(n)) = (&w2[0], &w2[1]) {
+                                                if f == "fn" {
+                                                    mem.insert(n.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    names.push((b.to_string(), mem));
+                                }
+                            }
+                        }
+                    }
+                    if !names.is_empty() {
+                        decl_macros.insert(id.to_string(), names);
+                    }
+                }
+            }
+        }
+        for it in items {
+            if let syn::Item::Macro(m) = it {
+                if m.ident.is_none() {
+                    if let Some(ns) = m.mac.path.get_ident().and_then(|i| decl_macros.get(&i.to_string())) {
+                        for (n, mem) in ns {
+                            self.trait_members.entry(key(n)).or_default().extend(mem.iter().cloned());
+                            if self.private { self.pdeclared.insert(key(n)); } else { self.macro_declared.insert(key(n)); }
+                        }
+                    }
+                }
+            }
+        }
         for it in items {
             match it {
                 syn::Item::Use(u) if matches!(u.vis, syn::Visibility::Public(_)) => {
@@ -1956,6 +2025,8 @@ impl Facade {
                         let mut p = vec![real.clone()];
                         p.extend(path[1..].iter().cloned());
                         match bound {
+                            Some(b) if self.private => self.pnames.entry(key(&b)).or_default().push(p.join("::")),
+                            None if self.private => self.pglobs.entry(module.to_string()).or_default().push(p.join("::")),
                             Some(b) => self.names.entry(key(&b)).or_default().push(p.join("::")),
                             None => self.globs.entry(module.to_string()).or_default().push(p.join("::")),
                         }
@@ -1965,13 +2036,22 @@ impl Facade {
                     let x = e.ident.to_string();
                     let y = e.rename.as_ref().map(|(_, r)| r.to_string()).unwrap_or_else(|| x.clone());
                     if let Some(real) = deps.get(x.as_str()) {
-                        self.names.entry(key(&y)).or_default().push(real.clone());
+                        if self.private { self.pnames.entry(key(&y)).or_default().push(real.clone()); } else { self.names.entry(key(&y)).or_default().push(real.clone()); }
                     }
                 }
                 syn::Item::Mod(m) => {
                     let name = m.ident.to_string();
-                    self.declared.insert(key(&name));
-                    if !matches!(m.vis, syn::Visibility::Public(_)) {
+                    if self.private { self.pdeclared.insert(key(&name)); } else { self.declared.insert(key(&name)); }
+                    if !self.private && !matches!(m.vis, syn::Visibility::Public(_)) {
+                        // SOUNDNESS R1748 — a private module is walked for the proofs only, on its own budget
+                        if candor_report::env::switch("CANDOR_R1748_OFF") {
+                            continue;
+                        }
+                        self.private = true;
+                        let mut pf = self.private_files;
+                        self.walk_in(std::slice::from_ref(it), module, deps, depth, dir, &mut pf);
+                        self.private_files = pf;
+                        self.private = false;
                         continue;
                     }
                     match &m.content {
@@ -2027,7 +2107,16 @@ impl Facade {
                     }
                 }
                 other => {
+                    if let syn::Item::Trait(t) = other {
+                        let e = self.trait_members.entry(key(&t.ident.to_string())).or_default();
+                        for ti in &t.items {
+                            if let syn::TraitItem::Fn(f) = ti {
+                                e.insert(f.sig.ident.to_string());
+                            }
+                        }
+                    }
                     if let Some(n) = crate::decls::declared_item_name(other, true) {
+                        if self.private { self.pdeclared.insert(key(&n)); continue; }
                         self.declared.insert(key(&n));
                     }
                 }
@@ -2736,46 +2825,162 @@ impl DepSigs {
         v
     }
 
-    /// SOUNDNESS R1739 — does package `real` (dependency alias `alias`) itself DECLARE the item at `tpath` (`Visitor` for
-    /// `impl otherkit::Visitor for X`), with no re-export from another crate able to supply that name instead, in EVERY source
-    /// the consumer's manifest admits — a path dependency's directory, or each semver-compatible registry checkout on disk
-    /// (`source_dirs`, the union the narrowing readers use)? The implementor-side blind join (scan.rs, R1715 F4) admits an
-    /// implementor of a dependency trait whose source has no lock pin as a candidate for ANOTHER owner's same-tail dispatch,
-    /// because a facade re-export cannot be ruled out; this is the reading that rules it out. It only ever REMOVES a candidate,
-    /// and only on a positive declaration: the item in the package's own `declared` set at exactly that path (an item shadows a
-    /// glob in rustc), with no `pub use dep::..` of it or of any enclosing module in any `#[cfg]` arm. Replacing a declared
-    /// trait by a different crate's re-export at the same path is a breaking change, so a semver-compatible version the machine
-    /// does not hold cannot differ on it. No source, an unparsed one, or any arm that re-exports: `false`, the join stands.
-    /// Never used to ADD a join, so the R1578 ruling (charging reads the lock-pinned source only) is untouched.
-    pub(crate) fn owns_trait_unlocked(&mut self, dir: &str, alias: &str, real: &str, tpath: &str) -> bool {
-        let dirs = self.source_dirs(dir, alias, real);
-        if dirs.is_empty() {
+    /// SOUNDNESS R1739 — the source of dependency `alias` (package `real`) that is PART OF THE TREE: the lock-pinned source
+    /// (`lock_source`), else a PATH dependency's directory named by the consumer's (or its workspace root's) manifest, whose
+    /// own manifest names the package. Never a registry checkout chosen by a semver requirement: a withdrawing reading on
+    /// such a source would make the verdict a function of what the machine holds (SPEC ⟨0.42⟩ `dependencySources`, "What
+    /// the permission does NOT cover"; executed Fable F2/F3 2026-11-14 — serde 1.0.219 DECLARES `de::Visitor`, 1.0.228
+    /// re-exports it, same semver line).
+    fn tree_source(&mut self, dir: &str, alias: &str, real: &str) -> Option<DepSource> {
+        if let Some(s) = self.lock_source(dir, alias, real) {
+            return Some(s);
+        }
+        let norm = |s: &str| s.replace('-', "_");
+        let root = crate::deps::find_workspace_root(Path::new(dir));
+        let mut manifests = vec![Path::new(dir).to_path_buf()];
+        manifests.extend(root);
+        for m in &manifests {
+            let Ok(text) = std::fs::read_to_string(m.join("Cargo.toml")) else { continue };
+            let Ok(doc) = text.parse::<toml::Table>() else { continue };
+            for table in crate::deps::manifest_dependency_tables(&doc) {
+                for (k, v) in table {
+                    if norm(k) != alias {
+                        continue;
+                    }
+                    let Some(p) = v.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) else { continue };
+                    let d = m.join(p);
+                    let man = std::fs::read_to_string(d.join("Cargo.toml")).ok()?.parse::<toml::Table>().ok()?;
+                    let pkg = man.get("package")?;
+                    if norm(pkg.get("name")?.as_str()?) != real {
+                        return None;
+                    }
+                    let version = pkg.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    return Some(DepSource { package: real.to_string(), version, origin: "path", dir: d, typed: 0 });
+                }
+            }
+        }
+        None
+    }
+
+    /// SOUNDNESS R1739 — every PATH package the consumer's tree can build (the transitive closure of `path =` dependencies of
+    /// every kind from the consumer's and its workspace root's manifests), by real name; and whether either manifest carries a
+    /// `[patch]` or `[replace]` table. Read only from the tree.
+    fn path_closure(&mut self, dir: &str) -> (std::collections::HashSet<String>, bool) {
+        let norm = |s: &str| s.replace('-', "_");
+        let root = crate::deps::find_workspace_root(Path::new(dir));
+        let mut todo: Vec<std::path::PathBuf> = vec![Path::new(dir).to_path_buf()];
+        todo.extend(root);
+        let tops: std::collections::HashSet<std::path::PathBuf> = todo.iter().filter_map(|p| p.canonicalize().ok()).collect();
+        let mut patched = false;
+        let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(m) = todo.pop() {
+            let Ok(canon) = m.canonicalize() else { continue };
+            let top = tops.contains(&canon);
+            if !seen.insert(canon) || seen.len() > 512 {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(m.join("Cargo.toml")) else { continue };
+            let Ok(doc) = text.parse::<toml::Table>() else { continue };
+            if top && (doc.contains_key("patch") || doc.contains_key("replace")) {
+                patched = true;
+            }
+            if let Some(n) = doc.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str()) {
+                if !top {
+                    names.insert(norm(n));
+                }
+            }
+            let mut tables = crate::deps::manifest_dependency_tables(&doc);
+            for k in ["dev-dependencies", "build-dependencies"] {
+                if let Some(t) = doc.get(k).and_then(toml::Value::as_table) {
+                    tables.push(t);
+                }
+            }
+            for table in tables {
+                for v in table.values() {
+                    if let Some(p) = v.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
+                        todo.push(m.join(p));
+                    }
+                }
+            }
+        }
+        (names, patched)
+    }
+
+    /// SOUNDNESS R1739 — are dependency `d`'s trait at `d_tp` and the dispatch owner `o`'s trait at `o_tp` provably TWO
+    /// traits, from the tree alone? `d`'s tree source (`tree_source`) must DECLARE the item at `d_tp`, with no `pub use` of
+    /// another crate at that path or any enclosing module and no glob there (so `d::d_tp` is `d`'s own item). Then either `o`'s
+    /// tree source declares its own item at `o_tp` the same way (two declarations are two items), or `d` is a PATH package and
+    /// `o` is not one anywhere in the tree's path closure, with no `[patch]`/`[replace]`: a crate that is not path-sourced
+    /// cannot depend on a path package, so `o` cannot re-export `d`'s trait, and `d`'s trait is its own declaration, not
+    /// `o`'s. Every source read for a proof is recorded in `dependencySources` (R1578). Any doubt: `false`, the join stands.
+    /// Only ever used to WITHDRAW a same-tail candidate; never to add one. `d` and `o` are compared as REAL package names, so a
+    /// `package =` rename is one package (Fable F1: `sc = { package = "serde_core" }` read as a second owner).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn distinct_in_tree(&mut self, dir: &str, d_alias: &str, d_real: &str, d_tp: &str, o_alias: &str, o_real: &str, o_tp: &str) -> bool {
+        if d_real == o_real {
             return false;
         }
-        let segs: Vec<&str> = tpath.split("::").collect();
-        for d in dirs {
-            let fac = match self.facades_at.get(&d) {
-                Some(v) => v.clone(),
-                None => {
-                    let v = facade_at(&d);
-                    self.facades_at.insert(d.clone(), v.clone());
-                    v
-                }
-            };
-            let Some(fac) = fac else { return false };
-            if !fac.declared.contains(tpath) {
-                return false;
+        let Some(dsrc) = self.tree_source(dir, d_alias, d_real) else { return false };
+        if !self.declares_own_at(&dsrc.dir, d_tp) {
+            return false;
+        }
+        let o_src = self.tree_source(dir, o_alias, o_real).filter(|s| self.declares_own_at(&s.dir, o_tp));
+        let proved = match &o_src {
+            Some(_) => true,
+            None => {
+                let (paths, patched) = self.path_closure(dir);
+                dsrc.origin == "path" && !patched && !paths.contains(o_real)
             }
-            if (1..=segs.len()).any(|i| fac.names.contains_key(&segs[..i].join("::"))) {
-                return false;
-            }
-            // `declared` does not keep the item's namespace: a same-named fn or macro beside a glob that supplies the TRAIT
-            // would read as a declaration of it. Any glob in an enclosing module is a doubt.
-            if (0..segs.len()).any(|i| fac.globs.contains_key(&segs[..i].join("::"))) {
-                return false;
+        };
+        if proved {
+            for s in std::iter::once(dsrc).chain(o_src) {
+                self.consulted.entry(s.package.clone()).or_insert_with(|| s.clone()).typed += 1;
             }
         }
-        true
+        proved
+    }
+
+    /// SOUNDNESS R1748 — are `p1` and `p2` (two trait paths inside package `real`) two DIFFERENT items, per the package's TREE
+    /// source (`tree_source`: lock-pinned, or a path dependency)? Both must be the package's own declarations (`declares_own_at`).
+    /// Both must declare `member` (`Facade::trait_members`). The source read is recorded in `dependencySources`. Any doubt: `false`.
+    pub(crate) fn distinct_paths_in_owner(&mut self, dir: &str, alias: &str, real: &str, p1: &str, p2: &str, member: &str) -> bool {
+        if p1 == p2 {
+            return false;
+        }
+        let Some(src) = self.tree_source(dir, alias, real) else { return false };
+        // …and the DISPATCHED trait must itself declare the member: a key naming a trait that does not (serde_core's
+        // `std_error::Error::custom`, a producer's mis-resolution of the bound `E: de::Error`) stands for some OTHER trait's
+        // dispatch, so it proves nothing about which implementors it reaches (csv 1.4.0, chained: dropping there lost
+        // `DeserializeError::custom` edges on 18 rows).
+        let declares_member = |s: &mut Self, p: &str| {
+            s.facades_at.get(&src.dir).cloned().flatten()
+                .is_some_and(|f| f.trait_members.get(p).is_some_and(|m| m.contains(member)))
+        };
+        let ok = self.declares_own_at(&src.dir, p1) && self.declares_own_at(&src.dir, p2)
+            && declares_member(self, p1) && declares_member(self, p2);
+        if ok {
+            self.consulted.entry(src.package.clone()).or_insert_with(|| src.clone()).typed += 1;
+        }
+        ok
+    }
+
+    fn declares_own_at(&mut self, src_dir: &std::path::Path, tpath: &str) -> bool {
+        let fac = match self.facades_at.get(src_dir) {
+            Some(v) => v.clone(),
+            None => {
+                let v = facade_at(src_dir);
+                self.facades_at.insert(src_dir.to_path_buf(), v.clone());
+                v
+            }
+        };
+        let Some(fac) = fac else { return false };
+        let segs: Vec<&str> = tpath.split("::").collect();
+        (fac.declared.contains(tpath) || fac.macro_declared.contains(tpath) || fac.pdeclared.contains(tpath))
+            && !(1..=segs.len()).any(|i| { let k = segs[..i].join("::"); fac.names.contains_key(&k) || fac.pnames.contains_key(&k) })
+            // `declared` does not keep the item's namespace: a same-named fn or macro beside a glob that supplies the TRAIT
+            // would read as a declaration of it. Any glob in an enclosing module is a doubt.
+            && !(0..segs.len()).any(|i| { let k = segs[..i].join("::"); fac.globs.contains_key(&k) || fac.pglobs.contains_key(&k) })
     }
 
     /// SOUNDNESS R1715 — every crate that `path` (a trait path inside package `real`, `de::Visitor`) may NAME, by following
