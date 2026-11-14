@@ -10043,7 +10043,8 @@ impl<'a> CallCollector<'a> {
             !root.is_empty() && crate::lang::is_dependency_crate_root(root)
         };
         let mut best = 0u8;
-        for tp in paths.iter().filter(|p| dep_root(p)) {
+        // a one-segment path (`From`, `Default`) is a prelude/std trait or an unresolved name, never a dependency's path
+        for tp in paths.iter().filter(|p| p.contains("::") && dep_root(p)) {
             let root = tp.split("::").next().unwrap_or("");
             let module = tp.rsplit_once("::").map_or("", |x| x.0);
             let named = |v: &str| v == *tp || (v.split("::").next() == Some(root) && v.rsplit("::").next() == Some(t));
@@ -12116,7 +12117,10 @@ impl<'a> CallCollector<'a> {
                                 if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
                                     let local = [crate::lang::ALLGLOB_KEY].iter().filter_map(|k| self.uses.get(*k).or_else(|| self.local_uses.get(*k)))
                                         .any(|v| v.split('\u{1}').any(|g| matches!(g.split("::").next(), Some("crate" | "self" | "super"))));
-                                    eprintln!("R1754MAYSITE\t{tr}::{leaf}\t{t}\tlocalglob={local}"); // §E1 REACH COUNTER (the hedge population)
+                                    let pre = format!("{t}\u{1f}{tr}\u{1f}!");
+                                    let roots: Vec<&str> = self.impl_members.iter().filter_map(|k| k.strip_prefix(&pre))
+                                        .filter(|p| p.contains("::")).filter_map(|p| p.split("::").next()).collect();
+                                    eprintln!("R1754MAYSITE\t{tr}::{leaf}\t{t}\tlocalglob={local}\t{}", roots.join(",")); // §E1 REACH COUNTER (the hedge population)
                                 }
                                 Some(format!("?{t}"))
                             }
