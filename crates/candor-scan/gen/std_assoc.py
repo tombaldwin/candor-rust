@@ -208,6 +208,18 @@ for fname, leaves in fam.items():
     for l, st in zip(leaves, sets):
         if not st or len(st) < 0.8 * max(len(x) for x in sets) or not core_set:
             bad.append(f"{fname}: {l} has {len(st)} fns (family max {max(len(x) for x in sets)})")
+# ROUND 4 — `Wrapping<T>` / `Saturating<T>`: their inherent impls are written by a macro whose header names a CONCRETE
+# generic leaf (`impl Wrapping<$t>`), and Wrapping's macro-written inherents are `#[unstable]` while Saturating's are
+# stable, so the two legitimately differ (1 row against 18) and the 0.8-of-max rule above does not apply. What must
+# hold, and is checked rather than lucky: BOTH leaves have rows (a generator that stops reading the `Ty<$t>` header
+# files none, and R1757 would then join a dependency impl where Rust picks std's inherent), and Wrapping's stable
+# set is contained in Saturating's (a Wrapping-only fn means an unstable gate stopped filtering).
+for l in ('Wrapping', 'Saturating'):
+    if not cur.get(l):
+        bad.append(f"wrapping family: {l} has no rows")
+extra = cur.get('Wrapping', set()) - cur.get('Saturating', set())
+if cur.get('Saturating') and extra:
+    bad.append(f"wrapping family: Wrapping has fns Saturating lacks: {sorted(extra)}")
 if bad:
     sys.stderr.write("std_assoc.py: SELF-CHECK FAILED — a sibling family is incomplete:\n  " + "\n  ".join(bad) + "\n")
     sys.exit(3)

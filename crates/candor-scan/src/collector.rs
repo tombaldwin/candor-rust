@@ -10084,10 +10084,14 @@ impl<'a> CallCollector<'a> {
     /// `once` writes) read `Fs` on 0.42.0 and main while the program writes nothing (EXECUTED round 2). The TYPE-PATH
     /// spelling `Q::m(..)` already resolves this way (`impl_does_not_declare`). Withheld only on R598's positive evidence
     /// that the block declares `m` (seen, not opaque, member recorded) and only for a DEPENDENCY trait path, so a block the
-    /// index could not read keeps the join. `CANDOR_R1759_OFF=1` restores it.
+    /// index could not read keeps the join.
+    /// OFF BY DEFAULT (round 4): the proof "every block declares `m`" is computed over the blocks the impl index CAN SEE, and
+    /// two executed shapes (a `macro_rules!`-written inheriting block; a block whose trait arrives by glob and is recorded with
+    /// a bare path) delete a real effect against 0.42.0. The default is the 0.42.0 reading (the join stays, an over-charge);
+    /// a resolver redesign owns the rule. `CANDOR_R1759_ON=1` opts in.
     fn r1759_ufcs_overridden(&self, p: &syn::ExprPath) -> bool {
         let Some(q) = p.qself.as_ref().filter(|q| q.position > 0) else { return false };
-        if candor_report::env::switch("CANDOR_R1759_OFF") {
+        if !candor_report::env::switch("CANDOR_R1759_ON") {
             return false;
         }
         let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();

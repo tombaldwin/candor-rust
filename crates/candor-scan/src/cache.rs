@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev190 (rustagent-r1754, round 4): R1759's withholding is OFF by default (`CANDOR_R1759_ON=1` opts in); the default output
+    // regains the dependency join on an overriding UFCS call. Mandatory.
     // rev189 (rustagent-r1754, round 3): R1759 withholds only when EVERY impl block of (trait, type) declares the member;
     // R1754P's scope test matches the trait's own crate/module (a same-crate glob of another module now discloses); the
     // std inherent table reads macro-written impls. Pass B calls change. Mandatory.
@@ -690,7 +692,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev189/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev190/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

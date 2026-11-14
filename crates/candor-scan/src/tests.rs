@@ -28362,7 +28362,7 @@ pub trait Mk: Sized { fn req(&self); fn default() -> Self { let _ = std::fs::wri
 pub trait Gt<X> { fn req(&self) -> u8; fn m(&self) { let _ = std::fs::write(\"/tmp/r1759g\", \"x\"); } }\n\
 ", &DepIndex::default());
         let (idx, d) = chain("r1754h", "hwdef", &prod);
-        let v = scan_crate_chained("r1754hc", "consumer", "\n[dependencies]\nhwdef = \"1\"\nodep = \"1\"\n", "\
+        let src = "\
 pub struct V;\n\
 impl hwdef::Vis for V { fn s(&self) { let _ = std::fs::write(\"/tmp/r1754h\", \"x\"); } }\n\
 pub struct C;\n\
@@ -28384,7 +28384,12 @@ pub struct Q2;\n\
 impl hwdef::Gt<u8> for Q2 { fn req(&self) -> u8 { 0 } fn m(&self) {} }\n\
 impl hwdef::Gt<u16> for Q2 { fn req(&self) -> u8 { 0 } }\n\
 pub fn go_trb() { <Q2 as hwdef::Gt<u16>>::m(&Q2) }\n\
-", &idx);
+";
+        let toml = "\n[dependencies]\nhwdef = \"1\"\nodep = \"1\"\n";
+        let v = scan_crate_chained("r1754hc", "consumer", toml, src, &idx);
+        std::env::set_var("CANDOR_R1759_ON", "1");
+        let von = scan_crate_chained("r1754hon", "consumer", toml, src, &idx);
+        std::env::remove_var("CANDOR_R1759_ON");
         let _ = std::fs::remove_dir_all(&d);
         assert!(effects_of(&v, "go_method").contains(&"Fs".to_string()), "the method spelling (premise):\n{v:#}");
         assert!(effects_of(&v, "go_path").contains(&"Fs".to_string()),
@@ -28393,9 +28398,14 @@ pub fn go_trb() { <Q2 as hwdef::Gt<u16>>::m(&Q2) }\n\
         // imported runs the DERIVED `Default` (EXECUTED round-2 `go_derive_default`: pure), never `Mk`'s writing default.
         assert!(effects_of(&v, "go_derived").is_empty(), "the derived Default runs, not the out-of-scope trait's:\n{v:#}");
         assert!(effects_of(&v, "go_mk").contains(&"Fs".to_string()), "the named trait's provided default does run:\n{v:#}");
-        // R1759 — `<Q as Vis>::st` runs Q's OWN `st` (pure), never the provided body that would call the writing `s`.
-        assert!(effects_of(&v, "go_ovr_quiet").is_empty(), "an overriding implementor's own member runs:\n{v:#}");
+        // R1759 is OFF by default (round 4): the UFCS call on an overriding implementor keeps the dependency join, the 0.42.0
+        // reading (an over-charge; the program writes nothing). `go_trb` and `go_ovr_loud` read Fs with or without it.
+        assert!(effects_of(&v, "go_ovr_quiet").contains(&"Fs".to_string()), "DEFAULT: the join stays (0.42.0 reading):\n{v:#}");
         assert!(effects_of(&v, "go_ovr_loud").contains(&"Fs".to_string()), "…and is charged when it writes:\n{v:#}");
+        // `CANDOR_R1759_ON=1` — `<Q as Vis>::st` runs Q's OWN `st` (pure), never the provided body that would call the writing `s`.
+        assert!(effects_of(&von, "go_ovr_quiet").is_empty(), "OPT-IN: an overriding implementor's own member runs:\n{von:#}");
+        assert!(effects_of(&von, "go_ovr_loud").contains(&"Fs".to_string()), "OPT-IN: …and is charged when it writes:\n{von:#}");
+        assert!(effects_of(&von, "go_trb").contains(&"Fs".to_string()), "OPT-IN: the inheriting impl's provided body runs:\n{von:#}");
         // ROUND 3 — a glob of an UNRELATED dependency brings no `hwdef` trait into scope: the derived `Default` runs.
         assert!(effects_of(&v, "og::go_other_glob").is_empty(), "an unrelated crate's glob is not the trait's import:\n{v:#}");
         // ROUND 3 — `impl Gt<u8> for Q2` overrides `m`, `impl Gt<u16> for Q2` inherits it: `<Q2 as Gt<u16>>::m` runs the
