@@ -63,7 +63,7 @@ fn scan(dir: &Path, deps: Option<&Path>, out: Option<&Path>, env: &[(&str, &str)
         None => cmd.arg("--json"),
     };
     cmd.env_remove("CANDOR_DEPS").env_remove("CANDOR_CONFIG").env_remove("CANDOR_POLICY")
-        .env_remove("CANDOR_R1715_OFF").env_remove("CANDOR_R1711C_OFF").env_remove("CANDOR_R1743_OFF").env_remove("CANDOR_R1710_OFF")
+        .env_remove("CANDOR_R1715_OFF").env_remove("CANDOR_R1711C_OFF").env_remove("CANDOR_R1739_OFF").env_remove("CANDOR_R1740_OFF").env_remove("CANDOR_R1745_OFF").env_remove("CANDOR_R1743_OFF").env_remove("CANDOR_R1710_OFF")
         .env("CANDOR_CACHE", dir.join(".r1715-cache"));
     if let Some(d) = deps {
         cmd.env("CANDOR_DEPS", d);
@@ -278,4 +278,103 @@ fn a_member_referenced_with_a_projection_self_is_keyed() {
     for f in ["free", "qself"] {
         assert!(!off.get(f).is_some_and(|r| r.2.iter().any(|k| k == key)), "R1711C off still keyed `{f}`: {:?}", off.get(f));
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// SOUNDNESS R1739 / R1740 / R1745 — a join that matches a dispatched member to an implementor by TRAIT-AND-MEMBER TAIL must
+// not admit an implementor of a DIFFERENT trait when the trait's identity is knowable. Each over-charge below was EXECUTED
+// in the lane (`rustagent-traitid`): the charged body never runs. Each test pins the twin AND the positive control the same
+// mechanism exists for, and the kill switch proves the fixture reaches the change.
+
+#[test]
+fn a_lockless_implementor_of_a_dependencys_own_same_tail_trait_is_not_joined() {
+    // R1739: `other` DECLARES its own `de::Visitor` with the same member. Lock-less, the blind join admitted `Ev` (deletes a
+    // file) at prod's `fac_core#de::Visitor::visit` dispatch by tail alone. `other`'s source (a path dependency) proves the
+    // trait is its own, so no other owner's dispatch reaches it. The facade (`fac`, which re-exports `fac_core::de`) still
+    // joins lock-less: that is the silence the blind join closed.
+    let root = tmpdir("r1739");
+    let reps = world(&root);
+    pkg(&root, "other", &[], "pub mod de {\n pub trait Visitor { fn visit(&self); }\n}\n");
+    let app = pkg(&root, "app", &["fac", "fac_core", "prod", "other"],
+        "pub struct Ev;\n\
+         impl other::de::Visitor for Ev { fn visit(&self) { let _ = std::fs::remove_file(\"/nonexistent/r1739\"); } }\n\
+         pub fn e_ev() { other::de::Visitor::visit(&Ev) }\n\
+         pub struct Q;\n\
+         impl fac_core::de::Visitor for Q { fn visit(&self) {} }\n\
+         pub fn e_drive() { prod::drive(Q) }\n");
+    let (rows, _) = scan(&app, Some(&reps), None, &[]);
+    assert!(has(&rows, "e_ev", "Fs"), "control: the direct call lost its own effect: {:?}", rows.get("e_ev"));
+    assert!(!has(&rows, "e_drive", "Fs"), "another package's OWN same-tail trait joined the owner's dispatch: {:?}", rows.get("e_drive"));
+    let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1739_OFF", "1")]);
+    assert!(has(&off, "e_drive", "Fs"), "R1739 off: the fixture does not reach the blind join: {:?}", off.get("e_drive"));
+    // the positive control: a lock-less FACADE implementor still joins (the existing tail join, unchanged)
+    let app2 = pkg(&root, "app2", &["fac", "fac_core", "prod", "prodf"], CONSUMER);
+    let (rows2, _) = scan(&app2, Some(&reps), None, &[]);
+    assert!(has(&rows2, "e_impl_join", "Fs"), "lockless facade implementor lost its join: {:?}", rows2.get("e_impl_join"));
+    // …and the other direction: `fac_core` DECLARES `de::Visitor`, but prodf dispatches it under the FACADE's key
+    // (`fac#de::Visitor::visit`), which re-exports it. One side's declaration does not make the traits distinct; `Core`
+    // (an implementor of the owner's trait, reading the environment) must still join.
+    assert!(has(&rows2, "e_rev_join", "Env"), "lockless: an owner-declared implementor lost its facade-keyed join: {:?}", rows2.get("e_rev_join"));
+}
+
+#[test]
+fn an_associated_type_member_joins_only_the_type_the_receiving_call_returned() {
+    // R1740: `m.end()` after `let m = s.ser_map();` is keyed `Ser::end` (S's bound carried onto the value). `Ser` declares no
+    // `end`; its associated types `Map: SerMap` and `St: SerSt` both do. The join unioned BOTH, so a map's `.end()` was charged
+    // the struct's `end` (Env). `ser_map` returns `Self::Map`, so only `SerMap::end` runs. The struct's `.end()`, through a
+    // direct chain, keeps its charge (the 0.42.0 silence this join closed).
+    let root = tmpdir("r1740");
+    pkg(&root, "fac_core", &[], "pub trait SerMap { fn end(self); }\npub trait SerSt { fn end(self); }\n\
+        pub trait Ser { type Map: SerMap; type St: SerSt; fn ser_map(self) -> Self::Map; fn ser_st(self) -> Self::St; }\n");
+    pkg(&root, "fac", &["fac_core"], "pub use fac_core::{Ser, SerMap, SerSt};\n");
+    pkg(&root, "prod", &["fac_core"],
+        "pub struct PM;\nimpl fac_core::SerMap for PM { fn end(self) {} }\n\
+         pub struct PT;\nimpl fac_core::SerSt for PT { fn end(self) { let _ = std::env::var(\"R1740\"); } }\n\
+         pub struct PS;\nimpl fac_core::Ser for PS { type Map = PM; type St = PT; fn ser_map(self) -> PM { PM } fn ser_st(self) -> PT { PT } }\n");
+    let reps = root.join("reps");
+    std::fs::create_dir_all(&reps).unwrap();
+    scan(&root.join("fac_core"), None, Some(&reps.join("fac_core")), &[]);
+    scan(&root.join("prod"), Some(&reps), Some(&reps.join("prod")), &[]);
+    let app = pkg(&root, "app", &["fac", "fac_core", "prod"],
+        "pub fn go_map<S: fac::Ser>(s: S) { let m = s.ser_map(); m.end(); }\n\
+         pub fn go_st<S: fac::Ser>(s: S) { s.ser_st().end() }\n\
+         pub fn e_map() { go_map(prod::PS) }\npub fn e_st() { go_st(prod::PS) }\n");
+    lock(&app, &["app", "fac", "fac_core", "prod"]);
+    let (on, _) = scan(&app, Some(&reps), None, &[]);
+    assert!(has(&on, "e_st", "Env"), "the struct's own `end` was not joined: {:?}", on.get("e_st"));
+    assert!(!has(&on, "e_map", "Env"), "a map's `.end()` was charged another associated type's `end`: {:?}", on.get("e_map"));
+    let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1740_OFF", "1")]);
+    assert!(has(&off, "e_map", "Env"), "R1740 off: the fixture does not reach the narrowing: {:?}", off.get("e_map"));
+    assert!(has(&off, "e_st", "Env"), "R1740 off lost the struct's join: {:?}", off.get("e_st"));
+}
+
+#[test]
+fn an_inline_modules_own_trait_is_not_keyed_through_the_parents_import() {
+    // R1745: `mod other { pub trait Visitor { .. } impl Visitor for Ev { .. } }` under a root `use fac_core::de::Visitor;`
+    // implements `other::Visitor`; read through the parent's binding it was keyed `fac_core#de::Visitor::visit` and joined
+    // prod's dispatch. A module that GLOB-imports its parent and declares nothing of that name does implement the
+    // dependency's trait, and keeps the join.
+    let root = tmpdir("r1745");
+    let reps = world(&root);
+    let app = pkg(&root, "app", &["fac", "fac_core", "prod"],
+        "use fac_core::de::Visitor;\n\
+         mod other { pub trait Visitor { fn visit(&self); }\n pub struct Ev;\n\
+           impl Visitor for Ev { fn visit(&self) { let _ = std::fs::remove_file(\"/nonexistent/r1745\"); } } }\n\
+         pub fn e_ev() { use other::Visitor; other::Ev.visit() }\n\
+         pub struct Q;\nimpl Visitor for Q { fn visit(&self) {} }\n\
+         pub fn e_drive() { prod::drive(Q) }\n");
+    lock(&app, &["app", "fac", "fac_core", "prod"]);
+    let (rows, _) = scan(&app, Some(&reps), None, &[]);
+    assert!(has(&rows, "e_ev", "Fs"), "control: the local trait's own call lost its effect: {:?}", rows.get("e_ev"));
+    assert!(!has(&rows, "e_drive", "Fs"), "an inline module's own trait was keyed as the dependency's: {:?}", rows.get("e_drive"));
+    let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1745_OFF", "1")]);
+    assert!(has(&off, "e_drive", "Fs"), "R1745 off: the fixture does not reach the change: {:?}", off.get("e_drive"));
+    let app2 = pkg(&root, "app2", &["fac", "fac_core", "prod"],
+        "use fac_core::de::Visitor;\n\
+         mod inner { use super::*;\n pub struct L;\n\
+           impl Visitor for L { fn visit(&self) { let _ = std::fs::remove_file(\"/nonexistent/r1745g\"); } } }\n\
+         pub fn e_glob() { prod::drive(inner::L) }\n");
+    lock(&app2, &["app2", "fac", "fac_core", "prod"]);
+    let (rows2, _) = scan(&app2, Some(&reps), None, &[]);
+    assert!(has(&rows2, "e_glob", "Fs"), "a glob-importing module's implementor of the dependency trait lost its join: {:?}", rows2.get("e_glob"));
 }

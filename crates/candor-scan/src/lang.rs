@@ -7305,6 +7305,43 @@ pub(crate) fn collect_macro_hidden_decls(
         }
     }
 }
+/// SOUNDNESS R1745 — THE `use` MAP AN INLINE MODULE'S `impl <Trait> for X` IS READ AGAINST: the enclosing scope's map (the
+/// widening every impl walk below has always applied, which stands in for `use super::*`), MINUS every TYPE-NAMESPACE name the
+/// module DECLARES ITSELF, then the module's own `use` items. In Rust a name the module declares is that module's binding — it
+/// beats any glob, and a parent's `use` is never inherited at all — so `mod other { pub trait Visitor { .. } impl Visitor for
+/// Evil { .. } }` under a crate-root `use serde_core::de::Visitor;` implements `other::Visitor`. Read through the parent's
+/// binding, the impl was keyed `serde_core#de::Visitor::visit_u64` (obligation 2), and every chained `Visitor::visit_u64`
+/// dispatch joined `Evil`'s body: EXECUTED `t1b_quiet_plus_other`, `deny Fs go_direct` 1 on 0.42.0 over a deserialize that
+/// never reaches it, 0 with the root binding renamed (`Visitor as SV`, one variable). `decls::submodule_uses` has always
+/// removed declared names for the call-side map; the impl walks did not. Only the TYPE namespace: a trait path names a type,
+/// so a same-named fn, const, static or macro the module declares does not shadow it. `CANDOR_R1745_OFF=1` restores the
+/// widening unchanged.
+pub(crate) fn inner_module_impl_uses(
+    uses: &HashMap<String, String>,
+    inner: &[syn::Item],
+    include_tests: bool,
+) -> HashMap<String, String> {
+    let mut sub = uses.clone();
+    if !candor_report::env::switch("CANDOR_R1745_OFF") {
+        for it in inner {
+            let type_ns = matches!(
+                it,
+                syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Union(_) | syn::Item::Type(_)
+                    | syn::Item::Trait(_) | syn::Item::TraitAlias(_) | syn::Item::Mod(_) | syn::Item::ExternCrate(_)
+            );
+            if let Some(name) = type_ns.then(|| crate::decls::declared_item_name(it, include_tests)).flatten() {
+                if let Some(was) = sub.remove(&name) {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1745SHADOW\t{name}\t{was}"); // §E1 REACH COUNTER
+                    }
+                }
+            }
+        }
+    }
+    let mut alts = HashMap::new();
+    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+    sub
+}
 
 /// ⟨0.39⟩ SPEC §4 obligation 2 — the FOREIGN abstractions this file implements, keyed under the package
 /// that OWNS the abstraction rather than under this one.
@@ -7379,9 +7416,7 @@ pub(crate) fn collect_foreign_trait_impls(
                     // The inner module's OWN imports on top of this scope's — the same widening
                     // `collect_decls` does for a nested module, so an `impl` written beside its own
                     // `use` resolves the same way it would at file level.
-                    let mut sub = uses.clone();
-                    let mut alts = HashMap::new();
-                    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                    let sub = inner_module_impl_uses(uses, inner, include_tests);
                     collect_foreign_trait_impls(inner, include_tests, &sub, out);
                 }
             }
@@ -7444,9 +7479,7 @@ pub(crate) fn collect_glob_foreign_impls(
             syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
                 if let Some((_, inner)) = &m.content {
                     let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977
-                    let mut sub = uses.clone();
-                    let mut alts = HashMap::new();
-                    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                    let sub = inner_module_impl_uses(uses, inner, include_tests);
                     collect_glob_foreign_impls(inner, include_tests, &sub, out);
                 }
             }
@@ -7621,9 +7654,7 @@ pub(crate) fn collect_local_impl_members(
                     // The inner module's OWN imports on top of this scope's — the same widening
                     // `collect_foreign_trait_impls` does, and for the same reason: an `impl` written
                     // beside its own `use` must classify the way it would at file level (R652).
-                    let mut sub = uses.clone();
-                    let mut alts = HashMap::new();
-                    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                    let sub = inner_module_impl_uses(uses, inner, include_tests);
                     collect_local_impl_members(inner, include_tests, &crate::decls::qualify(modpath, &m.ident.to_string()), &sub, out);
                 }
             }
@@ -7685,9 +7716,7 @@ pub(crate) fn collect_block_nested_trait_impls(
                 let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
                 // The inner module's OWN imports on top of this scope's — the same widening
                 // `collect_foreign_trait_impls` does, so one `impl` keys identically from both walks.
-                let mut sub = uses.clone();
-                let mut alts = HashMap::new();
-                collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                let sub = inner_module_impl_uses(uses, inner, include_tests);
                 collect_block_nested_trait_impls(inner, include_tests, &sub, local, foreign, externs);
             }
             continue;
@@ -7757,9 +7786,7 @@ impl<'ast> syn::visit::Visit<'ast> for NestedImplWalk<'_> {
         }
         let Some((_, inner)) = &m.content else { return };
         let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
-        let mut sub = self.uses.clone();
-        let mut alts = HashMap::new();
-        collect_item_uses(inner, self.include_tests, &mut sub, &mut alts);
+        let sub = inner_module_impl_uses(self.uses, inner, self.include_tests);
         let mut v = NestedImplWalk {
             include_tests: self.include_tests,
             uses: &sub,
@@ -13657,9 +13684,7 @@ pub(crate) fn collect_opaque_trait_impls(
             syn::Item::Mod(m) if include_tests || !is_cfg_test(&m.attrs) => {
                 if let Some((_, inner)) = &m.content {
                     let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
-                    let mut sub = uses.clone();
-                    let mut alts = HashMap::new();
-                    collect_item_uses(inner, include_tests, &mut sub, &mut alts);
+                    let sub = inner_module_impl_uses(uses, inner, include_tests);
                     let sub_mod = crate::decls::qualify(modpath, &m.ident.to_string());
                     collect_opaque_trait_impls(inner, include_tests, &sub_mod, &sub, local, foreign, nonnominal);
                 }

@@ -10768,6 +10768,39 @@
       ]
     },
     {
+      "fn": "depsig::DepSigs::owns_trait_unlocked",
+      "loc": "crates/candor-scan/src/depsig.rs:2750:5: 2750:106",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "9061de20873b6e624b168eb72afb8456",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::DepSigs::source_dirs",
+        "depsig::facade_at"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "depsig::DepSigs::ret_of",
       "loc": "crates/candor-scan/src/depsig.rs:2285:5: 2285:134",
       "inferred": [
@@ -11566,6 +11599,42 @@
       "invisible": [
         "proc_macro2",
         "syn"
+      ]
+    },
+    {
+      "fn": "depsig::facade_at",
+      "loc": "crates/candor-scan/src/depsig.rs:1826:1: 1826:60",
+      "inferred": [
+        "Env",
+        "Fs",
+        "Unknown"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "9061de20873b6e62813139ffd76e0485",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "depsig::Facade::walk",
+        "depsig::Facade::walk_in"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml"
+      ],
+      "incomplete": [
+        "Fs"
       ]
     },
     {

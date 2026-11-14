@@ -4539,6 +4539,7 @@ pub(crate) fn fninfo(
         // R571 — …and the PER-NAME complement of the two sets above, which is what tells a
         // caller-monomorphized receiver apart from an erased one when the BODY contains both.
         mono_recv_traits: seed_mono_trait_vars(sig),
+        recv_via: Default::default(),
         // The FULL bound map (not just its erased subset), for the one position Pass A cannot reach:
         // a LOCAL `let`'s type annotation.
         // SOUNDNESS R1140 — the WRITTEN signature here, not the stripped one: a path call through a concrete type

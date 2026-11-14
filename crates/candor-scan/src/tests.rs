@@ -239,7 +239,7 @@
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -292,7 +292,7 @@
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -627,7 +627,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, unbound_gen_fields: &trait_fields, dyn_trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -9537,7 +9537,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
-                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
+                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -9593,7 +9593,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -9619,7 +9619,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                 let mut c = CallCollector {
             modpath: String::new(),
                     uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -9655,7 +9655,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -9694,7 +9694,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
-                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
+                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -18506,7 +18506,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172", "rev173", "rev174", "rev175", "rev176", "rev177", "rev178", "rev179", "rev180", "rev181", "rev182"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172", "rev173", "rev174", "rev175", "rev176", "rev177", "rev178", "rev179", "rev180", "rev181", "rev182", "rev183"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18517,7 +18517,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev183/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev184/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -23252,7 +23252,7 @@ pub fn go() {{ imp::doit(); }}
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, unbound_gen_fields: &trait_fields, dyn_trait_fields: &trait_fields, trait_impls: &trait_impls,

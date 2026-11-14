@@ -119,6 +119,13 @@ pub(crate) struct Call {
     /// a co-path set (`scan.rs`, `copath_member`); no other route reads it. Cached (`cache_schema` rev170).
     #[serde(rename = "cs", default, skip_serializing_if = "Option::is_none")]
     pub(crate) cside: Option<String>,
+    /// SOUNDNESS R1740 — on a DEPENDENCY trait dispatch only (`<dep trait path>::<member>`): the trait method whose return
+    /// value the receiver is, where the receiver's bound was carried through that one call (`s.serialize_map(n)?.end()`, or
+    /// `m.end()` after `let m = s.serialize_map(n)?;`, under `S: Serializer`) — see `CallCollector::recv_via`. Read only by the
+    /// R1715 associated-type join (`scan.rs`), which then joins the ONE associated type that method returns instead of every
+    /// associated type declaring the member. `None` everywhere else, which is that union. Cached (`cache_schema` rev184).
+    #[serde(rename = "av", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) assoc_via: Option<String>,
 }
 
 /// SOUNDNESS R1207/R1208 — the autoref/autoderef steps Rust's method probe tries for a receiver of `form` (1 a value,

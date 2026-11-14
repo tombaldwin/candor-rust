@@ -570,6 +570,95 @@ impl SrcIndex {
         found
     }
 
+    /// SOUNDNESS R1740 — the traits bounding the ONE associated type that `leaf::via` returns (`Self::A`, or `Result<Self::A,
+    /// ..>` / `Option<Self::A>` / `<Self as leaf>::A`, the shapes `?`, `.await` and a plain bind leave a method receiver holding)
+    /// that positively declare `member`. serde's `fn serialize_map(..) -> Result<Self::SerializeMap, Self::Error>` with `type
+    /// SerializeMap: SerializeMap<..>` makes `s.serialize_map(n)?.end()` `SerializeMap::end` and nothing else, where
+    /// `assoc_bound_all` unions all seven `Serialize*::end`. `None` — and the caller keeps that union — on ANY doubt: no
+    /// declaration of `via` in a trait named `leaf`, two that disagree, a return that is not one of those shapes, an
+    /// associated type the trait does not declare, or a bound list in which nothing positively declares `member`.
+    fn assoc_via_bounds(&self, leaf: &str, via: &str, member: &str) -> Option<Vec<String>> {
+        let mut traits: Vec<&syn::ItemTrait> = Vec::new();
+        fn walk<'a>(it: &'a syn::Item, leaf: &str, out: &mut Vec<&'a syn::ItemTrait>) {
+            match it {
+                syn::Item::Trait(t) if t.ident == leaf => out.push(t),
+                syn::Item::Mod(m) => {
+                    for i in m.content.iter().flat_map(|(_, v)| v.iter()) {
+                        walk(i, leaf, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for f in &self.files {
+            for it in &f.items {
+                walk(it, leaf, &mut traits);
+            }
+        }
+        // the associated type a return names: `Self::A` / `<Self as T>::A`, possibly the first argument of `Result`/`Option`
+        fn assoc_of(ty: &syn::Type, depth: usize) -> Option<String> {
+            let syn::Type::Path(tp) = ty else { return None };
+            let segs: Vec<&syn::PathSegment> = tp.path.segments.iter().collect();
+            if let Some(q) = &tp.qself {
+                let syn::Type::Path(qp) = &*q.ty else { return None };
+                return (qp.path.is_ident("Self") && segs.len() == q.position + 1).then(|| segs[q.position].ident.to_string());
+            }
+            if segs.len() == 2 && segs[0].ident == "Self" && segs[1].arguments.is_none() {
+                return Some(segs[1].ident.to_string());
+            }
+            let last = segs.last()?;
+            if depth == 0 && segs.len() == 1 && (last.ident == "Result" || last.ident == "Option") {
+                let syn::PathArguments::AngleBracketed(a) = &last.arguments else { return None };
+                let syn::GenericArgument::Type(t) = a.args.first()? else { return None };
+                return assoc_of(t, depth + 1);
+            }
+            None
+        }
+        let mut answer: Option<Vec<String>> = None;
+        for t in traits {
+            let mut ret: Option<Option<String>> = None;
+            for ti in &t.items {
+                if let syn::TraitItem::Fn(fi) = ti {
+                    if fi.sig.ident == via {
+                        let a = match &fi.sig.output {
+                            syn::ReturnType::Type(_, ty) => assoc_of(ty, 0),
+                            syn::ReturnType::Default => None,
+                        };
+                        if ret.is_some() {
+                            return None;
+                        }
+                        ret = Some(a);
+                    }
+                }
+            }
+            let a = ret??; // the method is not declared here (it may be a supertrait's), or its return is not an associated type
+            let mut found: Vec<String> = Vec::new();
+            let mut declared = false;
+            for ti in &t.items {
+                let syn::TraitItem::Type(ty) = ti else { continue };
+                if ty.ident != a {
+                    continue;
+                }
+                declared = true;
+                for b in &ty.bounds {
+                    let syn::TypeParamBound::Trait(tb) = b else { continue };
+                    let Some(bl) = tb.path.segments.last().map(|s| s.ident.to_string()) else { continue };
+                    if self.trait_answer(&bl, member, 1) == Some(true) && !found.contains(&bl) {
+                        found.push(bl);
+                    }
+                }
+            }
+            if !declared || found.is_empty() {
+                return None;
+            }
+            match &answer {
+                Some(prev) if *prev != found => return None,
+                _ => answer = Some(found),
+            }
+        }
+        answer
+    }
+
     /// SOUNDNESS F3 (Fable REVIEW2 rust0416) — is the declared RETURN type of `leaf::method`, as this source declares the trait
     /// member, positively a std type (`Result`, `Option`, `bool`, a primitive, `String`, `Vec`, `&str`, `Cow`, …)? That is what
     /// makes a combinator called on the call's result (`visitor.visit_str(v).map_err(..)`) a std method, whatever its name.
@@ -1728,6 +1817,44 @@ pub(crate) struct DepSigs {
     probes: HashMap<(String, String), Result<(), String>>,
     /// SOUNDNESS R1715 — `facade` answers, per package (real name): the paths its root file re-exports from its dependencies
     facades: HashMap<String, Option<std::rc::Rc<Facade>>>,
+    /// SOUNDNESS R1739 — `facade_at` answers per SOURCE DIRECTORY, for `owns_trait_unlocked` (never for a join)
+    facades_at: HashMap<std::path::PathBuf, Option<std::rc::Rc<Facade>>>,
+}
+
+/// SOUNDNESS R1715 — the re-export surface of the package whose source is at `src_dir` (its manifest's `[lib] path`, or
+/// `src/lib.rs`, and the file modules that root declares). `None` when the manifest or the root file cannot be read or parsed.
+fn facade_at(src_dir: &Path) -> Option<std::rc::Rc<Facade>> {
+    let manifest = std::fs::read_to_string(src_dir.join("Cargo.toml")).ok()?.parse::<toml::Table>().ok()?;
+    let lib = manifest.get("lib").and_then(|l| l.get("path")).and_then(|p| p.as_str()).unwrap_or("src/lib.rs");
+    let text = std::fs::read_to_string(src_dir.join(lib)).ok()?;
+    let file = syn::parse_file(&text).ok()?;
+    let norm = |s: &str| s.replace('-', "_");
+    let mut deps: HashMap<String, String> = HashMap::new();
+    for table in crate::deps::manifest_dependency_tables(&manifest) {
+        for (k, v) in table {
+            let pkg = v.as_table().and_then(|t| t.get("package")).and_then(|p| p.as_str()).unwrap_or(k);
+            deps.insert(norm(k), norm(pkg));
+        }
+    }
+    // a root `extern crate X as Y;` binds `Y` to the dependency `X` everywhere in the crate (the extern prelude)
+    for it in &file.items {
+        if let syn::Item::ExternCrate(e) = it {
+            if let (Some((_, y)), Some(real)) = (&e.rename, deps.get(&e.ident.to_string()).cloned()) {
+                deps.insert(y.to_string(), real);
+            }
+        }
+    }
+    let mut f = Facade {
+        proc_macro: manifest.get("lib").and_then(|l| l.get("proc-macro")).and_then(|p| p.as_bool()) == Some(true),
+        ..Facade::default()
+    };
+    let root_dir = src_dir.join(lib).parent().map(|p| p.to_path_buf());
+    if candor_report::env::switch("CANDOR_R1736_OFF") {
+        f.walk(&file.items, "", &deps, 0);
+    } else {
+        f.walk_in(&file.items, "", &deps, 0, root_dir.as_deref(), &mut 0);
+    }
+    Some(std::rc::Rc::new(f))
 }
 
 /// SOUNDNESS R1715 — what a dependency's ROOT FILE re-exports from ITS OWN dependencies, read from the lock-pinned source:
@@ -1791,6 +1918,29 @@ impl Facade {
                 if let (Some(id), true) = (&m.ident, m.mac.path.is_ident("macro_rules")) {
                     if let Some(t) = zero_arg_transcriber(&m.mac.tokens) {
                         zero.insert(id.to_string(), t);
+                    }
+                }
+            }
+            // SOUNDNESS R1739 — …and a zero-argument `macro_rules!` defined in a `#[macro_use] mod x;` FILE module of this
+            // level: serde_core 1.0.228 defines `crate_root!` in `src/crate_root.rs` (`#[macro_use] mod crate_root;`) and
+            // invokes it at the root, so its `pub mod de;` was never seen and `de::Visitor` read as undeclared.
+            if let (syn::Item::Mod(m), Some(d)) = (it, dir) {
+                if m.content.is_none() && m.attrs.iter().any(|a| a.path().is_ident("macro_use"))
+                    && !candor_report::env::switch("CANDOR_R1739_OFF")
+                {
+                    let name = m.ident.to_string();
+                    let a = d.join(format!("{name}.rs"));
+                    let file = if a.is_file() { a } else { d.join(&name).join("mod.rs") };
+                    if let Some(f) = std::fs::read_to_string(&file).ok().and_then(|t| syn::parse_file(&t).ok()) {
+                        for it2 in &f.items {
+                            if let syn::Item::Macro(m2) = it2 {
+                                if let (Some(id), true) = (&m2.ident, m2.mac.path.is_ident("macro_rules")) {
+                                    if let Some(t) = zero_arg_transcriber(&m2.mac.tokens) {
+                                        zero.entry(id.to_string()).or_insert(t);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2389,13 +2539,20 @@ impl DepSigs {
     /// `S::SerializeMap` is bounded `SerializeMap<..>`, so `s.serialize_map(n)?.serialize_entry(k, v)` — a call the consumer
     /// keyed `Serializer::serialize_entry` by carrying `S`'s bound onto the returned value — names `SerializeMap::
     /// serialize_entry`. `None` with no lock-pinned source, an unparsed file, or any doubt.
-    pub(crate) fn assoc_member_traits_locked(&mut self, dir: &str, alias: &str, real: &str, leaf: &str, member: &str) -> Vec<String> {
+    pub(crate) fn assoc_member_traits_locked(&mut self, dir: &str, alias: &str, real: &str, leaf: &str, member: &str, via: Option<&str>) -> Vec<String> {
         let Some(src) = self.lock_source(dir, alias, real) else { return Vec::new() };
         let Some(ix) = self.index(&src.dir) else { return Vec::new() };
         // A member the trait PROVABLY declares is its own; anything else ("does not", or a doubt from a macro in the trait
         // body) may be an associated type's, and those positively declaring it are ADDED beside the key — never instead of it.
         if ix.trait_answer(leaf, member, 0) == Some(true) {
             return Vec::new();
+        }
+        // SOUNDNESS R1740 — the receiver is the return of ONE known method: only the associated type that method returns.
+        if let Some(n) = via.and_then(|v| ix.assoc_via_bounds(leaf, v, member)) {
+            if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
+                eprintln!("DSASSOCVIA\t{alias}\t{leaf}.{member}\t{via:?}\t{n:?}"); // §E1 REACH COUNTER
+            }
+            return n;
         }
         let v = ix.assoc_bound_all(leaf, member, 0);
         if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
@@ -2571,44 +2728,54 @@ impl DepSigs {
         if let Some(v) = self.facades.get(real) {
             return v.clone();
         }
-        let v = self.lock_source(dir, alias, real).and_then(|src| {
-            let manifest = std::fs::read_to_string(src.dir.join("Cargo.toml")).ok()?.parse::<toml::Table>().ok()?;
-            let lib = manifest.get("lib").and_then(|l| l.get("path")).and_then(|p| p.as_str()).unwrap_or("src/lib.rs");
-            let text = std::fs::read_to_string(src.dir.join(lib)).ok()?;
-            let file = syn::parse_file(&text).ok()?;
-            let norm = |s: &str| s.replace('-', "_");
-            let mut deps: HashMap<String, String> = HashMap::new();
-            for table in crate::deps::manifest_dependency_tables(&manifest) {
-                for (k, v) in table {
-                    let pkg = v.as_table().and_then(|t| t.get("package")).and_then(|p| p.as_str()).unwrap_or(k);
-                    deps.insert(norm(k), norm(pkg));
-                }
-            }
-            // a root `extern crate X as Y;` binds `Y` to the dependency `X` everywhere in the crate (the extern prelude)
-            for it in &file.items {
-                if let syn::Item::ExternCrate(e) = it {
-                    if let (Some((_, y)), Some(real)) = (&e.rename, deps.get(&e.ident.to_string()).cloned()) {
-                        deps.insert(y.to_string(), real);
-                    }
-                }
-            }
-            let mut f = Facade {
-                proc_macro: manifest.get("lib").and_then(|l| l.get("proc-macro")).and_then(|p| p.as_bool()) == Some(true),
-                ..Facade::default()
-            };
-            let root_dir = src.dir.join(lib).parent().map(|p| p.to_path_buf());
-            if candor_report::env::switch("CANDOR_R1736_OFF") {
-                f.walk(&file.items, "", &deps, 0);
-            } else {
-                f.walk_in(&file.items, "", &deps, 0, root_dir.as_deref(), &mut 0);
-            }
-            Some(std::rc::Rc::new(f))
-        });
+        let v = self.lock_source(dir, alias, real).and_then(|src| facade_at(&src.dir));
         if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
             eprintln!("DSFACADE\t{real}\t{:?}", v.as_ref().map(|f| (f.names.len(), f.globs.len()))); // §E1 REACH COUNTER
         }
         self.facades.insert(real.to_string(), v.clone());
         v
+    }
+
+    /// SOUNDNESS R1739 — does package `real` (dependency alias `alias`) itself DECLARE the item at `tpath` (`Visitor` for
+    /// `impl otherkit::Visitor for X`), with no re-export from another crate able to supply that name instead, in EVERY source
+    /// the consumer's manifest admits — a path dependency's directory, or each semver-compatible registry checkout on disk
+    /// (`source_dirs`, the union the narrowing readers use)? The implementor-side blind join (scan.rs, R1715 F4) admits an
+    /// implementor of a dependency trait whose source has no lock pin as a candidate for ANOTHER owner's same-tail dispatch,
+    /// because a facade re-export cannot be ruled out; this is the reading that rules it out. It only ever REMOVES a candidate,
+    /// and only on a positive declaration: the item in the package's own `declared` set at exactly that path (an item shadows a
+    /// glob in rustc), with no `pub use dep::..` of it or of any enclosing module in any `#[cfg]` arm. Replacing a declared
+    /// trait by a different crate's re-export at the same path is a breaking change, so a semver-compatible version the machine
+    /// does not hold cannot differ on it. No source, an unparsed one, or any arm that re-exports: `false`, the join stands.
+    /// Never used to ADD a join, so the R1578 ruling (charging reads the lock-pinned source only) is untouched.
+    pub(crate) fn owns_trait_unlocked(&mut self, dir: &str, alias: &str, real: &str, tpath: &str) -> bool {
+        let dirs = self.source_dirs(dir, alias, real);
+        if dirs.is_empty() {
+            return false;
+        }
+        let segs: Vec<&str> = tpath.split("::").collect();
+        for d in dirs {
+            let fac = match self.facades_at.get(&d) {
+                Some(v) => v.clone(),
+                None => {
+                    let v = facade_at(&d);
+                    self.facades_at.insert(d.clone(), v.clone());
+                    v
+                }
+            };
+            let Some(fac) = fac else { return false };
+            if !fac.declared.contains(tpath) {
+                return false;
+            }
+            if (1..=segs.len()).any(|i| fac.names.contains_key(&segs[..i].join("::"))) {
+                return false;
+            }
+            // `declared` does not keep the item's namespace: a same-named fn or macro beside a glob that supplies the TRAIT
+            // would read as a declaration of it. Any glob in an enclosing module is a doubt.
+            if (0..segs.len()).any(|i| fac.globs.contains_key(&segs[..i].join("::"))) {
+                return false;
+            }
+        }
+        true
     }
 
     /// SOUNDNESS R1715 — every crate that `path` (a trait path inside package `real`, `de::Visitor`) may NAME, by following
