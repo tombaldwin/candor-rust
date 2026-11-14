@@ -180,6 +180,7 @@ fn rep_tail(rest: &[TokenTree]) -> Option<(Option<Vec<TokenTree>>, RepOp, usize)
                 if op == RepOp::Opt {
                     return None;
                 }
+                SEP2_USED.with(|c| c.set(true));
                 return Some((Some(vec![first.clone(), rest[1].clone()]), op, 3));
             }
         }
@@ -685,10 +686,12 @@ impl Ctx<'_> {
         let name = self.local_name(mac)?;
         let cross_file = !self.defs.contains_key(&name);
         let arms = self.arms_of(&name)?;
+        SEP2_USED.with(|c| c.set(false));
         let ts = expand(&arms, &mac.tokens)?;
-        // SOUNDNESS R1748 (a) — §E1 REACH COUNTER for the two-character separator: a macro with such a separator in ANY
-        // arm was refused whole before (`rep_tail`), so every expansion of it is new.
-        if crate::lang::reach_debug() && arms.iter().any(|a| uses_sep2(&a.matcher)) {
+        // SOUNDNESS R1748 (a) — §E1 REACH COUNTER for the two-character separator: a macro with such a separator in a
+        // MATCHER was refused whole before (`rep_tail`), and one in the TRANSCRIBER (rkyv's `$(a == b)&&*`) failed at
+        // transcription, so every expansion of either is new.
+        if crate::lang::reach_debug() && (SEP2_USED.with(|c| c.get()) || arms.iter().any(|a| uses_sep2(&a.matcher))) {
             eprintln!("R1748SEP\t{name}");
         }
         let ts = if cross_file {
@@ -1262,6 +1265,11 @@ pub(crate) fn splice_derived_comparisons(items: &mut Vec<syn::Item>) {
         }
     }
     *items = out;
+}
+
+thread_local! {
+    /// SOUNDNESS R1748 (a) — set by `rep_tail` when it reads a two-token separator (reach counter only).
+    static SEP2_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// SOUNDNESS R1748 (a) — does this matcher hold a repetition with a two-token separator?
