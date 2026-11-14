@@ -9262,6 +9262,47 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let mut m: HashMap<String, BTreeSet<String>> = HashMap::new();
         for f in &fns {
             for (tr, meth) in &f.dispatch {
+                // SOUNDNESS R1748 (a) — a site whose call NAMES a trait a local macro declares (`de::Error`, from serde_core's
+                // `declare_error_trait!`), where the leaf's only hand-written trait (`std_error::Error`) does not declare
+                // the member, is keyed under the trait it names: `serde_core#de::Error::custom`, not
+                // `serde_core#std_error::Error::custom`. The leaf key named a trait with no `custom`, which a consumer
+                // could join only by its tail and so joined EVERY same-leaf implementor (`impl ser::Error for MyErr`'s
+                // file deletion charged at a deserializing caller, EXECUTED `t4_ser_error_core`/`c43_deerr`). Proven
+                // only: the named path must be in the decl index of macro-declared traits and declare the member;
+                // anything else keeps the leaf key. `CANDOR_R1748A_OFF=1` disables it.
+                let sites: Vec<&String> =
+                    f.dispatch_named.iter().filter(|(t, mm, _)| t == tr && mm == meth).map(|(_, _, n)| n).collect();
+                let leaf_declares = merged.trait_decls.get(tr.as_str()).is_some_and(|lt| lt.methods.contains(meth) || lt.assoc.contains(meth));
+                let mut leaf_key = sites.is_empty();
+                for n in sites {
+                    // A projection's marker: the leaf named in the bound trait's declaring module.
+                    let resolved;
+                    let n = match n.strip_prefix(crate::model::R1748_PROJ).and_then(|r| r.split_once(crate::model::R1748_PROJ)) {
+                        Some((b, l)) => {
+                            resolved = union_trait_qual(&merged.trait_quals, b)
+                                .map(|q| match q.rsplit_once("::") { Some((m, _)) => format!("{m}::{l}"), None => l.to_string() })
+                                .unwrap_or_default();
+                            &resolved
+                        }
+                        None => n,
+                    };
+                    let proven = !n.is_empty()
+                        && !leaf_declares
+                        && n.rsplit("::").next() == Some(tr.as_str())
+                        && merged.mbe_traits.get(n.as_str()).is_some_and(|ms| ms.contains(meth))
+                        && !candor_report::env::switch("CANDOR_R1748A_OFF");
+                    if proven {
+                        if crate::lang::reach_debug() {
+                            eprintln!("R1748NAMED\t{}\t{tr}::{meth}\t{n}", f.qual); // §E1 REACH COUNTER
+                        }
+                        m.entry(f.qual.clone()).or_default().insert(format!("{crate_name}#{n}::{meth}"));
+                    } else {
+                        leaf_key = true;
+                    }
+                }
+                if !leaf_key {
+                    continue;
+                }
                 if let Some(member) = union_member_key(&merged.trait_quals, &crate_name, tr, meth) {
                     m.entry(f.qual.clone()).or_default().insert(member);
                 }

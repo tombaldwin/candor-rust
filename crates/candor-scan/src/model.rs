@@ -293,6 +293,10 @@ pub(crate) struct FnInfo {
     /// Pass-B result (`cache_schema` rev bump on this field's addition).
     #[serde(rename = "ds", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) dispatch: Vec<(String, String)>,
+    /// SOUNDNESS R1748 (a) — `CallCollector::dispatch_named`: per dispatch site, the trait path the call names (`""` = the leaf
+    /// spelling). Read by `scan.rs`'s `dispatchesOn` minting only. Cached (`cache_schema` rev185).
+    #[serde(rename = "dn", default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) dispatch_named: Vec<(String, String, String)>,
     /// SOUNDNESS R504 / SPEC §4 ⟨0.39⟩ obligation 1 — the FOREIGN abstraction members this fn dispatches
     /// on, already in the ⟨0.23⟩ wire spelling (`iface#backend::Backend::size`). See
     /// `CallCollector::foreign_dispatch_sites` for why this is a separate field from `dispatch` and for
@@ -1536,6 +1540,10 @@ pub(crate) struct ImplOwner {
 /// declaration qual (`owner`), so a block that inherits a default can name that default's unit exactly. No self-type key
 /// can equal it, so every reader that filters blocks by `ty` skips it.
 pub(crate) const TRAIT_DECL_TY: &str = "\u{1f}decl";
+
+/// SOUNDNESS R1748 (a) — `dispatch_named`'s spelling of a PROJECTION's bound, `\u{1}<bound trait leaf>\u{1}<assoc bound leaf>`:
+/// the leaf is resolved in the module that DECLARES the bound trait, which only `scan.rs` knows crate-wide.
+pub(crate) const R1748_PROJ: &str = "\u{1}";
 
 /// SOUNDNESS R1246 — the trait's own declaration qual, where exactly one declaration has this leaf.
 pub(crate) fn trait_decl_qual<'a>(owners: &'a HashMap<String, Vec<ImplOwner>>, trait_leaf: &str) -> Option<&'a str> {

@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev185 (rustagent-r1748): SOUNDNESS R1748 — `FileDecls` gains `mbe_traits` (the traits a local macro expansion declares)
+    // and Pass B's `FnInfo` gains `dispatch_named` (the trait path a dispatch site names) and drops `foreign_dispatch` keys whose
+    // Self an `Err(..)` in return position fixes. A rev184 entry has neither and keys every such site the old way. Mandatory.
     // rev184 (rustagent-traitid): SOUNDNESS R1745/R1739/R1740 — Pass A's `foreign_impls` (and the glob, local-member, block-nested
     // and opaque impl indexes) no longer key an inline module's `impl <Name>` through the PARENT's binding of a name the module
     // declares itself (`lang::inner_module_impl_uses`), and Pass B's `Call` gains `av` (the trait method whose return value the
@@ -674,7 +677,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev184/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev185/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -898,6 +901,10 @@ pub(crate) struct FileDecls {
     /// second spelling it forbids — served invisibly from a warm cache.
     #[serde(default)]
     pub(crate) trait_quals: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R1748 (a) — `module::Trait -> fn members` for every trait a local `macro_rules!` expansion in this file
+    /// declares (`lang::collect_mbe_traits`). Absent from a rev184 entry, hence rev185.
+    #[serde(default)]
+    pub(crate) mbe_traits: HashMap<String, Vec<String>>,
     /// SOUNDNESS R577 — every CRATE-QUALIFIED trait bound this file WRITES (`&dyn dep::Q`,
     /// `Box<dyn dep::Q>`, `impl dep::Q`), leaf -> path, `""` = two spellings seen, refuse. The
     /// declaration-site half of the qualification that `trait_fields`/`rets`/the closure binder throw
@@ -1073,6 +1080,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // needs `modpath`, which `collect_decls` does not carry, so it is a separate walk.
     let mut trait_quals: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
     crate::lang::collect_trait_decl_quals(items, modpath, include_tests, &mut trait_quals);
+    let mut mbe_traits: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    crate::lang::collect_mbe_traits(items, modpath, include_tests, &mut mbe_traits); // R1748 (a)
     // SOUNDNESS R577 — and the other side of the SAME naming question: not the traits this file
     // DECLARES, but the crate-qualified spellings it WRITES for somebody else's. A separate walk for the
     // reason the three above are: it needs no `use` map at all (only an explicit multi-segment path is
@@ -1208,6 +1217,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         },
         // R503 — a `BTreeSet` in, a sorted `Vec` out: same determinism requirement, same reason.
         trait_quals: trait_quals.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
+        mbe_traits: mbe_traits.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
         written_trait_quals,
         // R529 — `BTreeSet` in, sorted `Vec` out; the cache entry is content-hashed.
         nested_impl_members: nested_local.into_iter().collect(),
@@ -1310,6 +1320,8 @@ pub(crate) struct MergedDecls {
     /// TWO quals is ambiguous and every consumer refuses it, exactly as `LocalTrait::count > 1` already
     /// refuses the same leaf one field over.
     pub(crate) trait_quals: HashMap<String, std::collections::BTreeSet<String>>,
+    /// SOUNDNESS R1748 (a) — every file's macro-declared traits, unioned. See `FileDecls::mbe_traits`.
+    pub(crate) mbe_traits: HashMap<String, std::collections::BTreeSet<String>>,
     /// SOUNDNESS R577 — every file's WRITTEN trait quals, merged under the same tombstone rule a single
     /// signature's are (`lang::merge_trait_qual`). See `FileDecls::written_trait_quals`.
     pub(crate) written_trait_quals: HashMap<String, String>,
@@ -2265,6 +2277,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
             e.insert(q.clone());
         }
     }
+    for (k, v) in &fd.mbe_traits {
+        acc.mbe_traits.entry(k.clone()).or_default().extend(v.iter().cloned()); // R1748 (a)
+    }
     for (k, v) in &fd.written_trait_quals {
         // SOUNDNESS R577 — ONE rule for the merge and for a single signature's own collisions: two files
         // spelling one leaf with two crates tombstones it, exactly as two parameters of one fn do. A
@@ -2662,6 +2677,19 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         s.push('|');
         s.push_str(k);
         for q in &m.trait_quals[k] {
+            s.push(',');
+            s.push_str(q);
+        }
+    }
+    s.push('\n');
+    // mbe_traits — R1748 (a). Decides the wire spelling of a `dispatchesOn` key a macro-declared trait's member forms.
+    s.push_str("mbe_traits");
+    let mut mtk: Vec<&String> = m.mbe_traits.keys().collect();
+    mtk.sort();
+    for k in mtk {
+        s.push('|');
+        s.push_str(k);
+        for q in &m.mbe_traits[k] {
             s.push(',');
             s.push_str(q);
         }

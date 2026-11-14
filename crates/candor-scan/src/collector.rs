@@ -566,6 +566,20 @@ pub(crate) struct CallCollector<'a> {
     /// implements), entirely after both recursion halves have already run. See the module doc at the
     /// `out_of_scope` block in `scan.rs` for the full mechanism and its soundness argument.
     pub(crate) dispatch_sites: std::collections::BTreeSet<(String, String)>,
+    /// SOUNDNESS R1748 (a) — one `(trait leaf, member, named)` per `dispatch_sites` write: `named` is the module-qualified trait
+    /// path the call site NAMES (`r1748_named`) where the leaf's only hand-written trait does not declare the member (the R1685
+    /// branch), `""` otherwise. `scan.rs` spells the `dispatchesOn` key from it when the decl index proves a macro-declared
+    /// trait at that path declares the member; every `""` (and every site with no entry) keeps the leaf spelling.
+    pub(crate) dispatch_named: std::collections::BTreeSet<(String, String, String)>,
+    /// SOUNDNESS R1748 (a) — the trait path the PATH route being dispatched names, set around `dispatch_trait_member`.
+    pub(crate) r1748_named: Option<String>,
+    /// SOUNDNESS R1748 (b) — the callee paths (by address) of `Err(<path>(..))` calls whose value IS this fn's return value
+    /// (its tail expression, or a `return` outside any closure / async block): the callee's `Self` is the fn's declared
+    /// error type. See `r1748_err_ret_callees`.
+    pub(crate) r1748_err_ret: std::collections::HashSet<usize>,
+    /// SOUNDNESS R1748 (b) — this fn's declared error type, as `lang::result_err_type` spells it (a crate-local `Result`
+    /// alias as a marker), or `None` when it is not a nominal path (a generic parameter, a `Self::` projection, `Box<dyn ..>`).
+    pub(crate) r1748_err_ty: Option<String>,
     /// SOUNDNESS R504 — the FOREIGN abstraction members this body dispatches on, ALREADY IN WIRE FORM
     /// (`iface#backend::Backend::size`, the ⟨0.23⟩ key in the OWNING crate's namespace).
     ///
@@ -9424,6 +9438,7 @@ impl<'a> CallCollector<'a> {
             // policy scoped to THIS fn's name needs this fact to test against, independent of the
             // impl-count bound below.
             self.dispatch_sites.insert((cha.to_string(), target_method.to_string()));
+            self.dispatch_named.insert((cha.to_string(), target_method.to_string(), String::new()));
             match trait_impls.get(cha) {
                 // Narrow dispatch → edge to every local implementor's formatter. The 12-impl bound is
                 // the same cross-engine one `visit_expr_method_call` uses.
@@ -11158,6 +11173,15 @@ impl<'a> CallCollector<'a> {
         // those decide whether an EFFECT edge is safe to fabricate, but "this fn dispatches on trait-leaf
         // `tr`'s method `leaf`" is true regardless of either, and costs nothing extra to record.
         self.dispatch_sites.insert((tr.to_string(), leaf.to_string()));
+        // SOUNDNESS R1748 (a) — the R1685 branch: `tr`'s hand-written declaration does not declare `leaf`, which an impl
+        // block of the same LEAF does. Record the trait the call site names, for `scan.rs` to check against the
+        // macro-declared traits; otherwise the leaf spelling.
+        let r1685_branch = !self.trait_declares_method(tr, leaf, 0) && !(assoc && lt.assoc.contains(leaf));
+        let named = if r1685_branch { self.r1748_named.clone().unwrap_or_default() } else { String::new() };
+        if r1685_branch && crate::lang::reach_debug() {
+            eprintln!("R1748SITE\t{tr}::{leaf}\t{named}"); // §E1 REACH COUNTER
+        }
+        self.dispatch_named.insert((tr.to_string(), leaf.to_string(), named));
         if count > 1 {
             // R485 — `ambiguous:`, not `callback:`. TWO DISTINCT local traits declare this leaf, so no
             // owner could be formed AT ALL, which is exactly the condition §4 ⟨0.24⟩ defines the kind by.
@@ -11729,6 +11753,69 @@ impl<'a> CallCollector<'a> {
                 }
             }
         }
+        // SOUNDNESS R1748 (a) — the trait each target's dispatch NAMES, where the call site spells it: the qself's trait
+        // (`<E as Error>::custom`), a generic parameter's written bound (`E: Error`, `E: de::Error`), or the written path
+        // itself (`Error::custom`, `de::Error::custom`). A projection's bound (`S::Error::custom`) is declared in ANOTHER scope
+        // (the trait that declares the associated type), so it names nothing here and keeps the leaf spelling.
+        let mut named: HashMap<String, Option<String>> = HashMap::new();
+        if let Some(q) = p.qself.as_ref().filter(|q| q.position > 0) {
+            let _ = q;
+            if let Some((tr, _)) = targets.first() {
+                named.insert(tr.clone(), self.r1748_name_trait(&segs[..segs.len() - 1].join("::")));
+            }
+        } else if p.qself.is_none() && segs.len() == 2 && generic(self, &segs[0]).is_some() {
+            for (tr, _) in &targets {
+                let w = self
+                    .trait_quals_by_param
+                    .get(&segs[0])
+                    .and_then(|m| m.get(tr))
+                    .filter(|q| !q.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| tr.clone());
+                named.insert(tr.clone(), self.r1748_name_trait(&w));
+            }
+        } else if p.qself.is_none() && segs.len() == 3 && generic(self, &segs[0]).is_some() {
+            // `S::Error::custom` — the projection's bound is written in the DECLARATION of `S`'s bound trait (`type Error:
+            // Error;` in `ser::Serializer`), so it names the leaf as that trait's MODULE sees it.
+            for b in generic(self, &segs[0]).unwrap_or_default() {
+                let Some(lt) = self.local_traits.get(&b) else { continue };
+                if candor_report::env::switch("CANDOR_R1748A_OFF") {
+                    continue;
+                }
+                for l in lt.assoc_types.get(&segs[1]).into_iter().flatten() {
+                    // Resolved at publication (`scan.rs`), where `b`'s declaration qual is known crate-wide.
+                    let n = format!("{}{b}{}{l}", crate::model::R1748_PROJ, crate::model::R1748_PROJ);
+                    let e = named.entry(l.clone()).or_insert_with(|| Some(n.clone()));
+                    if e.as_deref() != Some(n.as_str()) {
+                        *e = None; // two bounds' declarations disagree — name nothing
+                    }
+                }
+            }
+        } else if p.qself.is_none() {
+            let rs: Vec<&str> = path.split("::").collect();
+            if rs.len() >= 2 {
+                for (tr, _) in &targets {
+                    if rs[rs.len() - 2] != tr.as_str() {
+                        continue;
+                    }
+                    // `Self::Error::custom` in a default body, which `expand` wrote as `Deserializer::Error::custom`: the
+                    // segment before the member is the trait's ASSOCIATED TYPE, bounded (by the same leaf) in the trait's
+                    // declaration, whose module names it.
+                    let proj = rs.len() >= 3
+                        && self.local_traits.get(rs[rs.len() - 3]).is_some_and(|lt| {
+                            lt.assoc_types.get(rs[rs.len() - 2]).is_some_and(|ls| ls.iter().any(|l| l == tr))
+                        });
+                    let n = if proj {
+                        // Resolved at publication through the bound trait's declaration qual, as the generic projection.
+                        (!candor_report::env::switch("CANDOR_R1748A_OFF"))
+                            .then(|| format!("{}{}{}{tr}", crate::model::R1748_PROJ, rs[rs.len() - 3], crate::model::R1748_PROJ))
+                    } else {
+                        self.r1748_name_trait(&rs[..rs.len() - 1].join("::"))
+                    };
+                    named.insert(tr.clone(), n);
+                }
+            }
+        }
         for (tr, concrete) in targets {
             if concrete.is_none() && self.local_traits.get(&tr).is_none() {
                 self.route_foreign_generic_member(p, &segs, &tr, leaf, args);
@@ -11773,10 +11860,75 @@ impl<'a> CallCollector<'a> {
                         path_lits_partial: false, path_lit2: None });
                 }
                 None => {
+                    self.r1748_named = named.get(&tr).cloned().flatten();
                     self.dispatch_trait_member(&tr, leaf, str_arg.clone(), true);
+                    self.r1748_named = None;
                 }
             }
         }
+    }
+
+    /// SOUNDNESS R1748 (a) — the module-qualified path a trait name WRITTEN in this fn's scope names: through this file's
+    /// `use` map when it imports it (`use crate::de::{Error, ..}` → `de::Error`), else the enclosing module's own item
+    /// (`Error` in `de` → `de::Error`). `None` for a dependency-rooted path or a `super::` import (whose expansion drops the
+    /// module it is relative to). The answer is only a CANDIDATE: `scan.rs` uses it only where a macro-declared trait sits
+    /// at exactly that path and declares the member.
+    /// SOUNDNESS R1748 (b) — is `p` (a dependency trait member `key`, an associated fn named by path) the callee of an
+    /// `Err(..)` that this fn RETURNS, with a declared error type that is crate-local and implements that member here?
+    /// Then rustc infers the call's `Self` to be that type, so the call runs this crate's own implementation (the
+    /// written path already edges to it) and no consumer's implementor can be `Self`: publishing the member as an open
+    /// `dispatchesOn` key would let every consumer implementor of the trait join it. serde_json's `impl ser::Serializer
+    /// for RawValueStrEmitter { fn serialize_bool(..) -> Result<()> { Err(ser::Error::custom("expected RawValue")) } .. }`
+    /// published `serde_core#ser::Error::custom` on 456 rows, and a deserializing consumer was charged its own
+    /// `ser::Error::custom`'s file deletion (EXECUTED `t4_ser_error_core`, R1748 (b)). Refused — the key stays — for a
+    /// generic, `Self`-rooted, std or dependency error type, and for a type with no local implementation of the member.
+    /// `CANDOR_R1748B_OFF=1` disables it.
+    fn r1748_self_fixed(&self, p: &syn::ExprPath, key: &str, leaf: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1748B_OFF") || !self.r1748_err_ret.contains(&(p as *const syn::ExprPath as usize)) {
+            return false;
+        }
+        let Some(raw) = &self.r1748_err_ty else { return false };
+        let resolved = self.resolve_err_markers(raw);
+
+        let tys: Vec<&str> = resolved.split(crate::model::RET_ERR_SEP).filter(|t| !t.is_empty()).collect();
+        if tys.is_empty() {
+            return false;
+        }
+        let Some(impls) = self.foreign_impls.get(key) else { return false };
+        let ok = tys.iter().all(|t| {
+            let root = t.split("::").next().unwrap_or(t);
+            let tl = t.rsplit("::").next().unwrap_or(t);
+            !t.contains(crate::model::RESULT_ALIAS_MARK)
+                && !t.contains(crate::decls::ALIAS_ALT_SEP)
+                && !matches!(root, "std" | "core" | "alloc" | "Self")
+                && !self.is_dependency_type(t)
+                && crate::lang::is_type_ident(tl)
+                && impls.iter().any(|q| q == &format!("{tl}::{leaf}"))
+        });
+        if ok && crate::lang::reach_debug() {
+            eprintln!("R1748SELF\t{key}\t{resolved}"); // §E1 REACH COUNTER
+        }
+        ok
+    }
+
+    fn r1748_name_trait(&self, written: &str) -> Option<String> {
+        if candor_report::env::switch("CANDOR_R1748A_OFF") {
+            return None;
+        }
+        let head = written.split("::").next().unwrap_or(written);
+        if self.uses.get(head).is_some_and(|u| u.contains("super")) || written.starts_with("super::") {
+            return None;
+        }
+        let full = crate::lang::expand(written, &self.uses);
+        let full = crate::model::norm_type_path(&full);
+        if full.contains("::") {
+            let root = full.split("::").next().unwrap_or("");
+            if matches!(root, "std" | "core" | "alloc") || self.is_dependency_type(&full) {
+                return None;
+            }
+            return Some(full);
+        }
+        Some(if self.modpath.is_empty() { full } else { format!("{}::{full}", self.modpath) })
     }
 }
 
@@ -14755,6 +14907,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // R4 erasure carve-out that keeps CHA off `impl Trait`/`T: Trait` receivers.
                         // Edges here would fabricate. The DISCLOSURE costs nothing and is what §4 asks
                         // for; the missing edge stays the documented residual it already was.
+                        self.dispatch_named.insert((ext.clone(), leaf.clone(), String::new()));
                         self.dispatch_sites.insert((ext, leaf.clone()));
                     } else if crate::lang::is_dependency_crate_root(root) {
                         if let Some((owner, rest)) = full.split_once("::") {
@@ -15785,7 +15938,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         let key = format!("{owner}#{rest}::{leaf}");
                         let bound = self.bound_trait_leaves.contains(&tr);
                         let implemented = self.foreign_impls.contains_key(&key);
-                        if bound || implemented {
+                        if (bound || implemented) && self.r1748_self_fixed(node, &key, &leaf) {
+                            // SOUNDNESS R1748 (b) — not a dispatch: the call's `Self` is this crate's own error type.
+                        } else if bound || implemented {
                             if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                                 eprintln!("R549HIT {key}"); // §E1 REACH PROBE
                             }
@@ -19129,3 +19284,108 @@ thread_local! {
     static NESTED_IMPL_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+
+/// SOUNDNESS R1748 (b) — the callee `ExprPath`s (by address) of every `Err(<path>(..))` whose value is the body's RETURN
+/// value: the block's tail expression, or the operand of a `return` that is not inside a closure, an async block or a
+/// nested item (whose `return` returns from something else). The address is stable for the walk: the collector borrows
+/// the same `syn::Block`.
+pub(crate) fn r1748_err_ret_callees(block: &syn::Block) -> std::collections::HashSet<usize> {
+    use syn::visit::Visit;
+    fn err_callee(e: &syn::Expr, out: &mut std::collections::HashSet<usize>) {
+        let syn::Expr::Call(c) = e else { return };
+        let syn::Expr::Path(f) = &*c.func else { return };
+        if f.qself.is_some() || f.path.segments.last().is_none_or(|s| s.ident != "Err") || c.args.len() != 1 {
+            return;
+        }
+        let n = f.path.segments.len();
+        if n > 1 && f.path.segments.iter().nth(n - 2).is_none_or(|s| s.ident != "Result") {
+            return;
+        }
+        if let Some(syn::Expr::Call(inner)) = c.args.first() {
+            if let syn::Expr::Path(ip) = &*inner.func {
+                out.insert(ip as *const syn::ExprPath as usize);
+            }
+        }
+    }
+    struct Rets<'o>(&'o mut std::collections::HashSet<usize>);
+    impl<'ast> Visit<'ast> for Rets<'_> {
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+        fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
+        fn visit_item(&mut self, _: &'ast syn::Item) {}
+        fn visit_expr_return(&mut self, r: &'ast syn::ExprReturn) {
+            if let Some(e) = &r.expr {
+                err_callee(e, self.0);
+            }
+            syn::visit::visit_expr_return(self, r);
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    if candor_report::env::switch("CANDOR_R1748B_OFF") {
+        return out;
+    }
+    if let Some(syn::Stmt::Expr(e, None)) = block.stmts.last() {
+        err_callee(e, &mut out);
+    }
+    Rets(&mut out).visit_block(block);
+    out
+}
+
+/// SOUNDNESS R1748 (b) — a fn's declared error type for `r1748_self_fixed`: `None` unless the return type is a
+/// `Result<_, E>` (or a one-argument crate-local `Result` alias) whose `E` is written as a nominal path that is neither a
+/// generic parameter in scope nor rooted at `Self`.
+pub(crate) fn r1748_sig_err(
+    sig: &syn::Signature,
+    impl_generics: Option<&syn::Generics>,
+    uses: &HashMap<String, String>,
+) -> Option<String> {
+    let syn::ReturnType::Type(_, ty) = &sig.output else { return None };
+    let mut generics: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for g in sig.generics.params.iter().chain(impl_generics.into_iter().flat_map(|g| g.params.iter())) {
+        if let syn::GenericParam::Type(t) = g {
+            generics.insert(t.ident.to_string());
+        }
+    }
+    // A written error argument rooted at `Self` or at a generic parameter (`Self::Error`, `S::Error`) is a projection whose
+    // value the impl or the caller chooses.
+    if let syn::Type::Path(p) = &**ty {
+        if let Some(syn::PathArguments::AngleBracketed(a)) = p.path.segments.last().map(|s| &s.arguments) {
+            // the ERROR position only (the second type argument): a one-argument alias's argument is the `Ok` type
+            for ga in a.args.iter().filter(|g| matches!(g, syn::GenericArgument::Type(_))).skip(1) {
+                if let syn::GenericArgument::Type(syn::Type::Path(tp)) = ga {
+                    let h = tp.path.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+                    if tp.qself.is_some() || h == "Self" || generics.contains(&h) {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(e) = crate::lang::result_err_type(ty, uses, &generics) {
+        return Some(e);
+    }
+    // A ONE-argument `Result<T>` names an alias (std's `Result` has no default error parameter, so no compiled program
+    // spells it with one argument). serde_json's `use crate::error::Result;` over `pub type Result<T> = result::Result<T,
+    // Error>;` reaches the `use` map already FOLLOWED to std's `Result`, which has lost the error argument; so it is read
+    // as the crate's own `Result` alias marker (`model::result_alias_key`, resolved by the collector) — but only where no
+    // EXTERNAL glob is in scope (a dependency's prelude may be what supplies the name) and the map's answer is std's, i.e.
+    // no dependency alias was named explicitly.
+    let syn::Type::Path(p) = &**ty else { return None };
+    if p.qself.is_some() || p.path.segments.len() != 1 {
+        return None;
+    }
+    let seg = p.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(a) = &seg.arguments else { return None };
+    if seg.ident != "Result" || a.args.iter().filter(|g| matches!(g, syn::GenericArgument::Type(_))).count() != 1 {
+        return None;
+    }
+    if !matches!(uses.get("Result").map(String::as_str), Some("core::result::Result" | "std::result::Result")) {
+        return None;
+    }
+    let ext_glob = uses.get(crate::lang::ALLGLOB_KEY).is_some_and(|g| {
+        g.split('\u{1}').filter(|b| !b.is_empty()).any(|b| !matches!(b.split("::").next(), Some("crate" | "self" | "super")))
+    });
+    if ext_glob {
+        return None;
+    }
+    Some(format!("{}Result", crate::model::RESULT_ALIAS_MARK))
+}

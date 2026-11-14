@@ -4659,6 +4659,10 @@ pub(crate) fn fninfo(
         // SOUNDNESS R810 — which `mut` bindings this body can change after their `let`.
         mut_uses: mut_uses(block),
         dispatch_sites: std::collections::BTreeSet::new(),
+        dispatch_named: std::collections::BTreeSet::new(),
+        r1748_named: None,
+        r1748_err_ret: crate::collector::r1748_err_ret_callees(block),
+        r1748_err_ty: crate::collector::r1748_sig_err(sig, impl_generics, uses),
         foreign_dispatch_sites: std::collections::BTreeSet::new(),
         unresolved_why: std::collections::BTreeSet::new(),
         drop_relevant,
@@ -4868,6 +4872,7 @@ pub(crate) fn fninfo(
         ret_proto,
         refusals: c.refusals.into_iter().chain(c.late_refusals.into_inner()).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
         dispatch: c.dispatch_sites.into_iter().collect(),
+        dispatch_named: c.dispatch_named.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),
         foreign_dispatch_prov: {
             let mut v = crate::collector::fd_prov_take(); // F3

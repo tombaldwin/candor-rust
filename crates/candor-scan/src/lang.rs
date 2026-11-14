@@ -7151,6 +7151,34 @@ pub(crate) fn collect_trait_decl_quals(
     }
 }
 
+/// SOUNDNESS R1748 (a) — the MODULE-QUALIFIED path of every trait a local `macro_rules!` expansion in this file declares
+/// (`mbe::mbe_trait_of`'s markers), with the `fn` members its declaration writes. A separate index from
+/// `collect_trait_decl_quals` on purpose: those traits are NOT in `trait_decls`, so the leaf-keyed CHA and the ambiguity
+/// count are untouched; this index is read only where a dispatch KEY is spelled (`scan.rs`, `dispatch_direct`).
+pub(crate) fn collect_mbe_traits(
+    items: &[syn::Item],
+    modpath: &str,
+    include_tests: bool,
+    out: &mut HashMap<String, std::collections::BTreeSet<String>>,
+) {
+    for it in items {
+        if let Some((name, members)) = crate::mbe::mbe_trait_of(it) {
+            let qual = if modpath.is_empty() { name } else { format!("{modpath}::{name}") };
+            out.entry(qual).or_default().extend(members);
+            continue;
+        }
+        if let syn::Item::Mod(m) = it {
+            if !include_tests && is_cfg_test(&m.attrs) {
+                continue;
+            }
+            if let Some((_, inner)) = &m.content {
+                let sub = if modpath.is_empty() { m.ident.to_string() } else { format!("{modpath}::{}", m.ident) };
+                collect_mbe_traits(inner, &sub, include_tests, out);
+            }
+        }
+    }
+}
+
 pub(crate) fn collect_macro_modules(
     items: &[syn::Item],
     modpath: &str,

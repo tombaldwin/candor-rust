@@ -70,7 +70,7 @@ enum M {
     Tok(TokenTree),
     Group(Delimiter, Vec<M>),
     Var(String, Frag),
-    Rep(Vec<M>, Option<TokenTree>, RepOp),
+    Rep(Vec<M>, Option<Vec<TokenTree>>, RepOp),
 }
 
 #[derive(Clone, Debug)]
@@ -157,8 +157,14 @@ fn parse_matcher(ts: TokenStream) -> Option<Vec<M>> {
     Some(out)
 }
 
-/// After `$( .. )`: an optional single-token separator, then the operator. Returns (sep, op, tokens used).
-fn rep_tail(rest: &[TokenTree]) -> Option<(Option<TokenTree>, RepOp, usize)> {
+/// After `$( .. )`: an optional separator, then the operator. Returns (sep, op, tokens used).
+///
+/// A separator is ONE rustc token, which `proc_macro2` splits into joint puncts when it is a multi-character
+/// operator: SOUNDNESS R1748 (a) — serde_core's `declare_error_trait!` repeats `$($supertrait:ident)::+`, whose
+/// separator is the path separator `::`, and a one-tree separator refused the whole macro (so the traits it declares
+/// were never seen). The two-character operators rustc lexes as one token are read as one separator.
+/// `CANDOR_R1748SEP_OFF=1` restores the one-tree reading.
+fn rep_tail(rest: &[TokenTree]) -> Option<(Option<Vec<TokenTree>>, RepOp, usize)> {
     let first = rest.first()?;
     if let Some(op) = rep_op(first) {
         // `$(..)?` takes no separator; `$(..)*`/`+` directly.
@@ -167,11 +173,22 @@ fn rep_tail(rest: &[TokenTree]) -> Option<(Option<TokenTree>, RepOp, usize)> {
     if matches!(first, TokenTree::Group(_)) {
         return None;
     }
+    if let (TokenTree::Punct(a), Some(TokenTree::Punct(b))) = (first, rest.get(1)) {
+        let pair: String = [a.as_char(), b.as_char()].iter().collect();
+        if a.spacing() == Spacing::Joint && !candor_report::env::switch("CANDOR_R1748SEP_OFF") && matches!(pair.as_str(), "::" | "=>" | "->" | ".." | "==" | "!=" | "<=" | ">=" | "&&" | "||") {
+            if let Some(op) = rest.get(2).and_then(rep_op) {
+                if op == RepOp::Opt {
+                    return None;
+                }
+                return Some((Some(vec![first.clone(), rest[1].clone()]), op, 3));
+            }
+        }
+    }
     let op = rep_op(rest.get(1)?)?;
     if op == RepOp::Opt {
         return None; // `?` admits no separator
     }
-    Some((Some(first.clone()), op, 2))
+    Some((Some(vec![first.clone()]), op, 2))
 }
 
 fn parse_arms(body: &TokenStream) -> Option<Vec<Arm>> {
@@ -331,10 +348,10 @@ fn match_seq(ms: &[M], inp: &[TokenTree], i: usize, b: Binds) -> Option<Vec<(usi
                 let mut start = pos;
                 if !iters.is_empty() {
                     if let Some(s) = sep {
-                        if !inp.get(pos).is_some_and(|x| tok_eq(s, x)) {
+                        if !s.iter().enumerate().all(|(k, st)| inp.get(pos + k).is_some_and(|x| tok_eq(st, x))) {
                             continue;
                         }
-                        start = pos + 1;
+                        start = pos + s.len();
                     }
                 }
                 for (end, ib) in match_seq(body, inp, start, Binds::new())? {
@@ -445,7 +462,7 @@ fn transcribe(ts: &TokenStream, b: &Binds, idx: &[usize]) -> Option<TokenStream>
                     for k in 0..count {
                         if k > 0 {
                             if let Some(s) = &sep {
-                                out.extend([s.clone()]);
+                                out.extend(s.iter().cloned());
                             }
                         }
                         let mut idx2 = idx.to_vec();
@@ -801,6 +818,19 @@ impl Ctx<'_> {
             match &mut it {
                 syn::Item::Macro(m) if m.ident.is_none() => {
                     if let Some(gen) = self.expand_items(&m.mac, depth) {
+                        // SOUNDNESS R1748 (a) — the TRAITS the expansion declares are not spliced (see below), but their
+                        // existence is recorded: one inert `Item::Verbatim` marker per generated trait, naming it and its
+                        // `fn` members, which `lang::collect_mbe_traits` reads into the decl index. No other walk reads a
+                        // `Verbatim` item. serde_core's `declare_error_trait!(Error: ..)` declares `de::Error` / `ser::Error`
+                        // this way, and without the record a call naming either was keyed under the only HAND-WRITTEN
+                        // `Error` the crate has (`std_error::Error`, which declares no `custom`).
+                        let mut markers: Vec<syn::Item> = gen
+                            .iter()
+                            .filter_map(|g| match g {
+                                syn::Item::Trait(t) => mbe_trait_marker(t),
+                                _ => None,
+                            })
+                            .collect();
                         // FUNCTIONS ONLY — free `fn`s and `extern` blocks, which is what a call BY PATH
                         // reaches and what R1004 is. A macro-generated `impl`/`struct`/`mod` stays
                         // unindexed exactly as before: expanding impls RESOLVES dispatch onto their
@@ -879,6 +909,7 @@ impl Ctx<'_> {
                         }
                         out.push(it);
                         out.extend(fns);
+                        out.append(&mut markers);
                         continue;
                     }
                 }
@@ -1228,6 +1259,43 @@ pub(crate) fn splice_derived_comparisons(items: &mut Vec<syn::Item>) {
     *items = out;
 }
 
+/// SOUNDNESS R1748 (a) — the first token of the inert marker `splice` leaves for a trait a local macro declares.
+const MBE_TRAIT_MARK: &str = "__candor_mbe_trait";
+
+/// SOUNDNESS R1748 (a) — `Item::Verbatim(__candor_mbe_trait <Trait> <fn member>*)` for a trait an expansion declares.
+/// `None` under `CANDOR_R1748A_OFF=1`, which leaves the index empty and every key as it was.
+fn mbe_trait_marker(t: &syn::ItemTrait) -> Option<syn::Item> {
+    if candor_report::env::switch("CANDOR_R1748A_OFF") {
+        return None;
+    }
+    let mut s = format!("{MBE_TRAIT_MARK} {}", t.ident);
+    if crate::lang::reach_debug() {
+        eprintln!("R1748MBETRAIT\t{}", t.ident); // §E1 REACH COUNTER
+    }
+    for ti in &t.items {
+        if let syn::TraitItem::Fn(f) = ti {
+            s.push(' ');
+            s.push_str(&f.sig.ident.to_string());
+        }
+    }
+    s.parse::<TokenStream>().ok().map(syn::Item::Verbatim)
+}
+
+/// SOUNDNESS R1748 (a) — read a marker `mbe_trait_marker` wrote: `(trait ident, fn members)`.
+pub(crate) fn mbe_trait_of(it: &syn::Item) -> Option<(String, Vec<String>)> {
+    let syn::Item::Verbatim(ts) = it else { return None };
+    let mut ids = ts.clone().into_iter().map(|t| match t {
+        TokenTree::Ident(i) => Some(i.to_string()),
+        _ => None,
+    });
+    if ids.next()?.as_deref() != Some(MBE_TRAIT_MARK) {
+        return None;
+    }
+    let name = ids.next()??;
+    let members: Option<Vec<String>> = ids.collect();
+    Some((name, members?))
+}
+
 /// Splice, beside every item-position invocation of a `macro_rules!` this file defines exactly once, the
 /// free functions and `extern` blocks it expands to. See the module doc for what is refused.
 pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacros) {
@@ -1257,6 +1325,27 @@ mod tests {
             })
             .collect();
         Some(if names.is_empty() { "<none>".to_string() } else { names.join(",") })
+    }
+
+    /// SOUNDNESS R1748 (a) — a two-character separator (`::`, serde_core's `$($supertrait:ident)::+`) is one rustc token,
+    /// and the traits an expansion declares are recorded (not spliced) by an inert marker.
+    #[test]
+    fn a_path_separator_repetition_expands_and_its_trait_is_recorded() {
+        let def = "macro_rules! d { (Error: Sized $(+ $($s:ident)::+)*) => { pub trait Error: Sized $(+ $($s)::+)* { \
+                   fn custom(m: u8) -> Self; fn invalid_type(u: u8) -> Self { Error::custom(u) } } fn made() {} }; }";
+        assert_eq!(exp(def, "d!(Error: Sized + core::fmt::Display);").as_deref(), Some("made"));
+        let f: syn::File = syn::parse_str(&format!("{def}\nd!(Error: Sized + Display);")).unwrap();
+        let mut items = f.items;
+        splice_local_macros(&mut items, &CrateMacros::new());
+        let traits: Vec<(String, Vec<String>)> = items.iter().filter_map(mbe_trait_of).collect();
+        assert_eq!(traits, vec![("Error".to_string(), vec!["custom".to_string(), "invalid_type".to_string()])]);
+        assert!(!items.iter().any(|i| matches!(i, syn::Item::Trait(_))), "the trait itself is not spliced");
+        let p = "macro_rules! p { ($($s:ident)::+ => $f:ident) => { fn $f() {} }; }";
+        assert_eq!(exp(p, "p!(a::b::c => f1);").as_deref(), Some("f1"));
+        assert_eq!(exp(p, "p!(a => f2);").as_deref(), Some("f2"));
+        assert_eq!(exp(p, "p!(a::b:c => f3);").as_deref(), Some("<none>"), "a broken separator matches nothing");
+        let c = "macro_rules! c { ($($s:ident),*) => { $(fn $s() {})* }; }";
+        assert_eq!(exp(c, "c!(x, y);").as_deref(), Some("x,y"), "a one-token separator still reads");
     }
 
     #[test]
