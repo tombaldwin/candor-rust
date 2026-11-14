@@ -4338,8 +4338,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     } else {
                         if deps_idx.crates.contains(real) {
                             let member = rest.rsplit("::").next().unwrap_or("");
+                            // An UNNAMED trait is never hedged for a member std's own types have as an associated fn under
+                            // that name (`String::new()` beside an imported `Digest`, which declares `new`): a DENYLIST that
+                            // only withholds a disclosure the published engine never made.
+                            let std_ctor = matches!(member, "new" | "default" | "from" | "try_from" | "from_str" | "from_iter"
+                                | "with_capacity" | "now" | "empty" | "from_utf8" | "from_raw_parts" | "max_value" | "min_value");
                             let tr = match trs.strip_prefix('!') {
                                 Some(named) => Some(named.to_string()),
+                                None if std_ctor => None,
                                 None => trs.split('~').filter(|t| *t != "-").find(|t| {
                                     let mut sigs = r1578_sigs.borrow_mut();
                                     let d = sigs.trait_declares_locked(dir, head, real, t, member) == Some(true);
@@ -4359,6 +4365,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                         continue;
                     }
+                }
+                None => c,
+            };
+            // SOUNDNESS R1754 (B) — a type-path call to a member a local type inherits from a DEPENDENCY trait's provided body
+            // (`DEP_DEFAULT_PATH_MARKER`, see `collector::route_trait_member_path`): VEIN C's lookup, asked here so nothing else
+            // reads the marker. A chained entry for the member → the trait-member call the UFCS spelling forms; else nothing.
+            let r1754_owned: Call;
+            let c = match c.path.strip_prefix(&format!("{}::", crate::lazy::DEP_DEFAULT_PATH_MARKER)) {
+                Some(rest) => {
+                    let Some((ty, m)) = rest.rsplit_once("::") else { continue };
+                    let hit = dep_traits_by_ty.get(ty).into_iter().flatten().find_map(|(tr_leaf, tpath)| {
+                        if !crate::model::impl_does_not_declare(&merged.impl_members, tr_leaf, ty, m) {
+                            return None;
+                        }
+                        let (root, trest) = tpath.split_once("::")?;
+                        let full = format!("{root}#{trest}::{m}");
+                        let t2 = tail2(&format!("{trest}::{m}")).map(|t| format!("{root}#{t}"));
+                        (deps_idx.by_key.contains_key(&full) || t2.is_some_and(|k| deps_idx.by_key.contains_key(&k)))
+                            .then(|| format!("{tpath}::{m}"))
+                    });
+                    let Some(p) = hit else { continue };
+                    if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
+                        eprintln!("R1754DEPDEFAULT\t{}\t{p}", f.qual); // §E1 REACH COUNTER
+                    }
+                    r1754_owned = Call { path: p, method: true, ..c.clone() };
+                    &r1754_owned
                 }
                 None => c,
             };

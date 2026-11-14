@@ -7411,13 +7411,17 @@ impl<'a> CallCollector<'a> {
         let ty = ty.split('<').next().unwrap_or(&ty).to_string();
         let leaf = ty.rsplit("::").next().unwrap_or(&ty).to_string();
         let root = ty.split("::").next().unwrap_or(&ty);
-        let std_typed = (ty.contains("::") && matches!(root, "std" | "core" | "alloc"))
-            || (!ty.contains("::")
-                && (crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str())
-                    || leaf == "str"
-                    || matches!(leaf.as_str(), "String" | "Vec" | "Option" | "Result" | "Box"))
-                && !self.uses.contains_key(leaf.as_str())
-                && !self.returns.contains_key(&crate::model::nominal_key(&leaf)));
+        let type_leaf = leaf.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            || crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str())
+            || leaf == "str";
+        let std_typed = type_leaf
+            && ((ty.contains("::") && matches!(root, "std" | "core" | "alloc"))
+                || (!ty.contains("::")
+                    && (crate::model::PRIMITIVE_LEAVES.contains(&leaf.as_str())
+                        || leaf == "str"
+                        || matches!(leaf.as_str(), "String" | "Vec" | "Option" | "Result" | "Box"))
+                    && !self.uses.contains_key(leaf.as_str())
+                    && !self.returns.contains_key(&crate::model::nominal_key(&leaf))));
         if !std_typed || leaf.is_empty() || self.local_fn_on(&leaf, &member) {
             return;
         }
@@ -11960,12 +11964,16 @@ impl<'a> CallCollector<'a> {
                     // method spelling `v.m()` were already answered by the chained join, and this one read ABSENT (EXECUTED
                     // c49_matrix `go_hw_path`, `go_mac_path`). Pushed TYPED, so Pass B's dependency-default route (`scan.rs`
                     // VEIN C) asks the chained report for exactly the member this type inherits; a report that does not
-                    // answer it adds nothing, as for the method spelling. `CANDOR_R1754P_OFF=1` disables it.
+                    // answer it adds nothing, as for the method spelling. A MARKER, not a typed call: a typed `T::m` falls
+                    // into every typed-call fallback (measured: tracing-subscriber's `Targets::new() { Self::default() }`,
+                    // `impl FromStr for Targets`, edged to an unrelated `Layer::default` and read `Env`), and only the
+                    // dependency-default lookup is this route's (`lazy::DEP_DEFAULT_PATH_MARKER`). `CANDOR_R1754P_OFF=1`.
                     if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1754_INSTR") {
-                        eprintln!("R1754TYPEPATH\t{path}"); // §E1 REACH COUNTER
+                        eprintln!("R1754TYPEPATH\t{path}"); // §E1 REACH COUNTER (a site; the join is counted in scan.rs)
                     }
-                    self.calls.push(Call { assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: path.to_string(),
-                        leaf: leaf.to_string(), str_arg: str_arg.clone(), typed: true, method: true,
+                    self.calls.push(Call { assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+                        path: format!("{}::{tr}::{leaf}", crate::lazy::DEP_DEFAULT_PATH_MARKER),
+                        leaf: leaf.to_string(), str_arg: None, typed: false, method: false,
                         is_macro: false, path_lits_partial: false, path_lit2: None });
                 }
             }

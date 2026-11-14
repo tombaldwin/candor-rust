@@ -95,6 +95,13 @@ pub(crate) const STD_RECV_JOIN_MARKER: &str = "<stdrecvjoin>";
 /// else is dropped here (the `STD_RECV_JOIN_MARKER` formed beside it owns the miss).
 pub(crate) const STD_PATH_JOIN_MARKER: &str = "<stdpathjoin>";
 
+/// SOUNDNESS R1754 (B) — `<depdefault>::<TypeLeaf>::<member>`: a TYPE-PATH call (`V::visit_string(V, s)`) naming a member
+/// the crate-local type inherits from a DEPENDENCY trait's provided body (`collector::route_trait_member_path`). Consumed
+/// only at the top of the call loop: where a chained report has that trait member's entry (VEIN C's lookup), the call is
+/// rewritten into the trait-member path the UFCS spelling forms (`serde_core::de::Visitor::visit_string`) and joined;
+/// otherwise it is nothing. Never a typed call, so no other typed-call fallback can read it.
+pub(crate) const DEP_DEFAULT_PATH_MARKER: &str = "<depdefault>";
+
 /// SOUNDNESS R1540 — `<stdrecvmac>::<TypeLeaf>::<method>`: a std-typed receiver's method that neither std (by name and
 /// arity) nor any crate unit answers. A `macro_rules!`-generated trait impl is never expanded (`mbe::Ctx::splice`), so
 /// where `fn <method>` appears inside unexpanded macro text the call loop discloses `macro:` (R452 (b)'s evidence;
