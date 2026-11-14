@@ -4092,6 +4092,11 @@ pub(crate) fn fninfo(
             if let Some(g) = impl_generics {
                 crate::lang::bound_trait_leaves(g, &mut v);
             }
+            // SOUNDNESS R1711 (c) — …and the associated type a bounded generic is PROJECTED to in the signature (`D::Error`
+            // in `fn f<D: Deserializer>(..) -> Result<_, D::Error>`): `.map_err(serde_core::de::Error::custom)` there names
+            // the trait member whose `Self` is that projection, which the caller chooses; with neither a bound nor an
+            // implementor naming `Error`, no key was minted and a consumer's `Error::custom` read pure (EXECUTED).
+            crate::lang::projection_assoc_leaves(sig_written, impl_generics, &mut v);
             v
         },
         trait_quals_by_param: crate::lang::sig_trait_quals_by_param(sig),

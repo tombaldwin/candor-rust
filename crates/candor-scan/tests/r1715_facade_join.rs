@@ -118,9 +118,14 @@ fn world(root: &Path) -> PathBuf {
          pub struct Loudp;\n\
          impl fac_core::de::Visitor for Loudp { fn visit(&self) { let _ = std::env::var(\"R1715P\"); } }\n",
     );
+    // a producer that names the trait through the FACADE, so its key is `fac#de::Visitor::visit`
+    let pf = pkg(root, "prodf", &["fac", "fac_core"], "pub fn drivef<V: fac::de::Visitor>(v: V) { v.visit() }\n");
+    lock(&pf, &["fac", "fac_core", "prodf"]);
     let reps = root.join("reps");
     std::fs::create_dir_all(&reps).unwrap();
     scan(&root.join("fac_core"), None, Some(&reps.join("fac_core")), &[]);
+    // prodf before prod: chained over prod's union it would itself inherit `Loudp`'s Env and blur the reverse join
+    scan(&pf, Some(&reps), Some(&reps.join("prodf")), &[]);
     scan(&root.join("prod"), Some(&reps), Some(&reps.join("prod")), &[]);
     reps
 }
@@ -131,16 +136,22 @@ impl Visitor for Loud { fn visit(&self) { let _ = std::fs::remove_file(\"/nonexi
 pub fn e_impl_join() { prod::drive(Loud) }\n\
 pub fn e_call_join() { fac::de::Visitor::visit(&prod::Loudp) }\n\
 pub struct Quiet;\n\
-impl fac_core::de::Visitor for Quiet { fn visit(&self) {} }\n";
+impl fac_core::de::Visitor for Quiet { fn visit(&self) {} }\n\
+pub struct Core;\n\
+impl fac_core::de::Visitor for Core { fn visit(&self) { let _ = std::env::var(\"R1715C\"); } }\n\
+pub fn e_rev_join() { prodf::drivef(Core) }\n";
 
 #[test]
 fn a_facade_spelled_implementor_and_call_join_the_owners_keys() {
     let root = tmpdir("facade");
     let reps = world(&root);
-    let app = pkg(&root, "app", &["fac", "fac_core", "prod"], CONSUMER);
-    lock(&app, &["app", "fac", "fac_core", "prod"]);
+    let app = pkg(&root, "app", &["fac", "fac_core", "prod", "prodf"], CONSUMER);
+    lock(&app, &["app", "fac", "fac_core", "prod", "prodf"]);
 
     let (on, _) = scan(&app, Some(&reps), None, &[]);
+    // the other direction: prodf keys `fac#de::Visitor::visit` (the facade), this crate's `Core` implements
+    // `fac_core::de::Visitor` and reads the environment (Loud, keyed under the facade, deletes a file)
+    assert!(has(&on, "e_rev_join", "Env"), "an owner-spelled implementor did not join a facade-keyed producer: {:?}", on.get("e_rev_join"));
     // the implementor half: prod dispatches `fac_core#de::Visitor::visit`, the consumer wrote `fac::de::Visitor`
     assert!(has(&on, "e_impl_join", "Fs"), "facade-spelled implementor did not join: {:?}", on.get("e_impl_join"));
     // the call half: `fac::de::Visitor::visit` reaches prod's union for `fac_core#de::Visitor::visit` (prod's `Loudp`: Env)
@@ -150,13 +161,14 @@ fn a_facade_spelled_implementor_and_call_join_the_owners_keys() {
     let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1715_OFF", "1")]);
     assert!(!has(&off, "e_impl_join", "Fs"), "R1715 off still charged e_impl_join: {:?}", off.get("e_impl_join"));
     assert!(!has(&off, "e_call_join", "Env"), "R1715 off still charged e_call_join: {:?}", off.get("e_call_join"));
+    assert!(!has(&off, "e_rev_join", "Env"), "R1715 off still charged e_rev_join: {:?}", off.get("e_rev_join"));
 }
 
 #[test]
 fn without_a_lockfile_the_lost_join_is_hedged_with_the_members_dispatch_reason() {
     let root = tmpdir("nolock");
     let reps = world(&root);
-    let app = pkg(&root, "app", &["fac", "fac_core", "prod"], CONSUMER);
+    let app = pkg(&root, "app", &["fac", "fac_core", "prod", "prodf"], CONSUMER);
     let (rows, _) = scan(&app, Some(&reps), None, &[]);
     for f in ["e_impl_join", "e_call_join"] {
         let r = rows.get(f).unwrap_or_else(|| panic!("{f} ABSENT without a lockfile: a silent purity claim"));
@@ -193,8 +205,8 @@ fn a_facade_that_does_not_reexport_the_trait_joins_nothing() {
     let root = tmpdir("own");
     let reps = world(&root);
     pkg(&root, "fac", &["fac_core"], "pub mod de {\n pub trait Visitor { fn visit(&self); }\n}\n");
-    let app = pkg(&root, "app", &["fac", "fac_core", "prod"], CONSUMER);
-    lock(&app, &["app", "fac", "fac_core", "prod"]);
+    let app = pkg(&root, "app", &["fac", "fac_core", "prod", "prodf"], CONSUMER);
+    lock(&app, &["app", "fac", "fac_core", "prod", "prodf"]);
     let (rows, _) = scan(&app, Some(&reps), None, &[]);
     assert!(!has(&rows, "e_impl_join", "Fs"), "joined a facade's OWN same-name trait: {:?}", rows.get("e_impl_join"));
     assert!(!has(&rows, "e_call_join", "Env"), "a call of the facade's OWN trait joined the owner's union: {:?}", rows.get("e_call_join"));
@@ -227,4 +239,30 @@ fn a_producer_keys_its_own_implementors_under_the_renamed_extern_crates_target()
     assert!(!hashes_off.iter().any(|h| h == "fac_core#de::Error::invalid"), "R1711C off still keyed the union: {hashes_off:?}");
     assert!(!off.get("cfgd::drive").is_some_and(|r| r.2.iter().any(|k| k == "fac_core#de::Go::go")),
         "R1711C off still keyed the inactive-feature bound: {:?}", off.get("cfgd::drive"));
+}
+
+#[test]
+fn a_member_referenced_with_a_projection_self_is_keyed() {
+    // R1711 (c), the literal shape: `.map_err(dep::de::Error::invalid)` in `fn f<D: Deser>(..) -> Result<_, D::Error>`. No
+    // bound and no implementor names `Error`, so no key was minted (serde-untagged `seed::deserialize`); the caller chooses
+    // `D::Error`, and its `invalid` ran unjoined (EXECUTED in the lane with serde_core: `deny Fs` 0 on 0.41.3 and main).
+    let root = tmpdir("proj");
+    pkg(&root, "fac_core", &[], "pub mod de {\n pub trait Error { fn invalid(m: u8) -> Self; }\n pub trait Deser { type Error: Error; }\n}\n");
+    let p = pkg(
+        &root,
+        "pfree",
+        &["fac_core"],
+        "pub fn free<D: fac_core::de::Deser>(_d: D) -> Result<(), D::Error> { Err(1u8).map_err(fac_core::de::Error::invalid) }\n\
+         pub fn qself<D>(_d: D) -> Result<(), <D as fac_core::de::Deser>::Error> where D: fac_core::de::Deser { Err(1u8).map_err(fac_core::de::Error::invalid) }\n\
+         pub fn ctl(x: u8) -> u8 { x }\n",
+    );
+    let key = "fac_core#de::Error::invalid";
+    let (on, _) = scan(&p, None, None, &[]);
+    for f in ["free", "qself"] {
+        assert!(on.get(f).is_some_and(|r| r.2.iter().any(|k| k == key)), "`{f}` minted no key for a projection Self: {:?}", on.get(f));
+    }
+    let (off, _) = scan(&p, None, None, &[("CANDOR_R1711C_OFF", "1")]);
+    for f in ["free", "qself"] {
+        assert!(!off.get(f).is_some_and(|r| r.2.iter().any(|k| k == key)), "R1711C off still keyed `{f}`: {:?}", off.get(f));
+    }
 }

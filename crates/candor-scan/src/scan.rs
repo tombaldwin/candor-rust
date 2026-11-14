@@ -4171,6 +4171,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     type R1715Keys = Vec<(String, Vec<String>)>; // (owner key, packages read to reach it)
     let mut r1715_call_cache: HashMap<(String, String), R1715Keys> = HashMap::new();
     let mut r1715_blind_cache: HashMap<String, bool> = HashMap::new();
+    let mut r1715_rev_cache: HashMap<String, R1715Keys> = HashMap::new();
     // …and every ABSTRACTION MEMBER a chained report dispatches on, by its 2-segment tail (`Deserialize::deserialize` of
     // `serde_core#de::Deserialize::deserialize`) -> the owners it is dispatched under. A dispatched member is a trait's
     // (obligation 1 keys only those), so an inherent `Type::m` another package merely ADDS never qualifies.
@@ -6556,13 +6557,44 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                         let direct_hit = merged.foreign_impls.get(&ukey)
                             .or_else(|| foreign_impls_by_tail2.get(&ukey_t2));
+                        // R1715 — …and the other direction: a producer that keyed the member under the FACADE (`serde#de::Error::
+                        // custom`, written `serde::de::Error::custom` in that producer, or any pre-R1710 serde_json report) and
+                        // this crate implementing it under the owner (`impl serde_core::de::Error`). The producer's key is resolved
+                        // through the facade's lock-pinned re-exports and the owner's tail asked of this crate's index.
+                        let rev_hit: Vec<&Vec<String>> = if ukey_owner != crate_name
+                            && deps.contains(ukey_owner)
+                            && !candor_report::env::switch("CANDOR_R1715_OFF")
+                        {
+                            let rk = r1715_rev_cache.entry(ukey.clone()).or_insert_with(|| {
+                                let Some((tp, meth)) = ukey_member.rsplit_once("::") else { return Vec::new() };
+                                let real = dep_renames.get(ukey_owner).cloned().unwrap_or_else(|| ukey_owner.to_string());
+                                r1578_sigs.borrow_mut().facade_owners(dir, ukey_owner, &real, tp).into_iter()
+                                    .filter_map(|(o, rest, via)| tail2(&format!("{rest}::{meth}")).map(|t2| (format!("{o}#{t2}"), via)))
+                                    .collect()
+                            });
+                            let mut v = Vec::new();
+                            if crate::lang::reach_debug() {
+                                eprintln!("R1715REV\t{}\t{ukey}\t{:?}", f.qual, rk); // §E1 REACH COUNTER
+                            }
+                            for (k, via) in rk.iter() {
+                                if let Some(q) = foreign_impls_by_tail2.get(k) {
+                                    v.push(q);
+                                    for a in via {
+                                        r1578_sigs.borrow_mut().note_typed(a);
+                                    }
+                                }
+                            }
+                            v
+                        } else {
+                            Vec::new()
+                        };
                         // R1715 — no facade answered, and this crate implements a member of that very tail under a DEPENDENCY
                         // whose source could not be read (`facade_blind`): that implementor may be the owner's trait through a
                         // re-export this scan cannot see, so the body that runs may be here and unjoined — whether or not
                         // another implementor answered the key exactly. HEDGE at the join site, with §4's dispatch reason for
                         // the member. A source that CAN be read and does not re-export it proves the two traits distinct, and
                         // nothing is added.
-                        if facade_hit.is_none() && !candor_report::env::switch("CANDOR_R1715_OFF") {
+                        if facade_hit.is_none() && rev_hit.is_empty() && !candor_report::env::switch("CANDOR_R1715_OFF") {
                             let tl = ukey_member.rsplit("::").take(2).collect::<Vec<_>>();
                             if tl.len() == 2 {
                                 let t2l = format!("{}::{}", tl[1], tl[0]);
@@ -6575,8 +6607,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 }
                             }
                         }
-                        if direct_hit.is_some() || facade_hit.is_some() {
-                            let impl_quals = direct_hit.into_iter().flatten().chain(facade_hit.into_iter().flat_map(|f| f.0.iter()));
+                        if direct_hit.is_some() || facade_hit.is_some() || !rev_hit.is_empty() {
+                            let impl_quals = direct_hit.into_iter().flatten()
+                                .chain(facade_hit.into_iter().flat_map(|f| f.0.iter()))
+                                .chain(rev_hit.iter().flat_map(|q| q.iter()));
                             answered = true;
                             for cand in impl_quals {
                                 if let Some(ts) = by_tail2.get(cand) {

@@ -311,6 +311,80 @@ pub(crate) fn bound_trait_leaves(generics: &syn::Generics, out: &mut std::collec
     }
 }
 
+/// SOUNDNESS R1711 (c) — the associated-type names a signature PROJECTS from a trait-bounded generic of the fn or its impl
+/// (`D::Error`, `<D as Tr>::Error`), added to the `bound_trait_leaves` predicate: a path reference `dep::de::Error::custom`
+/// in such a body names the member of the trait bounding that projection (serde's `D::Error: de::Error`), whose `Self` the
+/// caller chooses. A predicate only — it can mint a key, never an edge or an effect; where the name is not in fact a trait
+/// (an inherent `dep::Output::new` beside `T::Output`) the key is one nothing joins. `CANDOR_R1711C_OFF=1` disables it.
+pub(crate) fn projection_assoc_leaves(
+    sig: &syn::Signature,
+    impl_generics: Option<&syn::Generics>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use syn::visit::Visit;
+    if candor_report::env::switch("CANDOR_R1711C_OFF") {
+        return;
+    }
+    let mut bounded: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for g in std::iter::once(&sig.generics).chain(impl_generics) {
+        for p in &g.params {
+            if let syn::GenericParam::Type(tp) = p {
+                if tp.bounds.iter().any(|b| matches!(b, syn::TypeParamBound::Trait(_))) {
+                    bounded.insert(tp.ident.to_string());
+                }
+            }
+        }
+        if let Some(w) = &g.where_clause {
+            for pred in &w.predicates {
+                if let syn::WherePredicate::Type(pt) = pred {
+                    if let syn::Type::Path(tp) = &pt.bounded_ty {
+                        if let Some(id) = tp.path.get_ident() {
+                            bounded.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if bounded.is_empty() {
+        return;
+    }
+    struct V<'a> {
+        bounded: &'a std::collections::HashSet<String>,
+        out: &'a mut std::collections::HashSet<String>,
+    }
+    impl<'ast> Visit<'ast> for V<'_> {
+        fn visit_type_path(&mut self, tp: &'ast syn::TypePath) {
+            let segs = &tp.path.segments;
+            match &tp.qself {
+                Some(q) => {
+                    if let syn::Type::Path(inner) = &*q.ty {
+                        if inner.path.get_ident().is_some_and(|i| self.bounded.contains(&i.to_string())) {
+                            if let Some(last) = segs.last() {
+                                self.out.insert(last.ident.to_string());
+                            }
+                        }
+                    }
+                }
+                None if segs.len() == 2 && self.bounded.contains(&segs[0].ident.to_string()) => {
+                    self.out.insert(segs[1].ident.to_string());
+                }
+                None => {}
+            }
+            syn::visit::visit_type_path(self, tp);
+        }
+    }
+    let mut v = V { bounded: &bounded, out };
+    for arg in &sig.inputs {
+        if let syn::FnArg::Typed(pt) = arg {
+            v.visit_type(&pt.ty);
+        }
+    }
+    if let syn::ReturnType::Type(_, t) = &sig.output {
+        v.visit_type(t);
+    }
+}
+
 pub(crate) fn sig_trait_quals(sig: &syn::Signature) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for arg in &sig.inputs {
