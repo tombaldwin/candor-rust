@@ -2320,10 +2320,17 @@ impl NsIndex {
 
     /// What `x`, NOT bound explicitly in `m`, denotes through `m`'s globs: crate-rooted local arms or external paths.
     /// `None`: no single answer (or `m` has no globs). `table` answers a source module's explicit re-export of `x`.
-    fn through_globs(&self, m: &str, x: &str, table: &HashMap<String, String>, caller: Option<&str>) -> Option<Vec<String>> {
+    fn through_globs(
+        &self,
+        m: &str,
+        x: &str,
+        table: &HashMap<String, String>,
+        caller: Option<&str>,
+        ext_ok: bool,
+    ) -> Option<Vec<String>> {
         let mut cands: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-        self.collect_globs(m, x, table, caller, &mut visited, &mut cands).ok()?;
+        self.collect_globs(m, x, table, (caller, ext_ok), &mut visited, &mut cands).ok()?;
         (cands.len() == 1).then(|| cands.into_iter().collect())
     }
 
@@ -2337,7 +2344,7 @@ impl NsIndex {
         m: &str,
         x: &str,
         table: &HashMap<String, String>,
-        requester: Option<&str>,
+        (requester, ext_ok): (Option<&str>, bool),
         visited: &mut std::collections::HashSet<String>,
         cands: &mut std::collections::BTreeSet<String>,
     ) -> Result<(), ()> {
@@ -2365,7 +2372,7 @@ impl NsIndex {
                         return Err(()); // `s` may bind `x` by something this index cannot name
                     }
                     if self.has_globs(s) {
-                        self.collect_globs(s, x, table, Some(m), visited, cands)?;
+                        self.collect_globs(s, x, table, (Some(m), ext_ok), visited, cands)?;
                     }
                 }
             }
@@ -2374,9 +2381,16 @@ impl NsIndex {
         match self.ext_globs.get(m).map(Vec::as_slice).filter(|_| ext_visible) {
             None | Some([]) => {}
             // an external glob answers only where no LOCAL glob exists and nothing in `m` itself may bind `x`
-            Some([t]) if placed.is_empty() && !self.opaque.contains(m) => {
+            // SOUNDNESS R1746 — an external glob cannot be enumerated (its source is not read here), so it answers `x` only
+            // when the QUESTION is evidence that `m` binds `x` at all: a path the crate WROTE through `m` (`use crate::m::x`,
+            // `crate::m::x::f()`, `m::x` from where `m` is a module), which rustc resolves in `m` alone. A bare name looked up
+            // through a glob (`Some`, `usize`, a local, an extern crate in the prelude) is no such evidence: the first cut
+            // answered `v_frame::plane::<name>` for 64,726 such names in rav1e (Fable review). The four rav1e `deblock` rows that
+            // lost `invisible:[rayon]` were NOT this guess's doing (they stay lost with it restricted): see R1742 in the collector.
+            Some([t]) if ext_ok && placed.is_empty() && !self.opaque.contains(m) => {
                 cands.insert(format!("{t}::{x}"));
             }
+            Some(_) if !ext_ok => return Err(()),
             // beside local globs: a local answer is rustc's only compiling reading (two globs supplying `x` is E0659);
             // no local answer means the external glob may be it, which this index cannot enumerate
             Some(_) if !placed.is_empty() && cands.len() > before => {}
@@ -2408,12 +2422,18 @@ impl NsIndex {
     }
 
     /// `resolve` against the INSTALLED table (Pass B), memoised: `expand` asks the same keys many times.
-    pub(crate) fn resolve_memo(&self, q: &str, table: &HashMap<String, String>, caller: Option<&str>) -> Option<Vec<String>> {
-        let mk = format!("{}\u{1}{q}", caller.unwrap_or("\u{2}"));
+    pub(crate) fn resolve_memo(
+        &self,
+        q: &str,
+        table: &HashMap<String, String>,
+        caller: Option<&str>,
+        ext_ok: bool,
+    ) -> Option<Vec<String>> {
+        let mk = format!("{}\u{1}{q}\u{1}{ext_ok}", caller.unwrap_or("\u{2}"));
         if let Some(v) = self.memo.lock().ok().and_then(|m| m.get(&mk).cloned()) {
             return v;
         }
-        let v = self.resolve(q, table, caller);
+        let v = self.resolve(q, table, caller, ext_ok);
         if let Ok(mut m) = self.memo.lock() {
             m.insert(mk, v.clone());
         }
@@ -2423,7 +2443,13 @@ impl NsIndex {
     /// Resolve a crate-rooted path (`q` without `crate::`) one module at a time: each segment that is not a known module
     /// is looked up in the module before it — explicit first, then its globs. Returns the resolved arms (crate-rooted or
     /// external), or `None` when no segment moved (or a lookup was undetermined).
-    pub(crate) fn resolve(&self, q: &str, table: &HashMap<String, String>, caller: Option<&str>) -> Option<Vec<String>> {
+    pub(crate) fn resolve(
+        &self,
+        q: &str,
+        table: &HashMap<String, String>,
+        caller: Option<&str>,
+        ext_ok: bool,
+    ) -> Option<Vec<String>> {
         let segs: Vec<&str> = q.split("::").collect();
         let mut cur = String::new();
         for (i, x) in segs.iter().enumerate() {
@@ -2453,7 +2479,7 @@ impl NsIndex {
             if !rest.is_empty() {
                 return None;
             }
-            return self.through_globs(&cur, x, table, caller);
+            return self.through_globs(&cur, x, table, caller, ext_ok);
         }
         None
     }
@@ -2629,7 +2655,7 @@ pub(crate) fn build_reexport_names(
                 let mut refuse = false;
                 for a in arms {
                     let caller = k.rsplit_once("::").map_or("", |(m, _)| m);
-                    let r = a.strip_prefix("crate::").and_then(|q| ns.resolve(q, &snapshot, Some(caller)));
+                    let r = a.strip_prefix("crate::").and_then(|q| ns.resolve(q, &snapshot, Some(caller), true));
                     match r {
                         Some(v) => {
                             moved = true;

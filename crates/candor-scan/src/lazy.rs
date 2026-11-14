@@ -38,6 +38,8 @@ pub(crate) const HOP_GUESS_PREFIX: &str = "\u{1}hop:";
 /// SOUNDNESS R1665 — the prefix of an `untyped_methods` entry that is a method leaf called on a DEPENDENCY wrapper field whose written
 /// argument is a crate-local type declaring it; the judge counts an `Unknown`-only candidate for it, as for `HOP_GUESS_PREFIX`.
 pub(crate) const WRAP_PREFIX: &str = "\u{1}wrap:";
+/// SOUNDNESS R1747 — an `untyped_methods` site whose name std has, called at an arity no std method of that name takes.
+pub(crate) const NONSTD_ARITY_PREFIX: &str = "\u{1}nsa:";
 /// SOUNDNESS R1692 — the prefix of an `untyped_methods` entry `<roots>\u{1}<leaf>`: a method called on a receiver whose only
 /// typing was an `<untyped>` marker with these (comma-joined) roots, which collection cannot tell from a dependency. `scan.rs`
 /// judges it as an untyped receiver of `<leaf>` only when no root is a declared dependency (the marker is then inert).

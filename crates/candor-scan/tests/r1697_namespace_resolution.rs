@@ -50,7 +50,7 @@ fn lock(dir: &Path, names: &[&str]) {
     write(&dir.join("Cargo.lock"), &format!("version = 4\n\n{body}"));
 }
 
-const SWITCHES: [&str; 7] = [
+const SWITCHES: [&str; 10] = [
     "CANDOR_DEPS",
     "CANDOR_CONFIG",
     "CANDOR_POLICY",
@@ -58,6 +58,9 @@ const SWITCHES: [&str; 7] = [
     "CANDOR_R1736_OFF",
     "CANDOR_R1743_OFF",
     "CANDOR_R1657S2_OFF",
+    "CANDOR_R1742_OFF",
+    "CANDOR_R1746_OFF",
+    "CANDOR_R1747_OFF",
 ];
 
 /// Write `dir`'s report to `out` (a `CANDOR_DEPS` prefix), chained over `deps`.
@@ -313,4 +316,114 @@ fn a_name_bound_twice_in_one_module_keeps_the_declaration() {
         )],
     );
     assert!(infers(&d, "user::e_twin_zq", Some(&reps), &[]).iter().any(|e| e == "Env"), "the declared fn's Env was lost");
+}
+
+/// stderr of a scan with `env` set (for the instrumented-reach tests).
+fn stderr_of(dir: &Path, env: &[(&str, &str)]) -> String {
+    let mut cmd = Command::new(bin());
+    cmd.arg(dir.to_string_lossy().as_ref()).arg("--json");
+    for v in SWITCHES {
+        cmd.env_remove(v);
+    }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    String::from_utf8_lossy(&cmd.output().expect("run candor-scan").stderr).into_owned()
+}
+
+#[test]
+fn a_bare_name_is_never_answered_by_an_unenumerable_dependency_glob() {
+    // SOUNDNESS R1746 — `frame` re-exports a dependency glob it cannot enumerate. A BARE name looked up through `use
+    // crate::frame::*` (`Some`, `usize`, a local, an extern crate) is no evidence `frame` binds it; the first cut answered
+    // `dgdep::<name>` for every such name (64,726 times in rav1e). A path the crate WROTE through `frame` still is evidence.
+    let root = tmpdir("extglob");
+    let reps = dep_world(&root);
+    let d = pkg(
+        &root,
+        "app_extglob",
+        &["dgdep"],
+        &[(
+            "lib.rs",
+            "pub mod frame { pub use dgdep::*; }\n\
+             pub mod user {\n use crate::frame::*;\n pub fn p_bare_zq(t: &str) -> Option<usize> { let n = t.len(); Some(n) }\n\
+              pub fn e_written_zq(t: &str) { crate::frame::go(t) }\n}\n",
+        )],
+    );
+    let on = stderr_of(&d, &[("CANDOR_R1697_INSTR", "1")]);
+    assert!(!on.lines().any(|l| l.starts_with("R1697NS\tframe::Some")), "a bare `Some` was sent to the dependency glob:\n{on}");
+    let off = stderr_of(&d, &[("CANDOR_R1697_INSTR", "1"), ("CANDOR_R1746_OFF", "1")]);
+    assert!(off.lines().any(|l| l.starts_with("R1697NS\tframe::Some")), "calibration: the first cut's guess must show:\n{off}");
+    assert_eq!(deny_fs(&d, "user::e_written_zq", Some(&reps), &[]), 1, "a written path through the glob module still resolves");
+}
+
+#[test]
+fn a_dependency_trait_method_on_a_range_indexed_receiver_is_disclosed() {
+    // SOUNDNESS R1742 — rav1e `deblock_filter_frame`: `tile.planes[..planes].par_iter_mut()` with `use rayon::iter::*`. A
+    // range index is a slice; std has no `par_iter_mut`, so a dependency trait in scope answers it. Once R1697 typed `TileMut`
+    // the receiver stopped being untyped and the call read PURE; it is disclosed `invisible:[sdep]` now.
+    let root = tmpdir("rangeidx");
+    let dep = pkg(
+        &root,
+        "sdep",
+        &[],
+        &[("lib.rs", "pub mod iter {\n pub trait ParMut { fn par_iter_mut(&mut self) -> usize; }\n\
+             impl<T> ParMut for [T] { fn par_iter_mut(&mut self) -> usize { std::thread::spawn(|| ()).join().unwrap(); self.len() } }\n}\n")],
+    );
+    let _ = dep;
+    let d = pkg(
+        &root,
+        "app_rangeidx",
+        &["sdep"],
+        &[
+            ("lib.rs", "pub mod tiling;\npub mod deblock {\n use crate::tiling::*;\n use sdep::iter::*;\n\
+              pub fn typed_zq(tile: &mut TileMut, n: usize) -> usize { tile.planes[..n].par_iter_mut() }\n}\n"),
+            ("tiling/mod.rs", "mod tile;\npub use tile::*;\n"),
+            ("tiling/tile.rs", "pub struct TileMut { pub planes: [Vec<u8>; 3] }\n"),
+        ],
+    );
+    let inv = |env: &[(&str, &str)]| -> Vec<String> {
+        let mut cmd = Command::new(bin());
+        cmd.arg(d.to_string_lossy().as_ref()).arg("--json");
+        for v in SWITCHES {
+            cmd.env_remove(v);
+        }
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let v: serde_json::Value = serde_json::from_slice(&cmd.output().unwrap().stdout).unwrap();
+        v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == "deblock::typed_zq")
+            .and_then(|r| r["invisible"].as_array()).map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    assert!(inv(&[]).iter().any(|c| c == "sdep"), "the dependency trait method went undisclosed");
+    assert!(!inv(&[("CANDOR_R1742_OFF", "1")]).iter().any(|c| c == "sdep"), "the fixture must reach R1742");
+}
+
+#[test]
+fn a_dyn_local_trait_call_back_through_a_std_named_method_is_disclosed() {
+    // SOUNDNESS R1747 — reqwest `retry::classify::Classifier::classify`: `Self::Dyn(c) => c.classify(req_rep)` over
+    // `Arc<dyn Classify>`, whose only implementor runs the CALLER's closure. A same-leaf `Dyn` variant elsewhere withdraws
+    // the payload typing, and the untyped floor skipped it because std has a method named `classify` (`f64::classify`,
+    // no argument). At one argument it cannot be std's; the floor now discloses the callback implementor.
+    let root = tmpdir("cbstd");
+    let d = pkg(
+        &root,
+        "app_cbstd",
+        &[],
+        &[(
+            "lib.rs",
+            "pub struct Policy { classifier: classify::Classifier }\n\
+             impl Policy { pub fn retry_zq(&self) -> bool { self.classifier.classify(1) } }\n\
+             mod classify {\n pub trait Classify: Send + Sync + 'static { fn classify(&self, n: u8) -> bool; }\n\
+              pub struct ClassifyFn<F>(pub(super) F);\n\
+              impl<F> Classify for ClassifyFn<F> where F: Fn(u8) -> bool + Send + Sync + 'static { fn classify(&self, n: u8) -> bool { (self.0)(n) } }\n\
+              pub(super) enum Classifier { Never, Dyn(std::sync::Arc<dyn Classify>) }\n\
+              impl Classifier { pub(super) fn classify(&self, n: u8) -> bool { match self { Self::Never => false, Self::Dyn(c) => c.classify(n) } } }\n}\n\
+             mod scope {\n pub trait Scope { fn applies_to(&self) -> bool; }\n\
+              pub(super) enum Scoped { Unscoped, Dyn(std::sync::Arc<dyn Scope>) }\n\
+              impl Scoped { pub(super) fn applies_to(&self) -> bool { match self { Self::Unscoped => true, Self::Dyn(s) => s.applies_to() } } }\n}\n",
+        )],
+    );
+    assert!(infers(&d, "Policy::retry_zq", None, &[]).iter().any(|e| e == "Unknown"), "the caller-chosen callback went undisclosed");
+    assert!(!infers(&d, "Policy::retry_zq", None, &[("CANDOR_R1747_OFF", "1")]).iter().any(|e| e == "Unknown"), "must reach R1747");
 }

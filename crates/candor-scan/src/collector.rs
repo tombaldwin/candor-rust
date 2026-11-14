@@ -3307,12 +3307,28 @@ impl<'a> CallCollector<'a> {
             }
             _ => false,
         };
-        let Some(t) = self.resolve_recv_type(&node.receiver).or_else(|| std_iter(self).then(|| "core::iter::Iterator".to_string()))
+        // SOUNDNESS R1742 — a RANGE index (`v[..]`, `tile.planes[..n]`, `s[a..b]`) is a slice (or `str`) whatever its base:
+        // `IndexMut<Range*>` on std containers, arrays and slices yields `[T]`. Untyped, the R1136 question was never asked,
+        // and `tile.planes[..planes].par_iter_mut()` (rav1e `deblock`, rayon's trait over a glob) read PURE once the
+        // receiver's base typed (R1697 resolved `TileMut`); a slice PARAMETER (`v: &mut [u8]`) likewise. Disclosure only.
+        let range_index = |e: &syn::Expr| match peel_value(e) {
+            syn::Expr::Index(ix) => matches!(peel_value(&ix.index), syn::Expr::Range(_)),
+            _ => false,
+        };
+        let slice_like = !candor_report::env::switch("CANDOR_R1742_OFF") && range_index(&node.receiver);
+        let Some(t) = self
+            .resolve_recv_type(&node.receiver)
+            .or_else(|| std_iter(self).then(|| "core::iter::Iterator".to_string()))
+            .or_else(|| slice_like.then(|| "core::slice".to_string()))
         else {
             return;
         };
         let tl = t.rsplit("::").next().unwrap_or(&t).to_string();
-        let std_typed = if t.contains("::") {
+        let std_typed = if (t.starts_with('[') || t.starts_with("&[") || t.starts_with("&mut ["))
+            && !candor_report::env::switch("CANDOR_R1742_OFF")
+        {
+            true
+        } else if t.contains("::") {
             matches!(t.split("::").next(), Some("std" | "core" | "alloc"))
         } else {
             crate::model::PRIMITIVE_LEAVES.contains(&t.as_str())
@@ -3448,7 +3464,17 @@ impl<'a> CallCollector<'a> {
             }
             self.untyped_methods.insert(format!("{}{leaf}", crate::lazy::WRAP_PREFIX));
         } else if inert_roots.is_empty() {
-            self.untyped_methods.insert(leaf.to_string());
+            // SOUNDNESS R1747 — a name std HAS, called at an ARITY no std method of that name takes (`c.classify(req_rep)`:
+            // `f64::classify` takes none), cannot be the std method; the site is marked so the floor counts a crate
+            // candidate that is hedged all the way down (reqwest's `ClassifyFn::classify` runs the caller's closure).
+            if crate::std_methods::is_std_method_name(leaf)
+                && !crate::std_methods::is_std_method(leaf, node.args.len())
+                && !candor_report::env::switch("CANDOR_R1747_OFF")
+            {
+                self.untyped_methods.insert(format!("{}{leaf}", crate::lazy::NONSTD_ARITY_PREFIX));
+            } else {
+                self.untyped_methods.insert(leaf.to_string());
+            }
         } else {
             self.untyped_methods.insert(format!("{}{}\u{1}{leaf}", crate::lazy::INERT_MARK_PREFIX, inert_roots.join(",")));
         }

@@ -2998,7 +2998,10 @@ fn qualified_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) 
             return Some(alias_join(full, &segs[n..]));
         }
         if rooted {
-            if let Some(full) = reexport_lookup_at(&segs[..n].join("::"), n < segs.len()) {
+            let prev = NS_WRITTEN_PATH.with(|c| c.replace(true));
+            let hit = reexport_lookup_at(&segs[..n].join("::"), n < segs.len());
+            NS_WRITTEN_PATH.with(|c| c.set(prev));
+            if let Some(full) = hit {
                 if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
                     eprintln!("R1657S2PATH\t{}\t{}", segs.join("::"), full.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
                 }
@@ -3046,6 +3049,15 @@ thread_local! {
     /// SOUNDNESS R1697 — the module whose path `expand_with` is resolving (its `MODPATH_KEY`), for the namespace's privacy
     /// rule: a private `use` binds a name for its module and that module's descendants only.
     pub(crate) static NS_CALLER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// SOUNDNESS R1746 — set only while `qualified_alias` asks the table about a path the crate WROTE through a module (the
+    /// evidence an external glob of that module supplies the name); every other reader gets no external-glob answer.
+    pub(crate) static NS_WRITTEN_PATH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// SOUNDNESS R1746 — attribution only: answer a bare name through an external glob as the first cut did.
+pub(crate) fn r1746_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1746_OFF"))
 }
 
 /// SOUNDNESS R1697/R1702 — the kill switch for module-namespace resolution (glob chains, external re-bindings).
@@ -3068,7 +3080,8 @@ pub(crate) fn ns_lookup(key: &str) -> Option<String> {
     let ns = ns.as_ref()?;
     let table = reexport_names_cell().read().ok()?;
     let caller = NS_CALLER.with(|c| c.borrow().clone());
-    let v = ns.resolve_memo(key, &table, caller.as_deref())?;
+    let ext_ok = NS_WRITTEN_PATH.with(|c| c.get()) || r1746_off();
+    let v = ns.resolve_memo(key, &table, caller.as_deref(), ext_ok)?;
     let own = format!("crate::{key}");
     if v.iter().all(|a| *a == own) {
         return None;

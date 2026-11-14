@@ -3829,6 +3829,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    // SOUNDNESS R1747 — (caller, leaf) sites whose std-named method was called at a non-std arity (see the collector).
+    let mut r1747_nonstd: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let mut untyped_contested: Vec<(String, String, Vec<String>, bool)> = {
         let mut out = Vec::new();
         for f in &fns {
@@ -3837,6 +3839,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let (leaf, admit) = match m.strip_prefix(crate::lazy::WRAP_PREFIX) {
                     Some(l) => (l, true),
                     None => (m.as_str(), false),
+                };
+                let leaf = match leaf.strip_prefix(crate::lazy::NONSTD_ARITY_PREFIX) {
+                    Some(l) => {
+                        r1747_nonstd.insert((f.qual.clone(), l.to_string()));
+                        l
+                    }
+                    None => leaf,
                 };
                 // SOUNDNESS R1692 — a site whose only typing was an `<untyped>` marker: judged as untyped exactly when the
                 // marker is inert, i.e. no root is a declared dependency (the call loop's and `r1578_resolve`'s conjunct). A
@@ -8714,7 +8723,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let unknown_only: Vec<&String> =
                     cands.iter().filter(|u| inferred.get(*u).is_some_and(|e| !e.is_empty() && e.iter().all(|x| *x == "Unknown"))).collect();
                 if !unknown_only.is_empty() && !*admit_unknown {
-                    let std_name = crate::std_methods::is_std_method_name(leaf);
+                    let std_name = crate::std_methods::is_std_method_name(leaf)
+                        && !r1747_nonstd.contains(&(caller.clone(), leaf.clone()));
                     let cb = unknown_only.iter().any(|u| unknown_why.get(*u).is_some_and(|w| w.iter().any(|x| x.starts_with("callback"))));
                     if candor_report::env::trace("CANDOR_R1666_INSTR") && !direct.get(caller).is_some_and(|d| d.contains("Unknown")) {
                         eprintln!("R1666ALL\t{caller}\t{leaf}"); // §E1 REACH COUNTER: every Unknown-only site (the declined form)
