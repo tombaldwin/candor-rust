@@ -18519,7 +18519,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev189/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev190/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -28387,9 +28387,13 @@ pub fn go_trb() { <Q2 as hwdef::Gt<u16>>::m(&Q2) }\n\
 ";
         let toml = "\n[dependencies]\nhwdef = \"1\"\nodep = \"1\"\n";
         let v = scan_crate_chained("r1754hc", "consumer", toml, src, &idx);
+        // MEASURED: with the variable set while `an_older_schema_cache_entry_is_discarded_..` ran, that test found no cache file.
+        // The window in which it is set is serialised against every `incremental_scan` test by the lock they take.
+        let lock = abort_injection_lock();
         std::env::set_var("CANDOR_R1759_ON", "1");
         let von = scan_crate_chained("r1754hon", "consumer", toml, src, &idx);
         std::env::remove_var("CANDOR_R1759_ON");
+        drop(lock);
         let _ = std::fs::remove_dir_all(&d);
         assert!(effects_of(&v, "go_method").contains(&"Fs".to_string()), "the method spelling (premise):\n{v:#}");
         assert!(effects_of(&v, "go_path").contains(&"Fs".to_string()),
