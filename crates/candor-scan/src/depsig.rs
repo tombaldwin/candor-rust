@@ -2862,60 +2862,16 @@ impl DepSigs {
         None
     }
 
-    /// SOUNDNESS R1739 — every PATH package the consumer's tree can build (the transitive closure of `path =` dependencies of
-    /// every kind from the consumer's and its workspace root's manifests), by real name; and whether either manifest carries a
-    /// `[patch]` or `[replace]` table. Read only from the tree.
-    fn path_closure(&mut self, dir: &str) -> (std::collections::HashSet<String>, bool) {
-        let norm = |s: &str| s.replace('-', "_");
-        let root = crate::deps::find_workspace_root(Path::new(dir));
-        let mut todo: Vec<std::path::PathBuf> = vec![Path::new(dir).to_path_buf()];
-        todo.extend(root);
-        let tops: std::collections::HashSet<std::path::PathBuf> = todo.iter().filter_map(|p| p.canonicalize().ok()).collect();
-        let mut patched = false;
-        let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
-        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        while let Some(m) = todo.pop() {
-            let Ok(canon) = m.canonicalize() else { continue };
-            let top = tops.contains(&canon);
-            if !seen.insert(canon) || seen.len() > 512 {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(m.join("Cargo.toml")) else { continue };
-            let Ok(doc) = text.parse::<toml::Table>() else { continue };
-            if top && (doc.contains_key("patch") || doc.contains_key("replace")) {
-                patched = true;
-            }
-            if let Some(n) = doc.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str()) {
-                if !top {
-                    names.insert(norm(n));
-                }
-            }
-            let mut tables = crate::deps::manifest_dependency_tables(&doc);
-            for k in ["dev-dependencies", "build-dependencies"] {
-                if let Some(t) = doc.get(k).and_then(toml::Value::as_table) {
-                    tables.push(t);
-                }
-            }
-            for table in tables {
-                for v in table.values() {
-                    if let Some(p) = v.as_table().and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
-                        todo.push(m.join(p));
-                    }
-                }
-            }
-        }
-        (names, patched)
-    }
-
     /// SOUNDNESS R1739 — are dependency `d`'s trait at `d_tp` and the dispatch owner `o`'s trait at `o_tp` provably TWO
-    /// traits, from the tree alone? `d`'s tree source (`tree_source`) must DECLARE the item at `d_tp`, with no `pub use` of
-    /// another crate at that path or any enclosing module and no glob there (so `d::d_tp` is `d`'s own item). Then either `o`'s
-    /// tree source declares its own item at `o_tp` the same way (two declarations are two items), or `d` is a PATH package and
-    /// `o` is not one anywhere in the tree's path closure, with no `[patch]`/`[replace]`: a crate that is not path-sourced
-    /// cannot depend on a path package, so `o` cannot re-export `d`'s trait, and `d`'s trait is its own declaration, not
-    /// `o`'s. Every source read for a proof is recorded in `dependencySources` (R1578). Any doubt: `false`, the join stands.
-    /// Only ever used to WITHDRAW a same-tail candidate; never to add one. `d` and `o` are compared as REAL package names, so a
-    /// `package =` rename is one package (Fable F1: `sc = { package = "serde_core" }` read as a second owner).
+    /// traits, from the tree alone? BOTH packages need a tree source (`tree_source`: lock-pinned, or a path dependency), and each
+    /// must DECLARE the item at its path, with no `pub use` of another crate at that path or any enclosing module and no glob
+    /// there: two declarations are two items, whichever way a re-export could have run. Nothing weaker: "the owner is not a path
+    /// package, so it cannot re-export a path package's trait" was tried and is false (Fable round 2, executed `gitcase/app_f`):
+    /// a `[patch]` in `.cargo/config.toml`, `$CARGO_HOME/config.toml`, `paths`, `--config` or `[source]` replacement unifies a
+    /// git or registry facade's dependency with the consumer's path crate, and none of those is in the tree. Every source read
+    /// for a proof is recorded in `dependencySources` (R1578). Any doubt: `false`, the join stands. Only ever used to WITHDRAW a
+    /// same-tail candidate; never to add one. `d` and `o` are compared as REAL package names, so a `package =` rename is one
+    /// package (Fable F1).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn distinct_in_tree(&mut self, dir: &str, d_alias: &str, d_real: &str, d_tp: &str, o_alias: &str, o_real: &str, o_tp: &str) -> bool {
         if d_real == o_real {
@@ -2925,20 +2881,11 @@ impl DepSigs {
         if !self.declares_own_at(&dsrc.dir, d_tp) {
             return false;
         }
-        let o_src = self.tree_source(dir, o_alias, o_real).filter(|s| self.declares_own_at(&s.dir, o_tp));
-        let proved = match &o_src {
-            Some(_) => true,
-            None => {
-                let (paths, patched) = self.path_closure(dir);
-                dsrc.origin == "path" && !patched && !paths.contains(o_real)
-            }
-        };
-        if proved {
-            for s in std::iter::once(dsrc).chain(o_src) {
-                self.consulted.entry(s.package.clone()).or_insert_with(|| s.clone()).typed += 1;
-            }
+        let Some(osrc) = self.tree_source(dir, o_alias, o_real).filter(|s| self.declares_own_at(&s.dir, o_tp)) else { return false };
+        for s in [dsrc, osrc] {
+            self.consulted.entry(s.package.clone()).or_insert_with(|| s.clone()).typed += 1;
         }
-        proved
+        true
     }
 
     /// SOUNDNESS R1748 — are `p1` and `p2` (two trait paths inside package `real`) two DIFFERENT items, per the package's TREE

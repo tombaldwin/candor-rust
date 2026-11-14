@@ -10867,34 +10867,6 @@
       ]
     },
     {
-      "fn": "depsig::DepSigs::path_closure",
-      "loc": "crates/candor-scan/src/depsig.rs:2868:5: 2868:87",
-      "inferred": [
-        "Fs"
-      ],
-      "direct": [
-        "Fs"
-      ],
-      "declared": [],
-      "undeclared": [
-        "Fs"
-      ],
-      "overdeclared": [],
-      "hash": "d3d0a9d1fa3f5fe3967a2f5656f0526d",
-      "fs": [
-        "read"
-      ],
-      "calls": [
-        "deps::find_workspace_root"
-      ],
-      "invisible": [
-        "toml"
-      ],
-      "incomplete": [
-        "Fs"
-      ]
-    },
-    {
       "fn": "depsig::DepSigs::ret_of",
       "loc": "crates/candor-scan/src/depsig.rs:2285:5: 2285:134",
       "inferred": [

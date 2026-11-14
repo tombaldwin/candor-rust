@@ -6418,9 +6418,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     // another owner's same-named member there would be a guess where nothing was lost.
                     // SOUNDNESS R1739 (the call side) — …and not another owner's entry when the TREE proves the two traits
                     // distinct (`DepSigs::distinct_in_tree`; pinned or path sources only, never an unpinned registry checkout): `otherkit::Visitor::visit_u64(
-                    // &Calm, 1)` over a lock-less `otherkit` that declares its own `Visitor` was unioned with serde_core's
+                    // &Calm, 1)` over an `otherkit` that declares its own `Visitor` was unioned with serde_core's
                     // `de::Visitor::visit_u64` entry and read `Unknown` (`dispatch:de::Visitor.visit_u64`) over a pure local
-                    // implementor (EXECUTED `t5_otherkit_ufcs`; 0.42.0 `[]`). Only removes; see `DepSigs::distinct_in_tree`.
+                    // implementor (EXECUTED `t5_otherkit_ufcs`; 0.42.0 `[]`); withdrawn only where serde_core's source is pinned
+                    // too. Only removes; see `DepSigs::distinct_in_tree`.
                     let dtp = rel.rsplit_once("::").map_or(rel, |x| x.0);
                     if *blind && !deps_idx.by_key.contains_key(&format!("{cr_real}#{t2}")) {
                         for o in r1715_tail_owners.get(&t2).into_iter().flatten().filter(|o| o.as_str() != cr_real) {
@@ -6695,12 +6696,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             if tl.len() == 2 {
                                 let t2l = format!("{}::{}", tl[1], tl[0]);
                                 // SOUNDNESS R1739 — not an implementor of a trait the TREE proves distinct from the dispatched one
-                                // (`DepSigs::distinct_in_tree`: the implementor's package is a path dependency, or lock-pinned,
-                                // and declares the trait itself; the dispatch owner's pinned source declares its own, or it is not
-                                // a path package and so cannot re-export a path package's trait). `impl otherkit::Visitor for
-                                // Other` (a file-deleting `visit_u64`, `otherkit` a path dependency) joined serde_json's
-                                // `serde_core#de::Visitor::visit_u64` dispatch by tail alone (EXECUTED `t2_otherkit_loud`). Never
-                                // from a registry checkout the lock does not pin (Fable F2/F3).
+                                // (`DepSigs::distinct_in_tree`: both packages' TREE sources — lock-pinned, or path dependencies —
+                                // declare their own trait at the paths in question). `impl otherkit::Visitor for
+                                // Other` (a file-deleting `visit_u64`) joined serde_json's `serde_core#de::Visitor::visit_u64`
+                                // dispatch by tail alone (EXECUTED `t2_otherkit_loud`); it is withdrawn only where serde_core's
+                                // source is pinned too, so lock-less that twin stays an over-charge (R1739 OPEN). Never from a
+                                // registry checkout the lock does not pin (Fable F2/F3), never from manifest inference (Fable
+                                // round 2 `gitcase/app_f`: a `.cargo/config.toml` patch).
                                 facade_blind.get(&t2l).map(|v| v.iter().filter(|(o, q, dtp)| {
                                     if o == ukey_owner {
                                         return false;

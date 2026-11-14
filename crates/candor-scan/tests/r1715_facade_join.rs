@@ -426,3 +426,25 @@ fn a_renamed_alias_is_never_a_second_owner() {
     let (rows, _) = scan(&app, Some(&reps), None, &[]);
     assert!(has(&rows, "e_alias", "Fs"), "a renamed alias of the dispatch owner lost its join: {:?}", rows.get("e_alias"));
 }
+
+#[test]
+fn a_config_patch_can_unify_a_non_path_owner_with_a_path_package() {
+    // Fable round 2, EXECUTED `gitcase/app_f`: `p` depends on a GIT facade `o` (`pub mod body { pub use d::Visitor; }`), and the
+    // consumer's `.cargo/config.toml` `[patch]` unifies git-`o`'s `d` with the consumer's PATH `d`. No Cargo.toml says `patch`, the
+    // build succeeds, and `p::drive(Loud)` runs `Loud`'s `d::Visitor::visit`. `o` has no tree source, so nothing proves `o#body::
+    // Visitor` distinct from `d::Visitor`: the lock-less tail join must keep `Loud` (a proof from "o is not a path package" deleted it).
+    let root = tmpdir("r1739git");
+    pkg(&root, "d", &[], "pub trait Visitor { fn visit(&self); }\n");
+    let p = root.join("p");
+    write(&p.join("Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\no = { git = \"file:///nonexistent/orepo\" }\n");
+    write(&p.join("src/lib.rs"), "pub fn drive<V: o::body::Visitor>(v: V) { v.visit() }\n");
+    let reps = root.join("reps");
+    std::fs::create_dir_all(&reps).unwrap();
+    scan(&p, None, Some(&reps.join("p")), &[]);
+    let app = pkg(&root, "app", &["d", "p"],
+        "pub struct Loud;\nimpl d::Visitor for Loud { fn visit(&self) { let _ = std::fs::remove_file(\"/nonexistent/r1739g\"); } }\n\
+         pub fn go_drive() { p::drive(Loud) }\n");
+    write(&app.join(".cargo/config.toml"), "[patch.\"file:///nonexistent/drepo\"]\nd = { path = \"../d\" }\n");
+    let (rows, _) = scan(&app, Some(&reps), None, &[]);
+    assert!(has(&rows, "go_drive", "Fs"), "a join a config-level patch makes genuine was withdrawn: {:?}", rows.get("go_drive"));
+}
