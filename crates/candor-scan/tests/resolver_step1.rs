@@ -303,3 +303,43 @@ fn cfg_arm_globs_are_a_union() {
     let off = scan_off(&d, "cfg");
     assert!(has(&off, "get_zq", "Env") && has(&off, "ty_zq", "Unknown"), "part `cfg` off: the legacy reading is unchanged here");
 }
+
+/// Fable's step-1 review §2: a `static` (or `const`) reached through a `#[cfg]` arm set is NOT unioned. `zi::PDB.pq()` is a
+/// member call on each arm's declared type, and where arm b's type gets `pq` from a trait's PROVIDED body the arm loop's
+/// tail match drops that arm (the same per-arm member resolution a type answer needs, step 4). A `mod` and a `fn` arm set
+/// still are. Read off the namespace's own reach counter, because the unit rows are the same either way: `static_prov_zq`
+/// is ABSENT on 0.42.0, main and this lane (a pre-existing residual, filed by the coordinator), and `static_zq` keeps the
+/// hedge it had.
+#[test]
+fn a_static_through_a_cfg_arm_set_is_not_unioned() {
+    let lib = "pub mod zi;\npub fn modarm_zq() -> u32 { zi::sys::f() }\npub fn static_zq() -> u32 { zi::DB.q() }\n\
+        pub fn fnarm_zq() -> u32 { zi::from_env() }\n";
+    let zi = "pub(crate) use self::inner::*;\n\
+        #[cfg(not(feature = \"zi\"))] #[path = \"a.rs\"] mod inner;\n\
+        #[cfg(feature = \"zi\")] #[path = \"b.rs\"] mod inner;\n";
+    let a = "pub mod sys { pub fn f() -> u32 { 0 } }\npub fn from_env() -> u32 { 0 }\n\
+        pub struct Database; impl Database { pub fn q(&self) -> u32 { 0 } }\npub static DB: Database = Database;\n";
+    let b = "pub mod sys { pub fn f() -> u32 { std::env::var(\"X\").map(|v| v.len() as u32).unwrap_or(0) } }\n\
+        pub fn from_env() -> u32 { std::env::var(\"T\").map(|v| v.len() as u32).unwrap_or(0) }\n\
+        pub struct Database; impl Database { pub fn q(&self) -> u32 { std::env::var(\"Y\").map(|v| v.len() as u32).unwrap_or(0) } }\n\
+        pub static DB: Database = Database;\n";
+    let d = fixture(
+        "statarm",
+        "[features]\nzi = []\n",
+        &[("src/lib.rs", lib), ("src/zi/mod.rs", zi), ("src/zi/a.rs", a), ("src/zi/b.rs", b)],
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_candor-scan"))
+        .arg(d.to_string_lossy().as_ref())
+        .arg("--json")
+        .env_remove("CANDOR_RESOLVER_STEP1_OFF")
+        .env("CANDOR_STEP1_INSTR", "1")
+        .output()
+        .expect("run candor-scan");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let armed = |n: &str| err.lines().any(|l| l.starts_with("STEP1ARMS\t") && l.split('\t').nth(1) == Some(n));
+    assert!(armed("zi::sys") && armed("zi::from_env"), "a mod / fn arm set is unioned:\n{err}");
+    assert!(!armed("zi::DB"), "a static arm set is not unioned (member resolution per arm is step 4):\n{err}");
+    let (on, v) = scan(&d);
+    assert!(has(&on, "modarm_zq", "Env") && has(&on, "fnarm_zq", "Env"), "{v:#}");
+    assert!(has(&on, "static_zq", "Unknown"), "control: the static keeps its disclosure\n{v:#}");
+}

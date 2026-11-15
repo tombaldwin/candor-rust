@@ -2269,7 +2269,8 @@ pub(crate) const NS_SEP: char = '\u{1}';
 pub(crate) const NS_TWIN_MARK: &str = "\u{1}ns-twin";
 pub(crate) const NS_EXT_GLOB_PRIV_MARK: &str = "\u{1}ns-ext-glob-priv";
 pub(crate) const NS_EXT_USE_PRIV_MARK: &str = "\u{1}ns-ext-use-priv";
-/// RESOLVER STEP 1 — the module's TYPE-namespace declarations (`struct`/`enum`/`union`/`type`/`trait`), `NS_SEP`-joined.
+/// RESOLVER STEP 1 — the names the module declares whose use through a cfg arm set is a MEMBER call resolved per arm: its
+/// TYPE-namespace declarations (`struct`/`enum`/`union`/`type`/`trait`) and its `static`/`const` items, `NS_SEP`-joined.
 pub(crate) const NS_TYPES_MARK: &str = "\u{1}ns-types";
 
 /// SOUNDNESS R1697/R1702 — ONE MODULE NAMESPACE PER MODULE, for the question every re-export route answers in its own slice:
@@ -3005,7 +3006,18 @@ fn collect_private_uses_in(
         let mut opaque = false;
         let mut type_names: Vec<String> = Vec::new();
         for it in items {
-            if matches!(it, syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Union(_) | syn::Item::Type(_) | syn::Item::Trait(_)) {
+            // A `static`/`const` counts too: `zi::DB.q()` through an arm set is a member call on the arm's declared TYPE, the same
+            // per-arm member resolution a type answer needs (Fable's `static_prov`: arm b's type gets `pq` from a provided body).
+            if matches!(
+                it,
+                syn::Item::Struct(_)
+                    | syn::Item::Enum(_)
+                    | syn::Item::Union(_)
+                    | syn::Item::Type(_)
+                    | syn::Item::Trait(_)
+                    | syn::Item::Static(_)
+                    | syn::Item::Const(_)
+            ) {
                 if let Some(n) = declared_item_name(it, include_tests) {
                     type_names.push(n);
                 }

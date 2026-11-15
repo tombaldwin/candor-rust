@@ -17,7 +17,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   crate-local glob answers with the dependency a module re-binds (`use crate::n::*; sys::unlink(p)`); a unit variant brought in
   by an enum glob types its receiver, at module and block scope; `self` is the impl's type whatever a body-local `use`
   rebinds; a `#[cfg]` definition arm joins an external re-export arm, and `#[cfg]`-armed globs (`pub(crate) use
-  self::inner::*` over `#[path]` arms) answer a non-type name with the union of the arms; a bound written `T: crate::io::BufRead` through a
+  self::inner::*` over `#[path]` arms) answer a fn or module name with the union of the arms (a type, `static` or `const` keeps the refusal: its member
+  call is resolved per arm, step 4); a bound written `T: crate::io::BufRead` through a
   local re-export keys the dependency's member. Precision: the root file's own glob no longer mints a crate trait's members
   under the dependency's key in Pass A (R653/R753); a module's own trait is not keyed under a same-name macro import (R654);
   re-export claimants that stand for one definition are not ambiguous (R752). Every acceptance program was executed; gates
