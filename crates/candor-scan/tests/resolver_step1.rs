@@ -352,11 +352,12 @@ fn a_static_through_a_cfg_arm_set_is_not_unioned() {
 #[test]
 fn a_dependency_dispatch_on_an_associated_type_value_is_disclosed() {
     let src = "pub fn named_zq<S: fio::Ser>(s: S) { let mut q = s.seq(); q.push_elem(); q.end() }\n\
-        pub fn chained_zq<S: fio::Ser>(s: S) { s.seq().push_elem() }\n\
-        pub fn end_only_zq<S: fio::Ser>(s: S) { s.seq().end() }\n\
+        pub fn chained_zq<S: fio::Ser>(s: S) -> Result<(), ()> { s.try_seq()?.push_elem(); Ok(()) }\n\
+        pub fn end_only_zq<S: fio::Ser>(s: S) { let q = s.seq(); q.end() }\n\
+        pub fn bare_zq<S: fio::Ser>(s: S) { s.seq().push_elem() }\n\
         pub fn direct_zq<S: fio::Ser>(s: S) { s.done() }\n";
     let fio = "pub trait SeqT { fn push_elem(&mut self); fn end(self); }\n\
-        pub trait Ser { type Seq: SeqT; fn seq(self) -> Self::Seq; fn done(self); }\n";
+        pub trait Ser { type Seq: SeqT; fn seq(self) -> Self::Seq; fn try_seq(self) -> Result<Self::Seq, ()>; fn done(self); }\n";
     let d = fixture(
         "assocv",
         "fio = { path = \"fio\" }\n",
@@ -366,7 +367,7 @@ fn a_dependency_dispatch_on_an_associated_type_value_is_disclosed() {
             ("fio/src/lib.rs", fio),
         ],
     );
-    let why = |rows: &Rows, f: &str| strs(rows, f, "unknownWhy").iter().any(|w| w.contains("on the associated type"));
+    let why = |rows: &Rows, f: &str| strs(rows, f, "unknownWhy").iter().any(|w| w.contains("returns, whose type is not known here"));
     let (on, v) = scan(&d);
     assert!(has(&on, "named_zq", "Unknown") && why(&on, "named_zq"), "binding spelling discloses\n{v:#}");
     assert!(has(&on, "chained_zq", "Unknown") && why(&on, "chained_zq"), "chained spelling discloses\n{v:#}");
@@ -374,6 +375,7 @@ fn a_dependency_dispatch_on_an_associated_type_value_is_disclosed() {
     // the stated residual: a member that shares a std method name (`end` is `RangeInclusive::end`) is excluded with the R549
     // drift it is indistinguishable from here
     assert!(!why(&on, "end_only_zq"), "residual: an `end()`-only body is not disclosed by this site\n{v:#}");
+    assert!(!why(&on, "bare_zq"), "residual: a bare `s.seq().m()` chain (the drift shape) is not disclosed by this site\n{v:#}");
     let off = scan_off(&d, "assoc");
     assert!(!why(&off, "named_zq") && !why(&off, "chained_zq"), "part `assoc` off restores the old reading");
 }

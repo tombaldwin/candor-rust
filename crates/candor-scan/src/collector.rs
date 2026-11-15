@@ -15418,16 +15418,31 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // an associated-type member that shares a std name (`end`, which `RangeInclusive` has) is NOT disclosed by
                         // this site; serde's `serialize_seq(..)?` bodies are still disclosed through `serialize_element`/`_field`/
                         // `_entry`/`_key`/`_value`, which std does not have. Stated residual: a body whose only such call is `end()`.
-                        let drift = crate::std_methods::is_std_method_name(&leaf);
+                        //
+                        // …and NOT a bare chained call (`x.param().abi()`, `a.to_data().data_type()`, `b.take().copy_to_bytes(..)`):
+                        // measured on the A/B, those are a CONCRETE type a trait method returns (windows' `ParamValue`, 46,448 rows of
+                        // one shape) and the key is chain drift. The associated-type value this exists for is bound or `?`-unwrapped
+                        // first (`let mut q = s.serialize_seq(..)?;`, `s.serialize_map(n)?.serialize_entry(..)`). Stated residual: a
+                        // bare `s.assoc_returning().member()` on an associated type is not disclosed here.
+                        let bare_chain = {
+                            let mut r: &syn::Expr = &node.receiver;
+                            while let syn::Expr::Paren(p) = r {
+                                r = &p.expr;
+                            }
+                            matches!(r, syn::Expr::MethodCall(_))
+                        };
+                        let drift = bare_chain || crate::std_methods::is_std_method_name(&leaf);
                         if let Some(via) = assoc_via.as_deref().filter(|_| !drift) {
                             if !crate::lang::step1_assoc_off() && crate::lang::is_dependency_crate_root(root) {
                                 let tl = full.rsplit("::").next().unwrap_or(&full);
                                 if candor_report::env::trace("CANDOR_STEP1_INSTR") {
                                     eprintln!("STEP1ASSOC\t{full}::{leaf}\t{via}"); // §E1 REACH
                                 }
-                                self.mark_unresolved(format!(
-                                    "dispatch:{tl}.{leaf} on the associated type `{via}` returns (its implementors are not joined)"
-                                ));
+                                // The text says what is KNOWN, and nothing more: the receiver is what `via` returned and the engine did
+                                // not type it. Most often that is an associated type (`S::SerializeSeq`), whose implementors the key under
+                                // the parent trait does not join; measured on the A/B, it is also a concrete type the engine did not follow
+                                // (arrow's `to_data()`, bytes' `take()`), where the key under `tl` is chain drift. True of both.
+                                self.mark_unresolved(format!("dispatch:{tl}.{leaf} on the value `{via}` returns, whose type is not known here"));
                             }
                         }
                         self.calls.push(Call { sp: None, assoc_via, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false,
