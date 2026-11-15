@@ -77,6 +77,8 @@ pub(crate) struct Table {
     /// fn name → rows
     fns: HashMap<&'static str, Vec<FnRow>>,
     shapes: BTreeSet<&'static str>,
+    /// SOUNDNESS R1657 (bound projection) — (trait path, member) → the return slot (`p0`, `a:Target`); see `ret_slot`.
+    rets: HashMap<String, &'static str>,
 }
 
 fn parse_slots(s: &'static str) -> Vec<SlotBound> {
@@ -140,6 +142,9 @@ pub(crate) fn table() -> &'static Table {
                         t.shapes.insert(f[2]);
                     }
                     t.impls.entry(format!("{}\t{}", f[1], f[2])).or_default().push(parse_slots(f[3]));
+                }
+                Some("R") if f.len() >= 4 => {
+                    t.rets.insert(format!("{}\t{}", f[1], f[2]), f[3]);
                 }
                 Some("F") if f.len() >= 5 => {
                     if !f[1].contains(':') && (f[1] == "str" || f[1].chars().next().is_some_and(|c| !c.is_lowercase())) {
@@ -302,6 +307,13 @@ impl Table {
     /// provided one that does not hand `Self` back inside its result.
     pub(crate) fn member_runs(&self, path: &str, name: &str) -> bool {
         self.traits.get(path).is_some_and(|r| r.required.contains(&name) || r.provided.contains(&name))
+    }
+
+    /// SOUNDNESS R1657 (bound projection) — what member `name` of std trait `path` returns, in terms of the trait: `p<N>` (its
+    /// N-th type parameter, `AsRef<T>::as_ref -> &T`) or `a:<Assoc>` (an associated type, `Deref::deref -> &Self::Target`).
+    /// Read off std's declaration by the generator (`R` rows), behind at most one reference; `None` for anything else.
+    pub(crate) fn ret_slot(&self, path: &str, name: &str) -> Option<&'static str> {
+        self.rets.get(&format!("{path}\t{name}")).copied()
     }
 
     /// Whether `path`'s member `name` is REQUIRED (no default body).

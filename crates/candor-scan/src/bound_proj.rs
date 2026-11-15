@@ -670,6 +670,122 @@ impl<'a> super::CallCollector<'a> {
         recv_ty.filter(|t| !t.contains("::") && self.bp.env.params.contains(*t)).map(|t| Val::Generic(t.to_string()))
     }
 
+    /// The written `Target` (or other associated-type) binding on ANY bound of `g` (`DerefMut::deref_mut` returns the
+    /// `Target` its supertrait `Deref` binds, which may be written on either bound).
+    fn bp_binding(&self, g: &str, assoc: &str) -> Vec<Val> {
+        let mut out: Vec<Val> = Vec::new();
+        for tr in self.bp.env.bounds(g) {
+            for (n, t) in &tr.bindings {
+                if n == assoc {
+                    let v = self.bp_written(t);
+                    if !out.contains(&v) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// RETURN SUBSTITUTION (design step 3): what `x.method()` returns when `x` is a value of generic `g` and `method` is a
+    /// member of one of `g`'s bounds whose declared return is the trait's own type parameter or associated type. For a std
+    /// trait the slot is read off std's declaration (`std_bounds` `R` rows: `as_ref -> &T` is `p0`, `deref -> &Self::Target`
+    /// is `a:Target`); for a local trait, its `-> Self::<Assoc>` members (`model::trait_ret_assoc_key`). The argument or
+    /// binding is resolved as WRITTEN, generics first, so `C: AsRef<X>` with `X` a parameter yields `Generic(X)` and never a
+    /// type named `X` (Fable review §2.1, s12: the CONV twin of the plotters C3). An unbound associated type is a projection.
+    fn bp_ret_vals(&self, g: &str, method: &str) -> Vec<Val> {
+        let mut out: Vec<Val> = Vec::new();
+        let push = |v: Val, out: &mut Vec<Val>| {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        };
+        let t = crate::std_bounds::table();
+        for tr in self.bp.env.bounds(g) {
+            let l = tr.leaf.as_str();
+            if let Some(lt) = self.local_traits.get(l) {
+                for a in lt.assoc_types.get(&crate::model::trait_ret_assoc_key(method)).into_iter().flatten() {
+                    match tr.bindings.iter().find(|(n, _)| n == a) {
+                        Some((_, ty)) => push(self.bp_written(ty), &mut out),
+                        None => push(Val::Proj { g: g.to_string(), tr: Some(l.to_string()), assoc: a.clone() }, &mut out),
+                    }
+                }
+                continue;
+            }
+            if !crate::std_bounds::is_std_trait_leaf(l) {
+                continue;
+            }
+            let paths: Vec<&str> = match t.resolve_trait(&tr.path) {
+                Some(p) => vec![p],
+                None => t.traits_by_leaf(l).to_vec(),
+            };
+            // the member may be declared by a supertrait of the bound (`DerefMut` -> `Deref::deref`)
+            let mut stack: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+            let mut seen: BTreeSet<String> = BTreeSet::new();
+            while let Some(p) = stack.pop() {
+                if !seen.insert(p.clone()) {
+                    continue;
+                }
+                if let Some(slot) = t.ret_slot(&p, method) {
+                    if let Some(n) = slot.strip_prefix('p').and_then(|n| n.parse::<usize>().ok()) {
+                        if let Some(a) = tr.args.get(n) {
+                            push(self.bp_written(a), &mut out);
+                        }
+                    } else if let Some(assoc) = slot.strip_prefix("a:") {
+                        let b = self.bp_binding(g, assoc);
+                        if b.is_empty() {
+                            push(Val::Proj { g: g.to_string(), tr: Some(crate::std_bounds::leaf(&p).to_string()), assoc: assoc.to_string() }, &mut out);
+                        }
+                        for v in b {
+                            push(v, &mut out);
+                        }
+                    }
+                }
+                if let Some(row) = t.trait_row(&p) {
+                    stack.extend(row.supers.iter().map(|s| s.to_string()));
+                }
+            }
+        }
+        out
+    }
+
+    /// The values a RECEIVER expression holds when it is a conversion (or other bound member with a substitutable return)
+    /// called on a generic node: `p.as_ref()`, `c.borrow()`, `self.deref()`, `c.get()` under `C: Has`. Nested conversions
+    /// recurse. Empty for anything else.
+    pub(crate) fn bp_conv_vals(&self, recv: &syn::Expr, depth: usize) -> Vec<Val> {
+        if depth > MAX_DEREF {
+            return Vec::new();
+        }
+        let mut e = recv;
+        while let syn::Expr::Paren(p) = e {
+            e = &p.expr;
+        }
+        let syn::Expr::MethodCall(mc) = e else { return Vec::new() };
+        if !mc.args.is_empty() || mc.turbofish.is_some() {
+            return Vec::new();
+        }
+        let m = mc.method.to_string();
+        let inner: Vec<Val> = match self.bp_node(&mc.receiver, None) {
+            Some(v) => vec![v],
+            None => self.bp_conv_vals(&mc.receiver, depth + 1),
+        };
+        let mut out: Vec<Val> = Vec::new();
+        for v in inner {
+            if let Val::Generic(g) = v {
+                // Rust finds the conversion at the generic's own step when a bound declares it; otherwise it is not this rule
+                if !self.bp_step1(self.bp.env.bounds(&g), &m).hit {
+                    continue;
+                }
+                for x in self.bp_ret_vals(&g, &m) {
+                    if !out.contains(&x) {
+                        out.push(x);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// THE PROBE, for the receiver of `.leaf()`: `None` leaves every existing route exactly as it was.
     pub(crate) fn bp_answer(&self, recv: &syn::Expr, leaf: &str, recv_ty: Option<&str>) -> Option<Ans> {
         if bp_off() || self.bp.env.is_empty() {
@@ -682,7 +798,27 @@ impl<'a> super::CallCollector<'a> {
             };
             return (!a.is_empty()).then_some(a);
         }
-        None
+        // design step 3: a conversion's return, substituted (R1793)
+        let vals = self.bp_conv_vals(recv, 0);
+        if vals.is_empty() {
+            return None;
+        }
+        let mut a = Ans::default();
+        let mut answered = false;
+        for v in &vals {
+            match self.bp_member_val(v, leaf, 1) {
+                Some(x) => {
+                    a.merge(x);
+                    answered = true;
+                }
+                None => a.hedges.push(format!("dispatch:unresolved conversion value of `{leaf}`")),
+            }
+        }
+        if !answered {
+            return None;
+        }
+        a.facts.insert("bound-conv");
+        (!a.is_empty()).then_some(a)
     }
 }
 

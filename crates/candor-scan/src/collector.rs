@@ -17979,6 +17979,48 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
             }
         }
+        // SOUNDNESS R1657 (bound projection; R1793) — `let q = p.as_ref();` (the `let path = path.as_ref();` idiom, self-
+        // shadowing or not) over a conversion-bounded generic: the binding holds the conversion's RETURN (`&Path` for `P:
+        // AsRef<Path>`), the same substitution the chained spelling `p.as_ref().exists()` reads at the call. No binder above
+        // typed it, so `q.exists()` read ABSENT over an executed stat (lane fixtures `fxl` l1/l2). Read under the PRE-statement
+        // bindings (the RHS names the OUTER `p`); written only where nothing above bound the name, and only for ONE value: a
+        // nominal type into `vars`, a generic or projection into `bp.generic_vars` (never a generic's name into `vars`, R564).
+        if let (syn::Pat::Ident(pi), Some(init)) = (&node.pat, &node.init) {
+            let n = pi.ident.to_string();
+            // The unannotated-dispatch binder above walks THROUGH the call and binds the conversion's RECEIVER's bounds
+            // (`q -> [AsRef]`), which is R549 mechanism B's chain drift: `q` is the returned `&Path`, not an `AsRef`. That
+            // binding is replaced; a concrete `vars` answer from any binder is kept.
+            if pi.subpat.is_none()
+                && init.diverge.is_none()
+                && !bound_proj::bp_off()
+                && !self.bp.env.is_empty()
+                && !self.vars.contains_key(&n)
+                && !self.bp.generic_vars.contains_key(&n)
+            {
+                let vals = self.with_pre_bindings(&pre_bindings, |s| s.bp_conv_vals(&init.expr, 0));
+                if let [v] = vals.as_slice() {
+                    if candor_report::env::trace("CANDOR_R1657BP_INSTR") {
+                        eprintln!("R1657BPLET\t{n}\t{v:?}\treplaces={:?}", self.trait_vars.get(&n)); // §E1 REACH COUNTER
+                    }
+                    crate::sidecar::note("recv_fact", "bound-conv-let");
+                    self.trait_vars.remove(&n);
+                    self.mono_recv_traits.remove(&n);
+                    self.recv_via.remove(&n);
+                    match v {
+                        bound_proj::Val::Nominal(t) => {
+                            self.vars.insert(n, t.clone());
+                        }
+                        bound_proj::Val::Generic(g) => {
+                            self.bp.generic_vars.insert(n, bound_proj::BVal::Generic(g.clone()));
+                        }
+                        bound_proj::Val::Proj { g, tr, assoc } => {
+                            self.bp.generic_vars.insert(n, bound_proj::BVal::Proj { g: g.clone(), tr: tr.clone(), assoc: assoc.clone() });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         // R88/R92/R100 SELF-SHADOW WINDOW, closed (see this fn's opening comment and `BoundNameState`).
         // Everything above has written this statement's bindings; the trailing walk below re-walks the
         // statement's OWN `pat`/`init`/`else`, where every one of those names still means what it meant
