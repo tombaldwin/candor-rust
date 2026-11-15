@@ -316,11 +316,38 @@ impl Table {
         self.rets.get(&format!("{path}\t{name}")).copied()
     }
 
+    /// SOUNDNESS R1797 — std's BLANKET impls over a bare type parameter (`impl<T: Display> ToString for T`, the generator's
+    /// `I <trait> *` rows): each trait path with, per impl, the trait PATHS its `Self` slot requires (empty: every type). Read
+    /// off rust-src by the generator, never listed by hand.
+    pub(crate) fn blanket_impls(&self) -> &'static [BlanketImpls] {
+        static B: std::sync::OnceLock<Vec<BlanketImpls>> = std::sync::OnceLock::new();
+        B.get_or_init(|| {
+            let t = table();
+            let mut v: Vec<BlanketImpls> = t
+                .traits
+                .keys()
+                .filter_map(|&p| {
+                    let rows = t.impls.get(&format!("{p}\t*"))?;
+                    let reqs = rows
+                        .iter()
+                        .map(|r| r.iter().filter(|b| b.slot == Slot::SelfRecv).flat_map(|b| b.traits.iter().copied()).collect())
+                        .collect();
+                    Some((p, reqs))
+                })
+                .collect();
+            v.sort();
+            v
+        })
+    }
+
     /// Whether `path`'s member `name` is REQUIRED (no default body).
     pub(crate) fn is_required(&self, path: &str, name: &str) -> bool {
         self.traits.get(path).is_some_and(|r| r.required.contains(&name))
     }
 }
+
+/// SOUNDNESS R1797 — one std trait path, and per blanket impl of it over a bare `T`, the trait paths `T` must implement.
+pub(crate) type BlanketImpls = (&'static str, Vec<Vec<&'static str>>);
 
 pub(crate) const FN_ONCE: &str = "core::ops::function::FnOnce";
 pub(crate) const FN_MUT: &str = "core::ops::function::FnMut";

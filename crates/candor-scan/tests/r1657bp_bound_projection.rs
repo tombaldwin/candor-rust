@@ -93,6 +93,49 @@ pub trait SubS: BaseS {}
 pub fn run_sup<T: SubS>(t: &T) -> usize { t.s_go() }
 "#;
 
+/// Fable's merge-review fixtures (`fable-typerimpl/fxc`, EXECUTED), s7 (two hops), and the l14 pair.
+const SRC2: &str = r#"#![allow(dead_code)]
+use std::fmt::Display;
+use std::ops::Deref;
+fn mark(n: &str) -> usize { std::fs::write(n, "x").map(|_| 1).unwrap_or(0) }
+// R1797: a local blanket over `ToString`, reached through std's `impl<T: Display> ToString for T`
+pub trait ExtTs { fn m_h1(&self) -> usize; }
+impl<T: ToString> ExtTs for T { fn m_h1(&self) -> usize { mark("h1ext") } }
+pub struct X1;
+impl X1 { pub fn m_h1(&self) -> usize { 0 } pub fn m_h1c(&self) -> usize { 0 } }
+pub fn h1_bridge<C: Display + Deref<Target = X1>>(c: &C) -> usize { c.m_h1() }
+pub trait ExtD { fn m_h1c(&self) -> usize; }
+impl<T: Display> ExtD for T { fn m_h1c(&self) -> usize { mark("h1cext") } }
+pub fn h1_ctl<C: Display + Deref<Target = X1>>(c: &C) -> usize { c.m_h1c() }
+pub fn h1_pure<C: Deref<Target = X1>>(c: &C) -> usize { c.m_h1() }
+// l8: a blanket the generic provably cannot satisfy (`C: Display` is not provable)
+pub trait ExtL { fn m_l8(&self) -> usize; }
+impl<T: Display> ExtL for T { fn m_l8(&self) -> usize { mark("l8ext") } }
+pub struct Conn2;
+impl Conn2 { pub fn m_l8(&self) -> usize { 0 } }
+pub fn l8_union<C: Deref<Target = Conn2>>(c: &C) -> usize { c.m_l8() }
+// R1798: a `Copy` Target's by-value trait member beats the same-named inherent `&self` one at the by-value step
+#[derive(Clone, Copy)]
+pub struct Y;
+impl Y { pub fn m_cp(&self) -> usize { 0 } }
+pub trait TrCp { fn m_cp(self) -> usize; }
+impl TrCp for Y { fn m_cp(self) -> usize { mark("cp") } }
+pub fn cp_eff<C: Deref<Target = Y>>(c: &C) -> usize { c.m_cp() }
+pub fn cp_ctl(y: &Y) -> usize { y.m_cp() }
+// s7: two hops, a generic's Target that is a local Deref wrapper
+pub struct Loud;
+impl Loud { pub fn m_s7(&self) -> usize { mark("s7") } pub fn same_x(&self) -> usize { mark("l14") } }
+pub struct WF(pub Loud);
+impl Deref for WF { type Target = Loud; fn deref(&self) -> &Loud { &self.0 } }
+pub fn s7_twohop<C: Deref<Target = WF>>(c: &C) -> usize { c.m_s7() }
+// l14 (SOUNDNESS R1799, engine-wide, not this change's): a block-scoped shadow, then the parameter again
+pub struct Soft2;
+impl Soft2 { pub fn same_x(&self) -> usize { 0 } }
+impl AsRef<Loud> for Loud { fn as_ref(&self) -> &Loud { self } }
+pub fn l14v_eff(p: &Loud) -> usize { { let p = Soft2; let _ = p.same_x(); } p.same_x() }
+pub fn l14g_eff<P: AsRef<Loud>>(p: &P) -> usize { { let p = Soft2; let _ = p.same_x(); } p.as_ref().same_x() }
+"#;
+
 const EFF: [&str; 20] = [
     "a1_eff", "a3_eff", "a4_eff", "Stream::a2_eff", "a5_eff", "h1_eff", "b3_eff", "b4_eff", "b5_eff", "l1_eff", "l2_eff",
     "l5_eff", "s1_ctl", "T::m_s5", "s12_genarg", "T::m_s9", "s4_dyntarget", "d1_eff", "d4_eff", "d5_eff",
@@ -100,11 +143,15 @@ const EFF: [&str; 20] = [
 const PURE: [&str; 6] = ["a1_pure", "a3_pure", "b4_pure", "l1_pure", "s1_shadow", "l12_shadow"];
 
 fn fixture(tag: &str) -> PathBuf {
+    fixture_src(tag, SRC)
+}
+
+fn fixture_src(tag: &str, src: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("candor-r1657bp-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("app/src")).unwrap();
     std::fs::write(root.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
-    std::fs::write(root.join("app/src/lib.rs"), SRC).unwrap();
+    std::fs::write(root.join("app/src/lib.rs"), src).unwrap();
     root
 }
 
@@ -195,4 +242,38 @@ fn r1794_a_supertrait_members_key_names_the_declaring_trait() {
     assert!(!k.iter().any(|k| k.ends_with("#SubS::s_go")), "SubS does not declare s_go: {k:?}");
     let (_, off) = scan(&d, None, &[("CANDOR_R1794_OFF", "1")]);
     assert!(field(&off, "run_sup", "dispatchesOn").iter().any(|k| k.ends_with("#SubS::s_go")), "{off:#}");
+}
+
+#[test]
+fn r1797_a_std_blanket_bridge_keeps_the_local_blanket_candidate() {
+    let d = fixture_src("r1797", SRC2);
+    let (_, v) = scan(&d, None, &[]);
+    for u in ["h1_bridge", "h1_ctl"] {
+        assert!(field(&v, u, "inferred").contains(&"Fs".to_string()), "{u} must carry Fs: {v:#}");
+    }
+    assert!(field(&v, "h1_bridge", "dispatchesOn").iter().any(|k| k.ends_with("#ExtTs::m_h1")), "{v:#}");
+    for u in ["h1_pure", "l8_union"] {
+        assert!(!field(&v, u, "inferred").contains(&"Fs".to_string()), "{u} cannot be covered by the blanket: {v:#}");
+    }
+}
+
+#[test]
+fn r1798_a_copy_targets_by_value_trait_member_beats_the_inherent_one() {
+    let d = fixture_src("r1798", SRC2);
+    let (_, v) = scan(&d, None, &[]);
+    assert!(field(&v, "cp_eff", "inferred").contains(&"Fs".to_string()), "{v:#}");
+    assert!(!field(&v, "cp_ctl", "inferred").contains(&"Fs".to_string()), "a literal &Y runs the inherent: {v:#}");
+    assert!(field(&v, "s7_twohop", "inferred").contains(&"Fs".to_string()), "{v:#}");
+}
+
+/// SOUNDNESS R1799 (open, engine-wide): a block-scoped shadow ends the name's binding for the rest of the body, in `vars`
+/// and in `generic_vars` alike. Both units EXECUTE the effect and read ABSENT. Pinned as the documented residual, so a fix
+/// arrives as a decision.
+#[test]
+fn r1799_a_block_shadow_then_the_parameter_reads_absent_documented_residual() {
+    let d = fixture_src("r1799", SRC2);
+    let (_, v) = scan(&d, None, &[]);
+    for u in ["l14v_eff", "l14g_eff"] {
+        assert!(!field(&v, u, "inferred").contains(&"Fs".to_string()), "R1799 closed? update this pin and the row: {v:#}");
+    }
 }

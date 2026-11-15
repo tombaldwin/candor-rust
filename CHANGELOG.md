@@ -23,7 +23,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   member list is not known (a dependency bound, a local blanket impl that may cover the generic) the answer is the union with
   that candidate, never the probe-order pick. Executed fixtures; `deny Fs`/`deny Net <unit>` 0 → 1. Corpus A/B main → branch
   (302 crates): 115 rows newly concrete, 25 newly `Unknown`, 0 concrete effects lost, 6 `Unknown` lost (4 resolved to `Fs`,
-  2 resolved to bodies read pure or reaching `memchr`). `CANDOR_R1657BP_OFF=1` restores the old reading.
+  2 resolved to bodies read pure or reaching `memchr`). Two narrowings in that probe are exact rather than optimistic
+  (SOUNDNESS R1797, R1798; both silent, pre-existing): a local blanket impl is ruled out only after std's own blanket impls
+  (`impl<T: Display> ToString for T`, from `std_bounds.tsv`) have extended the generic's bound closure, and a value reached
+  by the `Deref` step is probed by value first, so a `Copy` Target's `fn m(self)` trait member is not hidden behind a
+  same-named inherent `&self` one. `CANDOR_R1657BP_OFF=1` restores the old reading.
 - **A supertrait member's `dispatchesOn` key now names the trait that DECLARES it** (SOUNDNESS R1794; a join loss behind a
   surviving disclosure). `t.s_go()` under `T: SubS` with `s_go` declared by supertrait `BaseS` published `crate#SubS::s_go`,
   which no consumer's implementor (published under `BaseS`) joins: a chained consumer whose `s_go` writes a file read

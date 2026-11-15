@@ -284,6 +284,9 @@ pub(crate) struct Ans {
     /// a bound of the generic is a DEPENDENCY trait whose member list is unknown: today's dispatch route must still run
     /// for it (its key is a real candidate), so the typed answer is pushed beside that route instead of replacing it
     pub(crate) keep_dispatch_route: bool,
+    /// SOUNDNESS R1798 — a typed receiver was reached by the `Deref` STEP: the value is a PLACE of the Target type, probed by
+    /// value, then `&`, then `&mut` (receiver form 1), not a `&X` value (form 2, what a conversion's `as_ref() -> &X` is)
+    pub(crate) via_deref: bool,
 }
 
 impl Ans {
@@ -304,6 +307,7 @@ impl Ans {
             }
         }
         self.keep_dispatch_route |= o.keep_dispatch_route;
+        self.via_deref |= o.via_deref;
         self.facts.extend(o.facts);
     }
     pub(crate) fn fact(&self) -> String {
@@ -311,6 +315,12 @@ impl Ans {
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.typed.is_empty() && self.traits.is_empty() && self.hedges.is_empty()
+    }
+    /// The receiver form (`Call::recv_form`) of a call this answer types: 1 for a place reached by auto-deref, whose probe
+    /// steps start BY VALUE (a `Copy` Target's `fn m(self)` trait member beats the inherent `&self` one, R1798); 2 for a
+    /// conversion's `&X`, where the inherent `&self` method matches at the first step.
+    pub(crate) fn recv_form(&self) -> u8 {
+        if self.via_deref { 1 } else { 2 }
     }
 }
 
@@ -490,6 +500,34 @@ impl<'a> super::CallCollector<'a> {
         if !complete {
             return true;
         }
+        // SOUNDNESS R1797 — …AND WHAT STD'S OWN BLANKET IMPLS PROVIDE from it. `C: Display` makes `C: ToString` hold through
+        // `impl<T: Display> ToString for T`, so a local `impl<T: ToString> Ext for T` DOES cover `C`, and Rust finds `Ext::m` at
+        // step `&C`, before any deref (EXECUTED Fable `fxc` h1_bridge: the blanket ran; the branch had read the Target's inherent
+        // and dropped it). The closure takes every std trait one of whose blanket impls' `Self` requirements it already holds,
+        // to a fixpoint (the generator's `I <trait> *` rows). A blanket row with no recorded requirement is taken as covering
+        // every type. That is exact for `Any`/`Borrow`/`From`; for `Debug`/`Hash`/`PartialEq`/`Ord` the generator dropped an
+        // unstable requirement (`impl<F: FnPtr> Debug for F`), so it over-covers. Over-covering only ever KEEPS a candidate
+        // (the union direction, an over-charge), never decides one away.
+        let blankets = t.blanket_impls();
+        loop {
+            let mut grew = false;
+            for (p, rows) in blankets {
+                let l = crate::std_bounds::leaf(p);
+                if closure.contains(l) {
+                    continue;
+                }
+                if rows.iter().any(|r| r.iter().all(|q| closure.contains(crate::std_bounds::leaf(q)))) {
+                    closure.insert(l.to_string());
+                    if let Some(row) = t.trait_row(p) {
+                        closure.extend(row.supers.iter().map(|s| crate::std_bounds::leaf(s).to_string()));
+                    }
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
         spec.split(';').any(|imp| {
             imp.split('+').filter(|b| !b.is_empty()).all(|b| {
                 closure.contains(b)
@@ -583,6 +621,7 @@ impl<'a> super::CallCollector<'a> {
             }
         }
         a.keep_dispatch_route |= s1.dep_bound;
+        a.via_deref |= !a.typed.is_empty();
         a.facts.insert("bound-deref");
         Some(a)
     }
@@ -904,7 +943,7 @@ impl<'a> super::CallCollector<'a> {
         let skip = usize::from(typed_route);
         for t in a.typed.iter().skip(skip) {
             self.calls.push(crate::model::Call {
-                sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 2, dot: true,
+                sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: a.recv_form(), dot: true,
                 argc: node.args.len().min(255) as u8, entropy_arg: false,
                 path: crate::lang::alias_join(t, &[leaf]), leaf: leaf.to_string(), str_arg: str_arg.clone(),
                 typed: true, method: true, is_macro: false, path_lits_partial: false, path_lit2: None,

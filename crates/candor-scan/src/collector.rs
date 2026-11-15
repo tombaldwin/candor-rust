@@ -14854,11 +14854,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if let Some(a) = &bp_ans {
             self.bp_apply(a, node, &leaf, str_arg.clone(), recv_ty.is_some());
         }
-        // The value the probe typed is a PLACE reached by auto-deref (or a conversion's `&X`), called through auto-ref: its
-        // receiver form is `&X` (2), the form an inherent `&self` method matches at the probe's first step. Reading the
-        // written receiver's form instead (`c: &C`, 0 = unknown) let scan.rs keep a local blanket trait candidate the
-        // inherent method beats (`impl<T: Display> Ext for T` beside `Conn2::m`: EXECUTED pure, charged `Fs`).
-        let bp_typed_form = bp_ans.as_ref().is_some_and(|a| !a.typed.is_empty() && !a.keep_dispatch_route);
+        // The receiver form of the value the probe typed (`Ans::recv_form`): a place reached by auto-deref is probed by value
+        // first (1, SOUNDNESS R1798: a `Copy` Target's by-value trait member beats the inherent `&self` one); a conversion's
+        // `&X` is 2. Reading the WRITTEN receiver's form instead (`c: &C`, 0 = unknown) let scan.rs keep a local blanket trait
+        // candidate the inherent method beats (`impl<T: Display> Ext for T` beside `Conn2::m`: EXECUTED pure, charged `Fs`).
+        let bp_typed_form = bp_ans.as_ref().filter(|a| !a.typed.is_empty() && !a.keep_dispatch_route).map(|a| a.recv_form());
         // SOUNDNESS R1657 stage 1b (F4, the (c'') leg) — a FORMATTER call on a caller-chosen generic value inside a BODY-LOCAL
         // impl. tokio's `TaskLocalFuture::fmt` declares `struct TransparentOption<'a, T> { value: &'a Option<T> }` and formats
         // `value` (a `T: Debug`) in a nested `impl Debug`; once F4 typed that impl's `self`, the call became a std-trait
@@ -14984,7 +14984,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     (None, _, "Command") => self.resolve_cmd_recv(&node.receiver),
                     _ => str_arg,
                 };
-                let recv_form = if bp_typed_form { 2 } else { self.recv_form_of(&node.receiver, recv_seg) };
+                let recv_form = bp_typed_form.unwrap_or_else(|| self.recv_form_of(&node.receiver, recv_seg));
                 self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form, dot: true, argc: node.args.len().min(255) as u8,
                                        entropy_arg: args_name_entropy_source(&node.args),
                                        path, leaf: leaf.clone(), str_arg, typed: true, method: true,
