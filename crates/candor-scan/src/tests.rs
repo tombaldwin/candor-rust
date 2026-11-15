@@ -28393,6 +28393,9 @@ pub fn go_trb() { <Q2 as hwdef::Gt<u16>>::m(&Q2) }\n\
         std::env::set_var("CANDOR_R1759_ON", "1");
         let von = scan_crate_chained("r1754hon", "consumer", toml, src, &idx);
         std::env::remove_var("CANDOR_R1759_ON");
+        // The switch's CONSULTED record is process-global and outlives the variable: left set, every later in-process
+        // `--incremental` scan stores no cache (R1634), and the stale-cache test then finds no file. Clear it inside the lock.
+        candor_report::env::reset_consulted_switches();
         drop(lock);
         let _ = std::fs::remove_dir_all(&d);
         assert!(effects_of(&v, "go_method").contains(&"Fs".to_string()), "the method spelling (premise):\n{v:#}");
