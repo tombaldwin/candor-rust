@@ -1047,6 +1047,13 @@ pub(crate) fn blanket_impl_key(trait_leaf: &str) -> String {
     format!("<blanketimpl>{trait_leaf}")
 }
 
+/// SOUNDNESS R1657 (bound projection) — the bound leaves each BLANKET impl of local trait `trait_leaf` puts on its self
+/// parameter (`impl<T: Display> Ext for T` -> `Display`), `+`-joined per impl, `;` between impls; an empty list is an
+/// unbounded blanket (`impl<T> Ext for T`), which covers every type.
+pub(crate) fn blanket_bounds_key(trait_leaf: &str) -> String {
+    format!("<blanketbounds>{trait_leaf}")
+}
+
 pub(crate) fn pub_trait_key(trait_leaf: &str) -> String {
     format!("<pubtrait>{trait_leaf}")
 }

@@ -7514,6 +7514,17 @@ pub(crate) fn collect_decls(
                         // SOUNDNESS R1723 (exposed blanket) — see `model::blanket_impl_key`.
                         if im.generics.type_params().any(|g| g.ident == ty.as_str()) {
                             rets.insert(crate::model::blanket_impl_key(&key), Some("1".to_string()));
+                            // SOUNDNESS R1657 (bound projection) — the blanket's own bound LEAVES on its self parameter, one
+                            // `+`-joined list per impl (`;` between impls), so a bounded generic can be told it CANNOT be
+                            // covered (`model::blanket_bounds_key`).
+                            let b = crate::lang::generic_bounds_of_generics(&im.generics).get(ty.as_str()).cloned().unwrap_or_default();
+                            let k = crate::model::blanket_bounds_key(&key);
+                            let joined = b.join("+");
+                            let v = match rets.get(&k).cloned().flatten() {
+                                Some(prev) => format!("{prev};{joined}"),
+                                None => joined,
+                            };
+                            rets.insert(k, Some(v));
                         }
                         // SOUNDNESS R1186 — a hand-written conversion: filed under its SOURCE type (`model::from_impl_key`).
                         if matches!(key.as_str(), "From" | "TryFrom") {

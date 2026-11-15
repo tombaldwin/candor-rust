@@ -14773,13 +14773,35 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
         };
         // SOUNDNESS R1630 — auto-deref through a local generic `Deref<Target = T>` wrapper, to the field's instantiation.
+        let recv_ty0 = recv_ty.clone();
         let recv_ty = match recv_ty {
             Some(t) if matches!(payload, PayloadTy::Old) => Some(self.deref_param_recv(&node.receiver, &t, &leaf).unwrap_or(t)),
             o => o,
         };
+        // SOUNDNESS R1657 (bound projection; R1793, R1795, R1796) — Rust's method PROBE over a receiver that is a GENERIC
+        // (a parameter `c: &mut C`, `self` in an impl over `T`, a field typed by the owner's parameter): the bounds' own
+        // members first, then the `Deref` step to the written `Target`, recursively (`bound_proj`). The receiver typed to
+        // nothing (or to the parameter's NAME, which names no type), so `c.read_tls()` under `C: DerefMut<Target =
+        // ConnectionCommon<..>>` formed no call and read ABSENT (tokio-rustls; EXECUTED fixtures a1–a7, s9). `None` keeps
+        // every route below exactly as it was; an answer is a UNION (typed calls, local dispatch with its key, hedges), never
+        // the probe-order pick where an earlier step's member list is not known. Kill switch `CANDOR_R1657BP_OFF`.
+        let bp_ans = if recv_ty == recv_ty0 { self.bp_answer(&node.receiver, &leaf, recv_ty.as_deref()) } else { None };
+        let (recv_ty, payload) = match &bp_ans {
+            Some(a) if !a.typed.is_empty() && !a.keep_dispatch_route => (Some(a.typed[0].clone()), PayloadTy::Old),
+            Some(a) if a.typed.is_empty() || a.keep_dispatch_route => (None, PayloadTy::Old),
+            _ => (recv_ty, payload),
+        };
         if matches!(payload, PayloadTy::Hedge) {
             self.mark_unresolved(format!("dispatch:generic payload receiver of `{leaf}`"));
         }
+        if let Some(a) = &bp_ans {
+            self.bp_apply(a, node, &leaf, str_arg.clone(), recv_ty.is_some());
+        }
+        // The value the probe typed is a PLACE reached by auto-deref (or a conversion's `&X`), called through auto-ref: its
+        // receiver form is `&X` (2), the form an inherent `&self` method matches at the probe's first step. Reading the
+        // written receiver's form instead (`c: &C`, 0 = unknown) let scan.rs keep a local blanket trait candidate the
+        // inherent method beats (`impl<T: Display> Ext for T` beside `Conn2::m`: EXECUTED pure, charged `Fs`).
+        let bp_typed_form = bp_ans.as_ref().is_some_and(|a| !a.typed.is_empty() && !a.keep_dispatch_route);
         // SOUNDNESS R1657 stage 1b (F4, the (c'') leg) — a FORMATTER call on a caller-chosen generic value inside a BODY-LOCAL
         // impl. tokio's `TaskLocalFuture::fmt` declares `struct TransparentOption<'a, T> { value: &'a Option<T> }` and formats
         // `value` (a `T: Debug`) in a nested `impl Debug`; once F4 typed that impl's `self`, the call became a std-trait
@@ -14905,7 +14927,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     (None, _, "Command") => self.resolve_cmd_recv(&node.receiver),
                     _ => str_arg,
                 };
-                let recv_form = self.recv_form_of(&node.receiver, recv_seg);
+                let recv_form = if bp_typed_form { 2 } else { self.recv_form_of(&node.receiver, recv_seg) };
                 self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form, dot: true, argc: node.args.len().min(255) as u8,
                                        entropy_arg: args_name_entropy_source(&node.args),
                                        path, leaf: leaf.clone(), str_arg, typed: true, method: true,
