@@ -39,7 +39,7 @@ pub fn is_build_output_dir(dir: &Path, depth: usize, configured: &[PathBuf]) -> 
         return true;
     }
     !configured.is_empty()
-        && std::fs::canonicalize(dir).is_ok_and(|c| configured.iter().any(|t| *t == c))
+        && std::fs::canonicalize(dir).is_ok_and(|c| configured.contains(&c))
 }
 
 #[cfg(test)]
