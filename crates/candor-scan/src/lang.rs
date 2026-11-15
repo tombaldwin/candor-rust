@@ -14106,6 +14106,7 @@ pub(crate) fn from_impl_facts(
 /// I1 stage 1 — the separator of a tagged `macro_rules!`-body hedge record: `{macro}␟{L|F|FN}␟{key}`.
 pub(crate) const I1_TAG_SEP: char = '\u{1f}';
 
+#[allow(clippy::too_many_arguments)] // I1: the tagged `macro_rules!`-body sink is the eighth
 pub(crate) fn collect_opaque_trait_impls(
     items: &[syn::Item],
     include_tests: bool,

@@ -203,7 +203,7 @@ fn i1_step2_chained_consumer_joins_the_macro_made_impl() {
                 assert!(eff(&rows, f).contains(&"Fs".to_string()), "{f} must join the producer's macro-made impl: {rows:?}");
             }
         } else {
-            assert!(rows.get("c_s_method").is_none(), "OFF: c_s_method is ABSENT again (the fixture reaches the code)");
+            assert!(!rows.contains_key("c_s_method"), "OFF: c_s_method is ABSENT again (the fixture reaches the code)");
         }
     }
 }
@@ -225,7 +225,7 @@ fn i1_step2_expanded_fact_retires_module_evidence_partial_keeps_it() {
     );
     let (rows, units) = scan(&d, None, &[]);
     assert!(units.contains("a::Fa::fa") && units.contains("b::pb"), "{units:?}");
-    assert!(rows.get("via_a").is_none(), "module `a` was expanded in full; its R128 evidence is retired: {rows:?}");
+    assert!(!rows.contains_key("via_a"), "module `a` was expanded in full; its R128 evidence is retired: {rows:?}");
     assert_eq!(eff(&rows, "via_b2"), vec!["Unknown".to_string()], "a partial expansion keeps R128's disclosure: {rows:?}");
     let (off, _) = scan(&d, None, &[("CANDOR_I1_OFF", "1")]);
     assert_eq!(eff(&off, "via_a"), vec!["Unknown".to_string()], "OFF: the kept invocation is evidence again");
@@ -380,5 +380,5 @@ fn i1_step5_alias_to_a_primitive_with_a_local_impl_discloses() {
     assert_eq!(eff(&rows, "tp"), vec!["Unknown".to_string()], "{rows:?}");
     assert_eq!(eff(&rows, "tp_direct"), vec!["Fs".to_string()], "control: {rows:?}");
     let (off, _) = scan(&d, None, &[("CANDOR_I1_PRIMALIAS_OFF", "1")]);
-    assert!(off.get("tp").is_none(), "OFF: the pre-existing silence: {off:?}");
+    assert!(!off.contains_key("tp"), "OFF: the pre-existing silence: {off:?}");
 }
