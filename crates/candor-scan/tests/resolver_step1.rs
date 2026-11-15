@@ -351,10 +351,11 @@ fn a_static_through_a_cfg_arm_set_is_not_unioned() {
 /// `Result`/`Option` method on a direct call (`seed.deserialize(d).map(..)`, R549 drift) is not this shape and is left alone.
 #[test]
 fn a_dependency_dispatch_on_an_associated_type_value_is_disclosed() {
-    let src = "pub fn named_zq<S: fio::Ser>(s: S) { let q = s.seq(); q.end() }\n\
-        pub fn chained_zq<S: fio::Ser>(s: S) { s.seq().end() }\n\
+    let src = "pub fn named_zq<S: fio::Ser>(s: S) { let mut q = s.seq(); q.push_elem(); q.end() }\n\
+        pub fn chained_zq<S: fio::Ser>(s: S) { s.seq().push_elem() }\n\
+        pub fn end_only_zq<S: fio::Ser>(s: S) { s.seq().end() }\n\
         pub fn direct_zq<S: fio::Ser>(s: S) { s.done() }\n";
-    let fio = "pub trait SeqT { fn end(self); }\n\
+    let fio = "pub trait SeqT { fn push_elem(&mut self); fn end(self); }\n\
         pub trait Ser { type Seq: SeqT; fn seq(self) -> Self::Seq; fn done(self); }\n";
     let d = fixture(
         "assocv",
@@ -370,6 +371,9 @@ fn a_dependency_dispatch_on_an_associated_type_value_is_disclosed() {
     assert!(has(&on, "named_zq", "Unknown") && why(&on, "named_zq"), "binding spelling discloses\n{v:#}");
     assert!(has(&on, "chained_zq", "Unknown") && why(&on, "chained_zq"), "chained spelling discloses\n{v:#}");
     assert!(!why(&on, "direct_zq"), "control: a direct member of the bound trait is not this shape\n{v:#}");
+    // the stated residual: a member that shares a std method name (`end` is `RangeInclusive::end`) is excluded with the R549
+    // drift it is indistinguishable from here
+    assert!(!why(&on, "end_only_zq"), "residual: an `end()`-only body is not disclosed by this site\n{v:#}");
     let off = scan_off(&d, "assoc");
     assert!(!why(&off, "named_zq") && !why(&off, "chained_zq"), "part `assoc` off restores the old reading");
 }

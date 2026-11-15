@@ -15411,25 +15411,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // main and this lane (EXECUTED, fixture `assoc`, `deny Fs` 0). Until the consumer join goes through the
                         // associated type's bound (R1740 / R1715 F2), the site says so instead of reading pure. Only this shape: a
                         // dependency trait, and a receiver that is the return of one of its methods (`recv_assoc_via`).
-                        // NOT a chained wrapper method: `seed.deserialize(d).map(..)` reaches here with the trait leaf drifted onto
-                        // `Result::map` (the R549 chain-drift keys, pre-existing); the value there is a `Result`/`Option`, not the
-                        // associated type, so an `Option`/`Result` combinator called directly on an un-`?`ed call is left alone. A
-                        // name std also has elsewhere (`end` is `RangeInclusive::end`) is NOT excluded: that is the main shape.
-                        let drift = {
-                            let mut r: &syn::Expr = &node.receiver;
-                            while let syn::Expr::Paren(p) = r {
-                                r = &p.expr;
-                            }
-                            matches!(r, syn::Expr::MethodCall(_))
-                                && matches!(
-                                    leaf.as_str(),
-                                    "map" | "map_err" | "and_then" | "or_else" | "unwrap" | "expect" | "unwrap_or"
-                                        | "unwrap_or_else" | "unwrap_or_default" | "ok" | "err" | "ok_or" | "ok_or_else"
-                                        | "is_some" | "is_none" | "is_ok" | "is_err" | "as_ref" | "as_mut" | "map_or"
-                                        | "map_or_else" | "cloned" | "copied" | "flatten" | "filter" | "inspect"
-                                        | "inspect_err" | "unwrap_err" | "expect_err" | "and" | "or" | "xor" | "zip"
-                                )
-                        };
+                        // NOT a member std also has (`len`, `clone`, `ok_or_else`, `to_string`, `into`, `wrapping_add`, `iter_mut`,
+                        // …): there the value one of the trait's methods returned is a std value (a slice, an `Option`, a `String`) and
+                        // the key is the R549 chain drift, not an associated type; measured on the first cut, `SeqAccess.ok_or_else`
+                        // via `next_element` and `SliceWrapper.len` via `slice` were 300+ such sites with a false reason. The price:
+                        // an associated-type member that shares a std name (`end`, which `RangeInclusive` has) is NOT disclosed by
+                        // this site; serde's `serialize_seq(..)?` bodies are still disclosed through `serialize_element`/`_field`/
+                        // `_entry`/`_key`/`_value`, which std does not have. Stated residual: a body whose only such call is `end()`.
+                        let drift = crate::std_methods::is_std_method_name(&leaf);
                         if let Some(via) = assoc_via.as_deref().filter(|_| !drift) {
                             if !crate::lang::step1_assoc_off() && crate::lang::is_dependency_crate_root(root) {
                                 let tl = full.rsplit("::").next().unwrap_or(&full);
