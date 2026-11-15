@@ -3,6 +3,7 @@
 //! the JSON shape in every script. This is the type-safe, DRY core the bash+Python tooling lacked.
 
 pub mod env;
+pub mod walk;
 
 use std::path::{Path, PathBuf};
 

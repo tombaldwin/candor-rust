@@ -1437,6 +1437,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // walk, so the two file sets are exact complements and no file can fall between them.
     let peeking = peek_excluded;
 
+    // SOUNDNESS R1765 — the build directories Cargo configuration names for this tree (see `deps::pruned_tooling_dir`).
+    let configured_target_dirs = crate::deps::configured_target_dirs(root);
     for entry in crate::deps::ordered_walk(root)
         .into_iter()
         // A nested directory carrying its own Cargo.toml is a DIFFERENT package (Cargo's own
@@ -1447,12 +1449,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if e.depth() == 0 || !e.file_type().is_dir() {
                 return true;
             }
-            // Prune build/tooling dirs by NAME first — cheap, and it skips DESCENT into huge `target/`
-            // and `.git/` trees (the dominant cost on a warm checkout) before the per-dir Cargo.toml
-            // stat. A name starting with `.` is a hidden tooling dir (`.git`/`.github`/`.cargo`/…).
-            let name = e.file_name().to_str().unwrap_or("");
-            if name == "target" || (name.starts_with('.') && name != "." && name != "..") {
+            // Prune build/tooling dirs first — it skips DESCENT into huge `target/` and `.git/` trees (the
+            // dominant cost on a warm checkout) before the per-dir Cargo.toml stat. A name starting with `.` is a
+            // hidden tooling dir (`.git`/`.github`/`.cargo`/…). SOUNDNESS R1765: the build directory is
+            // `<root>/target`, a tagged (`CACHEDIR.TAG`) or a configured target dir — NOT every directory named
+            // `target`, which pruned cc's `src/target/` module with no record anywhere.
+            if crate::deps::pruned_tooling_dir(e, &configured_target_dirs) {
                 return false;
+            }
+            // §E1 REACH COUNTER — a directory named `target` that the pre-R1765 rule pruned and this walk now enters.
+            if e.file_name() == "target" && candor_report::env::trace("CANDOR_R1765_TRACE") {
+                eprintln!("R1765WALK\t{}", e.path().display());
             }
             // A nested dir carrying its own Cargo.toml is a DIFFERENT package (Cargo's own semantics):
             // folding its files into this crate collides same-named fns across packages and cross-wires
@@ -1469,12 +1476,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // contain `target`/`.cargo`/… (a vendored crate lives under `~/.cargo/registry/...`), which must
         // not trip them.
         let rel = p.strip_prefix(root).unwrap_or(p);
-        // target/ build artifacts; hidden dirs (`.git`, `.github`, `.cargo`, …) holding tooling/CI scripts,
-        // not library code (smol_str's `.github/ci.rs` otherwise reported a phantom `Exec`).
+        // Hidden dirs (`.git`, `.github`, `.cargo`, …) holding tooling/CI scripts, not library code (smol_str's
+        // `.github/ci.rs` otherwise reported a phantom `Exec`), and a hidden FILE. Build directories never reach here:
+        // the walk above pruned them. SOUNDNESS R1765 — this filter used to ALSO match any component named `target`,
+        // a second copy of the name rule, so un-pruning `src/target/` there alone would have turned a silence into a
+        // `build-output` exclusion (`judgedElsewhere`, never peeked) — still unanalysed.
         if rel.components().any(|c| {
             c.as_os_str()
                 .to_str()
-                .is_some_and(|s| s == "target" || (s.starts_with('.') && s != "." && s != ".."))
+                .is_some_and(|s| s.starts_with('.') && s != "." && s != "..")
         }) {
             excluded.push((rel.to_string_lossy().into_owned(), "build-output"));
             if peeking { paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned())); }

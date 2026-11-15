@@ -269,14 +269,16 @@ impl DepSigs {
         }
         let root = Path::new(dir);
         let mut facts = Facts { m: m.to_string(), ..Default::default() };
+        // SOUNDNESS R1765 — the proof is over EVERY file of the crate, so the walk prunes only what the scan's own walk
+        // prunes: build output and dot-directories, not a source module directory that happens to be named `target`.
+        let configured = crate::deps::configured_target_dirs(root);
         let walk = crate::deps::ordered_walk(root).into_iter().filter_entry(|e| {
-            let n = e.file_name().to_string_lossy();
             if e.depth() == 0 {
                 return true;
             }
             if e.file_type().is_dir() {
-                // a nested package is another crate; `target` and dot-directories hold no source of this one
-                return !(n.starts_with('.') || n == "target") && !e.path().join("Cargo.toml").is_file();
+                // a nested package is another crate; build output and dot-directories hold no source of this one
+                return !crate::deps::pruned_tooling_dir(e, &configured) && !e.path().join("Cargo.toml").is_file();
             }
             true
         });

@@ -361,6 +361,54 @@ pub(crate) fn ordered_walk<P: AsRef<Path>>(p: P) -> walkdir::WalkDir {
     if candor_report::env::switch("CANDOR_R1722_OFF") { w } else { w.sort_by_file_name() }
 }
 
+/// SOUNDNESS R1765 — the directories Cargo configuration names as the build directory for a tree rooted at `root`,
+/// canonicalized, for [`candor_report::walk::is_build_output_dir`]: `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR`
+/// (relative to the working directory, as Cargo reads them), and every `build.target-dir` in a `.cargo/config.toml` or
+/// `.cargo/config` at `root` or above it (relative to the directory holding `.cargo`, as Cargo resolves it). A UNION, not
+/// Cargo's precedence: each names a directory Cargo writes build output into, and only a directory that EXISTS is
+/// returned, so a stale setting prunes nothing. A tree Cargo has built into carries `CACHEDIR.TAG` anyway; this covers
+/// the configured directory that holds no tag.
+pub(crate) fn configured_target_dirs(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut push = |p: std::path::PathBuf| {
+        if let Ok(c) = std::fs::canonicalize(&p) {
+            if c.is_dir() && !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    };
+    for var in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"] {
+        if let Some(v) = candor_report::env::operator_os(var).filter(|v| !v.is_empty()) {
+            push(std::path::PathBuf::from(v));
+        }
+    }
+    let start = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut cur = Some(start.as_path());
+    while let Some(d) = cur {
+        for f in ["config.toml", "config"] {
+            let Ok(text) = std::fs::read_to_string(d.join(".cargo").join(f)) else { continue };
+            let Ok(doc) = text.parse::<toml::Table>() else { continue };
+            if let Some(t) = doc.get("build").and_then(|b| b.get("target-dir")).and_then(toml::Value::as_str) {
+                push(d.join(t));
+            }
+        }
+        cur = d.parent();
+    }
+    out
+}
+
+/// SOUNDNESS R1765 — the directory-pruning rule every source walk of a crate tree shares: Cargo build output
+/// ([`candor_report::walk::is_build_output_dir`]) and hidden tooling directories (`.git`, `.github`, `.cargo`, …). NOT
+/// "any directory named `target`": that also matched source modules (cc's `src/target/`), silently.
+pub(crate) fn pruned_tooling_dir(e: &walkdir::DirEntry, configured: &[std::path::PathBuf]) -> bool {
+    if e.depth() == 0 || !e.file_type().is_dir() {
+        return false;
+    }
+    let name = e.file_name().to_str().unwrap_or("");
+    (name.starts_with('.') && name != "." && name != "..")
+        || candor_report::walk::is_build_output_dir(e.path(), e.depth(), configured)
+}
+
 /// SHARED BECAUSE WRITING IT TWICE WAS WRONG TWICE. The guard first registered only the directory
 /// token, so a sink inside a dep directory destroyed the operator's report at exit 0. The repair then
 /// hand-wrote a FLAT `read_dir` beside this RECURSIVE walk — and `--deps` writes one subdirectory per
@@ -1091,14 +1139,14 @@ pub(crate) fn cargo_deps(dir: &str) -> (std::collections::HashSet<String>, HashM
     // own Cargo.toml is a different package whose deps are ITS universe, not this crate's — scan_target
     // scans it separately. Without this, a nested fixture/path-dep's deps polluted the parent's κ
     // ledger (the source walk skips the nested sources, so the two had drifted out of agreement).
+    let configured = configured_target_dirs(Path::new(dir));
     for entry in ordered_walk(dir)
         .into_iter()
         .filter_entry(|e| {
             if e.depth() == 0 || !e.file_type().is_dir() {
                 return true;
             }
-            let name = e.file_name().to_str().unwrap_or("");
-            if name == "target" || (name.starts_with('.') && name != "." && name != "..") {
+            if pruned_tooling_dir(e, &configured) {
                 return false;
             }
             !e.path().join("Cargo.toml").is_file()
@@ -1380,14 +1428,14 @@ pub(crate) fn non_registry_manifest_names(dir: &str) -> std::collections::HashSe
     let root_doc: Option<toml::Table> = find_workspace_root(Path::new(dir))
         .and_then(|root| std::fs::read_to_string(root.join("Cargo.toml")).ok())
         .and_then(|t| t.parse::<toml::Table>().ok());
+    let configured = configured_target_dirs(Path::new(dir));
     for entry in ordered_walk(dir)
         .into_iter()
         .filter_entry(|e| {
             if e.depth() == 0 || !e.file_type().is_dir() {
                 return true;
             }
-            let name = e.file_name().to_str().unwrap_or("");
-            if name == "target" || (name.starts_with('.') && name != "." && name != "..") {
+            if pruned_tooling_dir(e, &configured) {
                 return false;
             }
             !e.path().join("Cargo.toml").is_file()
