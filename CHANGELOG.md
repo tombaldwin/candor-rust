@@ -12,12 +12,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 ## Unreleased
 
 - ⚠ **Resolver step 1: the module namespace answers per scope, per namespace and per `#[cfg]` arm set** (SOUNDNESS R1716,
-  R1738, R1711 (b), R1426, R1771, R1741, R1727 — silent under-reports; R653/R753, R654, R752, R900 — precision; all pre-existing
-  on 0.42.0). An inline module that imports nothing sees the extern prelude, not its parent's `use`/`mod` of that name; a
+  R1738, R1711 (b), R1426, R1771, R1741, R1727 — silent under-reports; R653/R753, R654 (impl keys only), R752 — precision; all
+  pre-existing on 0.42.0; R900 is NOT closed: its arm sets are types, whose per-arm member resolution is step 4). An inline module that imports nothing sees the extern prelude, not its parent's `use`/`mod` of that name; a
   crate-local glob answers with the dependency a module re-binds (`use crate::n::*; sys::unlink(p)`); a unit variant brought in
   by an enum glob types its receiver, at module and block scope; `self` is the impl's type whatever a body-local `use`
   rebinds; a `#[cfg]` definition arm joins an external re-export arm, and `#[cfg]`-armed globs (`pub(crate) use
-  self::inner::*` over `#[path]` arms) answer with the union of the arms; a bound written `T: crate::io::BufRead` through a
+  self::inner::*` over `#[path]` arms) answer a non-type name with the union of the arms; a bound written `T: crate::io::BufRead` through a
   local re-export keys the dependency's member. Precision: the root file's own glob no longer mints a crate trait's members
   under the dependency's key in Pass A (R653/R753); a module's own trait is not keyed under a same-name macro import (R654);
   re-export claimants that stand for one definition are not ambiguous (R752). Every acceptance program was executed; gates
