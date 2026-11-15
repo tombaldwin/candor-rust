@@ -4569,6 +4569,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // CENSUS (unit-level): what THIS expression adds to its function's direct effects and local call edges. The
         // function's own entries are taken out first and their union put back after, so nothing the body reads changes
         // (it never reads these maps for the function it is filling) and the report is the same with the dump off.
+        // The ONLY readers of `direct`/`calls`/`via_cross` run after the walk (`find_source` for explain, and
+        // `check_crate_post`); a future read inside `check_expr_body` would make the oracle-ON lint a different engine.
+        // Measured (census 2, phase A): the lint's reports oracle-ON vs oracle-OFF are byte-identical on 3 units.
         let caller = enclosing_named_fn(cx.tcx, expr.hir_id);
         let stash = caller.map(|c| (self.direct.remove(&c), self.calls.remove(&c), self.via_cross.remove(&c)));
         self.check_expr_body(cx, expr);

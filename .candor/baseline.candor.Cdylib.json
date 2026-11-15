@@ -56,12 +56,22 @@
       "unresolved": true,
       "hash": "7db9109f0371c9d779092319f35823b4",
       "calls": [
+        "Candor::compute_layer_violations",
+        "Candor::disclose_zero_match",
+        "Candor::record_switches",
         "Candor::record_violation",
+        "Candor::record_violation_origin",
+        "Candor::write_gate_verdict",
+        "Candor::write_report_files",
         "load_baseline",
         "mir_spike::drop_edges",
+        "mir_spike::run",
+        "oracle::Oracle::flush",
+        "oracle::Oracle::units",
         "propagate",
+        "record_unit_completed",
         "span_lint",
-        "write_layer_reach"
+        "unit_file_key"
       ],
       "invisible": [
         "candor_classify",
@@ -173,12 +183,9 @@
         "read"
       ],
       "calls": [
-        "Candor::charge_dep_body",
-        "Candor::record_resolved_call",
-        "generic_callee_local_edges",
-        "oracle::Oracle::record",
-        "return_type_driver_local_edge",
-        "std_driver_local_edges"
+        "Candor::check_expr_body",
+        "oracle::Oracle::note_expr",
+        "oracle::Oracle::record"
       ],
       "invisible": [
         "candor_classify",
@@ -970,6 +977,7 @@
       ],
       "calls": [
         "oracle::Oracle::def",
+        "oracle::Oracle::origin",
         "oracle::Oracle::resolve",
         "oracle::Oracle::site",
         "resolve_cmp_op"
@@ -1038,6 +1046,185 @@
         "oracle::Oracle::pos"
       ],
       "invisible": [
+        "rustc_session",
+        "rustc_span",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "Candor::check_expr_body",
+      "loc": "src/lib.rs:4201:5: 4201:88",
+      "inferred": [
+        "Env",
+        "Unknown"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env"
+      ],
+      "overdeclared": [],
+      "unresolved": true,
+      "hash": "80b41f5dac79681b91e2418271b14852",
+      "calls": [
+        "Candor::charge_dep_body",
+        "Candor::record_resolved_call",
+        "generic_callee_local_edges",
+        "return_type_driver_local_edge",
+        "std_driver_local_edges"
+      ],
+      "invisible": [
+        "candor_classify",
+        "indexmap",
+        "rustc_data_structures",
+        "rustc_hashes",
+        "rustc_hir",
+        "rustc_hir_id",
+        "rustc_lint",
+        "rustc_middle",
+        "rustc_session",
+        "rustc_span",
+        "rustc_type_ir"
+      ]
+    },
+    {
+      "fn": "oracle::Oracle::binding_origin",
+      "loc": "src/oracle.rs:495:5: 495:112",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "80b41f5dac79681b411b85e40a2e0d36",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "oracle::Oracle::origin"
+      ],
+      "invisible": [
+        "rustc_middle",
+        "rustc_session",
+        "rustc_span",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "oracle::Oracle::key_of",
+      "loc": "src/oracle.rs:414:5: 414:67",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "80b41f5dac79681ba0f8b3446525c1db",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "oracle::Oracle::pos"
+      ],
+      "invisible": [
+        "rustc_session",
+        "rustc_span",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "oracle::Oracle::note_expr",
+      "loc": "src/oracle.rs:565:5: 573:6",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "80b41f5dac79681be92b30d060dae4cd",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "oracle::Oracle::key_of"
+      ],
+      "invisible": [
+        "rustc_hir",
+        "rustc_hir_id",
+        "rustc_middle",
+        "rustc_session",
+        "rustc_span",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "oracle::Oracle::origin",
+      "loc": "src/oracle.rs:435:5: 435:113",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "80b41f5dac79681bc4cd26d1ae548434",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "oracle::Oracle::binding_origin",
+        "oracle::Oracle::key_of",
+        "oracle::Oracle::origin"
+      ],
+      "invisible": [
+        "rustc_middle",
+        "rustc_session",
+        "rustc_span",
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "oracle::Oracle::units",
+      "loc": "src/oracle.rs:631:5: 636:6",
+      "inferred": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "80b41f5dac79681b16169cbbba081ed9",
+      "fs": [
+        "read"
+      ],
+      "calls": [
+        "oracle::Oracle::pos"
+      ],
+      "invisible": [
+        "rustc_hir",
+        "rustc_middle",
         "rustc_session",
         "rustc_span",
         "serde_json"
