@@ -11,6 +11,7 @@
 //! - `resolved` — `Instance::try_resolve` under the CALLER's typing env: the impl item where the caller's own types decide
 //!   it (override vs provided default included), still the trait item where only a monomorphising caller or a vtable can;
 //! - `mono` — the same with opaque types revealed (post-analysis), which is what codegen runs.
+//!
 //! Resolution is judged against `resolved`; effect truth against `mono`.
 //!
 //! Desugared calls (`for`, `?`, `.await`, operators) are LABELLED, not dropped. A site inside a macro expansion is keyed

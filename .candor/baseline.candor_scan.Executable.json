@@ -18472,6 +18472,32 @@
       ]
     },
     {
+      "fn": "sidecar::write",
+      "loc": "crates/candor-scan/src/sidecar.rs:390:1: 390:99",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "403dc0725d279b2f5c085c82783b3e86",
+      "fs": [
+        "read",
+        "write"
+      ],
+      "invisible": [
+        "serde_json"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "surface::emit",
       "loc": "crates/candor-scan/src/surface.rs:24:1: 30:2",
       "inferred": [
