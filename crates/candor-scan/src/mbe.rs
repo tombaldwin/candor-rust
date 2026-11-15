@@ -762,10 +762,15 @@ impl Ctx<'_> {
         if crate::lang::reach_debug() && (SEP2_USED.with(|c| c.get()) || arms.iter().any(|a| uses_sep2(&a.matcher))) {
             eprintln!("R1748SEP\t{name}");
         }
-        let ts = if cross_file {
-            if candor_report::env::trace("CANDOR_R1004_INSTR") {
-                eprintln!("R1004XFILE\t{name}"); // §E1 REACH COUNTER, on the CHANGED branch only
-            }
+        if cross_file && candor_report::env::trace("CANDOR_R1004_INSTR") {
+            eprintln!("R1004XFILE\t{name}"); // §E1 REACH COUNTER, on the CHANGED branch only
+        }
+        // SOUNDNESS R1541 / I1 stage 1 (Fable §7.7) — a SAME-FILE expansion is re-spanned to its invocation too, as a
+        // cross-file one always was. With definition spans, N expansions of one macro published N units at ONE `loc`
+        // inside the `macro_rules!` body (hickory-resolver's eleven `*_lookup` at `resolver.rs:51:9`), which is the input
+        // the census mapper could not disambiguate (F1) and R1537's SAMELOC class. rustc's own expansion sites carry the
+        // invocation as their outer span. `CANDOR_I1_RESPAN_OFF=1` keeps definition spans for a same-file macro.
+        let ts = if cross_file || !candor_report::env::switch("CANDOR_I1_RESPAN_OFF") {
             respan_to(ts, mac.path.segments.first().map(|s| s.ident.span()).unwrap_or_else(proc_macro2::Span::call_site))
         } else {
             ts

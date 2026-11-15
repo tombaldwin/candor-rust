@@ -269,3 +269,46 @@ fn i1_step2_an_unexpanded_invocation_keeps_the_r828_hedge() {
     assert!(eff(&rows, "l2").contains(&"Unknown".to_string()), "the R828 hedge must stay: {rows:?}");
     assert!(eff(&rows, "l2").contains(&"Fs".to_string()), "and the expanded M2 impl is charged: {rows:?}");
 }
+
+/// Step 3 (Fable §7.7) — a SAME-FILE expansion is re-spanned to its invocation, so N expansions of one macro publish N
+/// units at N invocation `loc`s rather than all at one line inside the `macro_rules!` body (hickory-resolver's eleven
+/// `*_lookup` units at `resolver.rs:51:9`, which the census mapper could not tell apart — F1).
+#[test]
+fn i1_step3_same_file_expansions_carry_the_invocation_loc() {
+    let d = tmpdir("respan");
+    write_crate(
+        &d,
+        "respan",
+        "",
+        "pub struct R;\nmacro_rules! lookup_fn {\n    ($p:ident) => {\n        pub fn $p(&self) { EFF }\n    };\n}\n\
+         impl R {\n    lookup_fn!(a_lookup);\n    lookup_fn!(b_lookup);\n}\n",
+    );
+    let locs = |env: &[(&str, &str)]| -> BTreeMap<String, String> {
+        let out = d.join("out");
+        let _ = std::fs::remove_dir_all(&out);
+        let mut cmd = Command::new(bin());
+        cmd.arg(d.to_string_lossy().as_ref()).arg("--out").arg(out.join("r")).env_remove("CANDOR_I1_RESPAN_OFF");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        assert!(cmd.output().unwrap().status.code().is_some_and(|c| c == 0 || c == 1));
+        let mut m = BTreeMap::new();
+        for e in std::fs::read_dir(&out).unwrap() {
+            let p = e.unwrap().path();
+            let n = p.file_name().unwrap().to_string_lossy().to_string();
+            if n.ends_with(".scan.json") {
+                let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+                for f in v["functions"].as_array().unwrap() {
+                    m.insert(f["fn"].as_str().unwrap().to_string(), f["loc"].as_str().unwrap_or("").to_string());
+                }
+            }
+        }
+        m
+    };
+    let on = locs(&[]);
+    // the `lookup_fn!` path token of each invocation (lib.rs line 1 is the `#![allow]` the helper writes)
+    assert_eq!(on.get("R::a_lookup").map(String::as_str), Some("src/lib.rs:9:5"), "{on:?}");
+    assert_eq!(on.get("R::b_lookup").map(String::as_str), Some("src/lib.rs:10:5"), "{on:?}");
+    let off = locs(&[("CANDOR_I1_RESPAN_OFF", "1")]);
+    assert_eq!(off.get("R::a_lookup"), off.get("R::b_lookup"), "OFF: both at the definition span: {off:?}");
+}
