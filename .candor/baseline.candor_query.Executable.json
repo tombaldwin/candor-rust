@@ -2305,6 +2305,28 @@
       ]
     },
     {
+      "fn": "state::collect_rs_at",
+      "loc": "crates/candor-query/src/state.rs:265:1: 265:67",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "e996526b43580c18a2a778eee9c8d21c",
+      "invisible": [
+        "candor_report"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "state::expected_units",
       "loc": "crates/candor-query/src/state.rs:290:1: 290:95",
       "inferred": [

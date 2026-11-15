@@ -248,6 +248,28 @@
       "incomplete": [
         "Fs"
       ]
+    },
+    {
+      "fn": "walk::is_build_output_dir",
+      "loc": "crates/candor-report/src/walk.rs:31:1: 31:85",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "6ce0dc0dd74a940b65da455b0dab5329",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
     }
   ]
 }
