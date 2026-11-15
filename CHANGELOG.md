@@ -26,6 +26,30 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   call sites in the whole draw. Standalone A/B over 400 crates: byte-identical (the
   route is unreachable without a chained report).
 
+- ⚠ **A trait impl or a type that a crate's own `macro_rules!` generates is now a unit** (SOUNDNESS R1541, I1 stage 1; silent
+  under-reports, pre-existing on 0.42.0). The expander already expanded these items, then a filter kept only free fns,
+  inherent impls and operator impls, so `impl_load!(AtomicU32)` produced no `AtomicU32::load_it`. A gate scoped at the
+  unit, and the UFCS caller `<AtomicU32 as LoadIt>::load_it(a)`, read pure over an executed write. Now:
+  - every item an expansion yields is spliced, except a refusal list (modules, `use`s, `extern crate`, nested macros,
+    traits; modules and `use`s are stage 2);
+  - a fully expanded invocation becomes a marker, so the `macro:` hedges, R828's macro-implementor hedge and the
+    type-surface "unclosable" mark no longer re-disclose what now stands as units;
+  - a partially expanded invocation keeps every hedge;
+  - a chained consumer joins the producer's macro-made impl (`deny Fs` 0 → 1 on the executed fixtures);
+  - an invocation whose name the file also imports from another crate, or a `#[cfg]`-gated definition beside such an
+    import, is refused rather than bound to the wrong definition;
+  - same-file expansions carry the invocation's `loc` (R1802).
+
+  Two pre-existing silences exposed when the old `macro:` cover went away are closed in the same change:
+  - a generic free fn whose leaf a same-name method shares: `from_str::<B>(s)?.bits()`, bitflags 2.9.4. This is a
+    resolution, and the `Flags::bits` key is kept;
+  - a path call through `type Cursor = u32;` to a local trait impl for `u32`, x11rb-protocol. This is disclosed.
+
+  Corpus A/B main → this, 181 crates: 0 concrete effects lost, 28 unit-scoped `deny E` gates newly fire (Rand 25, Log 3),
+  27 existing rows newly `Unknown` (0.022%), and every lost `Unknown` / removed row is accounted for in the lane report.
+  Kill switches: `CANDOR_I1_OFF=1`, `CANDOR_I1_BIND_OFF=1`, `CANDOR_I1_RESPAN_OFF=1`, `CANDOR_I1_RETGENW_OFF=1`,
+  `CANDOR_I1_PRIMALIAS_OFF=1`. Scan cache rev 195.
+
 - ⚠ **A member called on a GENERIC receiver now follows the bound's `Deref` target, conversion argument and projection**
   (SOUNDNESS R1657 bound projection, R1793, R1795, R1796; silent under-reports, pre-existing on 0.42.0). A bound was stored as
   its trait leaf, so `self.session.read_tls(..)` under `C: DerefMut + Deref<Target = ConnectionCommon<..>>` (tokio-rustls,
