@@ -16,7 +16,7 @@
 //! | `a_root_glob_does_not_claim_a_root_declaration_in_pass_a` | R653 / R753 | N2, pass boundary | `passa` |
 //! | `a_derive_macro_import_does_not_take_the_traits_name` | R654 | N5 | `ns` |
 //! | `claimants_of_one_definition_are_not_ambiguous` | R752 | identity by definition (§2.5 clause 3) | `ident` |
-//! | `cfg_arm_globs_are_a_union` | R900 | N6 | `cfg` |
+//! | `cfg_arm_globs_are_a_union` | R900's rule, fn names only (types: step 4) | N6 | `cfg` |
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -275,24 +275,31 @@ fn claimants_of_one_definition_are_not_ambiguous() {
         "part `ident` off restores the refusal (fixture reaches the change)");
 }
 
-/// R900: `pub(crate) use self::inner::*;` over two `#[cfg]` `#[path]` arms of `mod inner` is the union of the arms.
+/// R900's rule (cfg arms are a set) for a FUNCTION reached through `pub(crate) use self::inner::*;` over two `#[cfg]` `#[path]`
+/// arms of `mod inner`: the union of the arms. A TYPE reached that way (`zi::Database::from_env`, jiff's shape) keeps the
+/// refusal and its disclosure: a member call through an arm set of types is resolved per arm, and an arm whose type gets the
+/// member from a trait's provided body names no unit there (flate2, corpus A/B) — that is member resolution, step 4.
 #[test]
 fn cfg_arm_globs_are_a_union() {
-    let src = "pub mod zi;\npub fn get_zq() -> u32 { zi::Database::from_env() }\n";
+    let src = "pub mod zi;\npub fn get_zq() -> u32 { zi::from_env() }\npub fn ty_zq() -> u32 { zi::Database::from_env() }\n\
+        pub mod co { pub fn from_env() -> u32 { 1 } pub struct Database; impl Database { pub fn from_env() -> u32 { 1 } } }\n";
     let zi = "pub(crate) use self::inner::*;\n\
         #[cfg(not(feature = \"zi\"))] #[path = \"disabled.rs\"] mod inner;\n\
         #[cfg(feature = \"zi\")] #[path = \"enabled.rs\"] mod inner;\n";
-    let dis = "pub struct Database;\nimpl Database { pub fn from_env() -> u32 { 0 } }\n";
-    let en = "pub struct Database;\nimpl Database { pub fn from_env() -> u32 { std::env::var(\"TZDIR\").map(|v| v.len() as u32).unwrap_or(0) } }\n";
-    let other = "pub mod co { pub struct Database; impl Database { pub fn from_env() -> u32 { 1 } } }\n";
+    let dis = "pub fn from_env() -> u32 { 0 }\npub struct Database;\nimpl Database { pub fn from_env() -> u32 { 0 } }\n";
+    let en = "pub fn from_env() -> u32 { std::env::var(\"TZDIR\").map(|v| v.len() as u32).unwrap_or(0) }\n\
+        pub struct Database;\nimpl Database { pub fn from_env() -> u32 { std::env::var(\"TZDIR\").map(|v| v.len() as u32).unwrap_or(0) } }\n";
     let d = fixture(
         "arms",
         "[features]\nzi = []\n",
-        &[("src/lib.rs", &format!("{src}{other}")), ("src/zi/mod.rs", zi), ("src/zi/disabled.rs", dis), ("src/zi/enabled.rs", en)],
+        &[("src/lib.rs", src), ("src/zi/mod.rs", zi), ("src/zi/disabled.rs", dis), ("src/zi/enabled.rs", en)],
     );
     let (on, v) = scan(&d);
-    assert!(has(&on, "get_zq", "Env"), "R900: the enabled arm's env read is charged\n{v:#}");
-    assert!(!has(&on, "get_zq", "Unknown"), "R900: the arms are a set, not an ambiguity\n{v:#}");
+    assert!(has(&on, "get_zq", "Env"), "a fn through the arm set: the enabled arm's env read is charged\n{v:#}");
+    assert!(!has(&on, "get_zq", "Unknown"), "a fn through the arm set is a union, not an ambiguity\n{v:#}");
+    assert!(has(&on, "ty_zq", "Unknown"), "control: a type through the arm set keeps the refusal's disclosure\n{v:#}");
+    // Reach: under the fan-out cap the re-export index already unions a fn's cfg arms, so this fn is answered with the
+    // part off too; the shape the part alone answers is R190(e)'s thirteen arms (`tests.rs`, `go` gains the live `Exec`).
     let off = scan_off(&d, "cfg");
-    assert!(!has(&off, "get_zq", "Env"), "part `cfg` off restores the hedge");
+    assert!(has(&off, "get_zq", "Env") && has(&off, "ty_zq", "Unknown"), "part `cfg` off: the legacy reading is unchanged here");
 }

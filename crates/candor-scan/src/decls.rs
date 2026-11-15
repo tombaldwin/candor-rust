@@ -2269,6 +2269,8 @@ pub(crate) const NS_SEP: char = '\u{1}';
 pub(crate) const NS_TWIN_MARK: &str = "\u{1}ns-twin";
 pub(crate) const NS_EXT_GLOB_PRIV_MARK: &str = "\u{1}ns-ext-glob-priv";
 pub(crate) const NS_EXT_USE_PRIV_MARK: &str = "\u{1}ns-ext-use-priv";
+/// RESOLVER STEP 1 — the module's TYPE-namespace declarations (`struct`/`enum`/`union`/`type`/`trait`), `NS_SEP`-joined.
+pub(crate) const NS_TYPES_MARK: &str = "\u{1}ns-types";
 
 /// SOUNDNESS R1697/R1702 — ONE MODULE NAMESPACE PER MODULE, for the question every re-export route answers in its own slice:
 /// "what does the name `x`, written in (or below) module `m`, denote?". Built once per scan from the merged edges and
@@ -2317,6 +2319,8 @@ pub(crate) struct NsIndex {
     /// RESOLVER STEP 1 (SOUNDNESS R900) — `(module, glob source)` of a placed glob that is one ARM of a `#[cfg]` set: the
     /// edge carries a `#[cfg]`, or names several sources (a `#[path]`-redirected `mod` per arm).
     pub(crate) arm_placed: std::collections::HashSet<(String, String)>,
+    /// RESOLVER STEP 1 — module -> the names it declares in the TYPE namespace (`NS_TYPES_MARK`).
+    pub(crate) types: HashMap<String, std::collections::HashSet<String>>,
     /// Pass B answers of `resolve_memo` (the installed table no longer changes then), by caller and key
     memo: std::sync::Mutex<HashMap<String, Option<Vec<String>>>>,
 }
@@ -2346,6 +2350,9 @@ impl NsIndex {
                     if e.alias == NS_NAMES_OPAQUE_MARK {
                         ns.opaque.insert(e.module.clone());
                     }
+                }
+                NS_TYPES_MARK => {
+                    ns.types.entry(e.module.clone()).or_default().extend(e.name.split(NS_SEP).filter(|n| !n.is_empty()).map(str::to_string));
                 }
                 NS_TWIN_MARK => {
                     for n in e.name.split(NS_SEP).filter(|n| !n.is_empty()) {
@@ -2498,6 +2505,17 @@ impl NsIndex {
             }
             // a source that is not an arm supplies `x` in every build, so a second supplier is a real E0659 reading
             if !self.arm_placed.contains(&(m.to_string(), s.clone())) || one.len() != 1 {
+                return false;
+            }
+            // A TYPE answered by several arms is not taken: a member call through it is resolved per arm downstream, and an arm
+            // whose type gets the member from a trait's PROVIDED body names no unit there, so the union lost that arm (flate2
+            // `ffi::{c,rust}::Deflate`: `self.inner.compress_uninit(..)` edged the `c` arm only and `invisible:[miniz_oxide]`
+            // went; corpus A/B, first cut). Member resolution over an arm set is step 4's; the refusal stands for types.
+            if one.iter().any(|c| {
+                let q = c.strip_prefix("crate::").unwrap_or(c);
+                let (m, n) = q.rsplit_once("::").unwrap_or(("", q));
+                self.types.get(m).is_some_and(|t| t.contains(n))
+            }) {
                 return false;
             }
             covered.extend(one);
@@ -2985,7 +3003,13 @@ fn collect_private_uses_in(
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut opaque = false;
+        let mut type_names: Vec<String> = Vec::new();
         for it in items {
+            if matches!(it, syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Union(_) | syn::Item::Type(_) | syn::Item::Trait(_)) {
+                if let Some(n) = declared_item_name(it, include_tests) {
+                    type_names.push(n);
+                }
+            }
             match it {
                 syn::Item::Use(u) => {
                     if !include_tests && is_cfg_test(&u.attrs) {
@@ -3061,6 +3085,17 @@ fn collect_private_uses_in(
                 from: Vec::new(),
                 name: twins.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(&NS_SEP.to_string()),
                 alias: NS_TWIN_MARK.to_string(),
+                cfg_gated: false,
+            });
+        }
+        if !type_names.is_empty() && !step1_cfg_off() {
+            type_names.sort();
+            type_names.dedup();
+            out.push(Reexport {
+                module: modpath.to_string(),
+                from: Vec::new(),
+                name: type_names.join(&NS_SEP.to_string()),
+                alias: NS_TYPES_MARK.to_string(),
                 cfg_gated: false,
             });
         }
