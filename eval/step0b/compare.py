@@ -124,6 +124,7 @@ class Scan:
     def __init__(self, doc):
         self.root = norm(doc["root"])
         self.crates = set()
+        self.ty_vocab = set()
         self.fn_rows = collections.defaultdict(list)  # file -> sorted [(line, col, qual)]
         self.qual_rows = collections.defaultdict(list)  # qual -> [(file, line, col)]
         self.fns = doc["fns"]
@@ -275,12 +276,14 @@ def classify_site(o, scan, sites_written, sites_exp, used):
     status = res.get("status")
     d = res.get("def")
     dispatch_site = status in ("unresolved", "virtual")
-    in_exp = o["exp"]
+    # A site is in an EXPANSION when a macro made it, when a compiler AST pass made it (the proc-macro harness), or when its
+    # enclosing function is macro-generated (a derive's body) even though the token it is keyed on was written.
+    in_exp = o["exp"] or o.get("caller_exp", False) or any(e.startswith("astpass:") for e in (o.get("expn") or []))
     desugar = o.get("desugar")
     # Which scanner records answer this site?
     matched = []
     via = None
-    if not in_exp:
+    if not o["exp"]:
         k = (file, line, col, 0)
         if k in sites_written and not desugar:
             matched = [sites_written[k]]
@@ -320,7 +323,7 @@ def classify_site(o, scan, sites_written, sites_exp, used):
     truth_local = None
     truth_ext = set()
     if d and not dispatch_site:
-        if d.get("local") and d.get("ident"):
+        if d.get("ident") and (d.get("local") or norm(d["ident"]["file"]).startswith(scan.root + os.sep)):
             ow = scan.owner_of(d["ident"]["file"], d["ident"]["line"], d["ident"]["col"])
             if ow and norm(d["ident"]["file"]) == norm(d["ident"]["file"]):
                 truth_local = ("L", norm(d["ident"]["file"]), ow[0], ow[1])
@@ -328,6 +331,9 @@ def classify_site(o, scan, sites_written, sites_exp, used):
                 truth_local = ("L?", norm(d["ident"]["file"]), d["ident"]["line"], d["ident"]["col"])
         else:
             truth_ext = ext_identities(d)
+            # The Self type as WRITTEN is an owner too: `AtomicUsize::new` names `Atomic<usize>::new` through an alias.
+            if o.get("written_self"):
+                truth_ext |= {(k, o["written_self"], m) for (k, _, m) in truth_ext}
     named = o.get("named") or {}
     if dispatch_site:
         truth_ext = ext_identities(named)
@@ -344,12 +350,13 @@ def classify_site(o, scan, sites_written, sites_exp, used):
         elif truth_ext:
             reached = bool(truth_ext & a["ext"]) or any(
                 (k == "" and (o_, m_) in {(t[1], t[2]) for t in truth_ext}) for (k, o_, m_) in a["ext"])
-            if not reached and not dispatch_site:
+            if not reached and not dispatch_site and o["form"] == "method":
                 # Autoderef: the scanner names the member on the receiver as written (`Vec::iter`) where rustc's item
                 # sits on a deref target (`<[T]>::iter`). Same member, both owners on rustc's own autoderef chain.
                 chain = set(((o.get("recv") or {}).get("chain")) or [])
                 towners = {o_ for (_, o_, _) in truth_ext}
-                reached = any(m_ == member and ow in chain for (_, ow, m_) in a["ext"]) and bool(towners & chain)
+                tkr = {k for (k, _, _) in truth_ext}
+                reached = any(m_ == member and ow in chain and (k == "" or k in tkr) for (k, ow, m_) in a["ext"]) and bool(towners & chain)
             if not reached and dispatch_site:
                 # the scanner names the trait member (`Tr::m` dispatch note) -> the typeck-level item
                 nm = named.get("name", "")
@@ -376,6 +383,9 @@ def classify_site(o, scan, sites_written, sites_exp, used):
         mono = o.get("mono") or {}
         if desugar:
             cls = "UNCLASSIFIED(desugared:%s)" % desugar.split(" ")[0]
+        elif d and truth_local and d.get("exp") and not dispatch_site:
+            # rustc's target is MACRO-GENERATED (a derive, a macro_rules! impl): the scanner has no unit for it to reach.
+            cls = "UNCLASSIFIED(target-macro-generated)"
         elif dispatch_site:
             if a and (a["dispatch"] or a["refusals"] or len(a["targets"]) + len(a["ext"]) > 1):
                 cls = "D"
@@ -389,8 +399,12 @@ def classify_site(o, scan, sites_written, sites_exp, used):
             untyped_ref = any("untyped" in r for r in a["refusals"])
             if o["form"] == "method" and has_recv:
                 # A method call: the scanner's receiver type set against rustc's whole autoderef chain.
-                if a["untyped"] or untyped_ref or not a["tys"] or not (a["tys"] & chain):
+                if a["untyped"] or untyped_ref or not a["tys"]:
                     cls = "T"
+                elif not (a["tys"] & chain):
+                    # A head rustc never names anywhere in this crate is not a TYPE the scanner got wrong but a NAME it
+                    # did not resolve (a `use X as Y` rename, a `type` alias): the T/N split cannot tell which.
+                    cls = "T" if (a["tys"] & scan.ty_vocab) else "UNCLASSIFIED(T-or-N:scanner-type-name-unknown-to-rustc)"
                 else:
                     cls = "N/M"
             else:
@@ -420,7 +434,7 @@ def classify_site(o, scan, sites_written, sites_exp, used):
 
 
 def macro_origin(o):
-    if not o["exp"]:
+    if not (o["exp"] or o.get("caller_exp") or any(e.startswith("astpass:") for e in (o.get("expn") or []))):
         return None
     ex = o.get("expn") or []
     names = [e for e in ex if not e.startswith("desugar:")]
@@ -458,6 +472,14 @@ def compare(oracle_dir, sidecar_dir, root=None, not_covered=None):
                 v = v.get("def", v) if lvl != "named" else v
                 if v and v.get("krate") and not v.get("local"):
                     scan.crates.add(v["krate"])
+            for t in ((o.get("recv") or {}).get("chain") or []):
+                scan.ty_vocab.add(t)
+            for lvl in ("named", "resolved", "mono"):
+                v = o.get(lvl) or {}
+                v = v.get("def", v) if lvl != "named" else v
+                par = (v or {}).get("parent") or {}
+                if par.get("self"):
+                    scan.ty_vocab.add(par["self"])
         outside = [o for o in osites if not norm(o["key"]["file"]).startswith(scan.root + os.sep)]
         for o in outside:
             excluded["oracle-site-outside-scanned-tree(OUT_DIR/include/other crate)"] += 1
@@ -542,7 +564,7 @@ def summarize(rows, excluded, label=""):
     out.append("non-AGREE oracle sites by class:")
     for (v, c), n in sorted(cls.items()):
         out.append("  %-20s %-45s %d" % (v, c, n))
-    tk = collections.Counter((r["target_kind"], r["verdict"]) for r in rows if r["side"] == "oracle")
+    tk = collections.Counter((r.get("target_kind", "-"), r["verdict"]) for r in rows if r["side"] == "oracle")
     out.append("oracle sites by target kind x verdict:")
     for (k, v), n in sorted(tk.items()):
         out.append("  %-9s %-20s %d" % (k, v, n))

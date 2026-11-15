@@ -134,11 +134,9 @@ impl Oracle {
         let krate = tcx.crate_name(did.krate).to_string();
         let dk = tcx.def_kind(did);
         let name = tcx.opt_item_name(did).map(|n| n.to_string()).unwrap_or_default();
-        let ident = if did.is_local() {
-            tcx.def_ident_span(did).map(|s| self.pos(cx, s)).unwrap_or_else(|| "null".into())
-        } else {
-            "null".into()
-        };
+        // A non-local item's span comes from its crate's metadata: for a sibling crate of the same package (a bin calling
+        // its lib) it names the file the scanner read, which is what makes it a LOCAL target to the scanner.
+        let ident = tcx.def_ident_span(did).map(|s| self.pos(cx, s)).unwrap_or_else(|| "null".into());
         let mut parent = "null".to_string();
         if let Some(p) = tcx.opt_parent(did) {
             let pk = tcx.def_kind(p);
@@ -168,13 +166,14 @@ impl Oracle {
         let trait_item = tcx.trait_of_assoc(did).is_some();
         let has_value = trait_item && tcx.defaultness(did).has_value();
         format!(
-            "{{\"path\":{},\"verbose\":{},\"krate\":{},\"local\":{},\"kind\":{},\"name\":{},\"ident\":{ident},\"trait_item\":{trait_item},\"provided\":{has_value},\"parent\":{parent}}}",
+            "{{\"path\":{},\"verbose\":{},\"krate\":{},\"local\":{},\"kind\":{},\"name\":{},\"ident\":{ident},\"trait_item\":{trait_item},\"provided\":{has_value},\"exp\":{},\"parent\":{parent}}}",
             esc(&path),
             esc(&verbose),
             esc(&krate),
             did.is_local(),
             esc(&format!("{dk:?}")),
-            esc(&name)
+            esc(&name),
+            tcx.def_span(did).from_expansion()
         )
     }
 
@@ -222,6 +221,7 @@ impl Oracle {
         let tcx = cx.tcx;
         // (form, key span, named item, generic args, receiver expr, path self type)
         let mut recv: Option<&'tcx Expr<'tcx>> = None;
+        let mut written_self: Option<String> = None;
         let (form, key_sp, named, args): (String, Span, Option<DefId>, Option<ty::GenericArgsRef<'tcx>>) = match expr.kind {
             ExprKind::MethodCall(seg, r, _, _) => {
                 recv = Some(r);
@@ -241,7 +241,13 @@ impl Oracle {
                             let f = if p.segments.len() > 1 { "path" } else { "path1" };
                             (f.into(), p.segments.last().map(|s| s.ident.span).unwrap_or(callee.span), named, args)
                         }
-                        QPath::TypeRelative(_, seg) => ("type_path".into(), seg.ident.span, named, args),
+                        QPath::TypeRelative(q, seg) => {
+                            // The Self type AS WRITTEN (`AtomicUsize` where rustc's item sits on `Atomic<usize>`).
+                            if let rustc_hir::TyKind::Path(QPath::Resolved(_, qp)) = q.kind {
+                                written_self = qp.segments.last().map(|s| s.ident.to_string());
+                            }
+                            ("type_path".into(), seg.ident.span, named, args)
+                        }
                     },
                     _ => ("callexpr".into(), callee.span, named, args),
                 }
@@ -352,6 +358,9 @@ impl Oracle {
                 _ => "null".into(),
             },
         };
+        // A caller that is itself MACRO-GENERATED (a derive's `clone`, an attribute's wrapper) is not written code even
+        // where a call inside it carries a written token's span.
+        let caller_exp = crate::enclosing_named_fn(tcx, expr.hir_id).is_some_and(|c| tcx.def_span(c.to_def_id()).from_expansion());
         let caller = crate::enclosing_named_fn(tcx, expr.hir_id)
             .map(|c| esc(&tcx.def_path(c.to_def_id()).to_string_no_crate_verbose()))
             .unwrap_or_else(|| "null".into());
@@ -360,9 +369,10 @@ impl Oracle {
             None => String::new(),
         };
         self.lines.push(format!(
-            "{{\"kind\":\"site\",\"form\":{},\"member\":{},{site},\"named\":{named_s},\"resolved\":{resolved},\"mono\":{mono},\"recv\":{recv_s},\"caller\":{caller}}}",
+            "{{\"kind\":\"site\",\"form\":{},\"member\":{},{site},\"named\":{named_s},\"resolved\":{resolved},\"mono\":{mono},\"recv\":{recv_s},\"written_self\":{},\"caller\":{caller},\"caller_exp\":{caller_exp}}}",
             esc(&form),
-            esc(&member)
+            esc(&member),
+            written_self.as_deref().map(esc).unwrap_or_else(|| "null".into())
         ));
     }
 
