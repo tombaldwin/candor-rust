@@ -86,6 +86,14 @@ def map_unit(u, scan):
     same = [q for (l, c, q) in rows if l in (line, idl)]
     if len(set(same)) == 1:
         return same[0], None
+    # candor-scan's row starts at the item's first ATTRIBUTE or doc comment; rustc's def span at the item itself. The row
+    # is the nearest one at or before rustc's span whose leaf is this unit's name, with no other unit's row in between.
+    leaf = C.strip_generics(u.get("path") or "").split("::")[-1].strip()
+    before = [(l, c, q) for (l, c, q) in rows if (l, c) <= (line, col)]
+    if before:
+        l0, c0, q0 = before[-1]
+        if q0.split("::")[-1] == leaf:
+            return q0, None
     if u.get("exp"):
         return None, "ABSENT(macro-generated unit)"
     if not rows:
@@ -147,7 +155,11 @@ def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
     site_rows = {}
     for r in rows:
         if r["side"] == "oracle" and r.get("file"):
-            site_rows.setdefault((C.norm(r["file"]), r["line"], r["col"]), r)
+            k = (C.norm(r["file"]), r["line"], r["col"])
+            # `x?`'s desugared `branch` call is keyed at the operand's start, the same key as the operand's own call
+            # (`raw_sql(..)?`): the written call's row wins.
+            if k not in site_rows or (site_rows[k].get("desugar") and not r.get("desugar")):
+                site_rows[k] = r
     osite_by_key = {}
     for o in osites:
         if o.get("key") and not o.get("exp"):
@@ -183,7 +195,13 @@ def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
             r = site_rows.get(k)
             loc = "%s:%s:%s" % (os.path.relpath(k[0], scan.root), k[1], k[2])
             if e in c.get("eff", []) or e in c.get("cross", []):
-                if c.get("nosite") or r is None:
+                if e in c.get("eff", []) and ((r is not None and r.get("target_kind") == "local") or c.get("edges")):
+                    # A LEAF charge on a call whose rustc target is a LOCAL item (or that the lint itself edged to a local
+                    # unit): the lint classified this crate's own function by the crate's calibrated NAME (getrandom ->
+                    # Rand) or by the member's name (no-std-net's own `to_socket_addrs` -> Net). Not an effect the body
+                    # reaches; an artefact of the independent engine, measured and excluded, never a flip's cause.
+                    out.append({"cls": "LINT-ARTEFACT(leaf charged on a local item)", "site": loc, "unit": d, "truth": r.get("truth")})
+                elif c.get("nosite") or r is None:
                     out.append({"cls": "LINT-MECHANISM(leaf, %s)" % c.get("expr"), "site": loc, "unit": d})
                 elif r["verdict"].startswith("AGREE"):
                     out.append({"cls": "LEAF-REACHED-NOT-CHARGED", "site": loc, "unit": d, "truth": r.get("truth")})
@@ -260,11 +278,25 @@ def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
     flips = []
     pub_flips = []
     population = collections.Counter()
+    def enclosing_qual(u):
+        sp = u.get("span") or {}
+        ow = scan.owner_of(sp.get("file", ""), sp.get("line", 0), sp.get("col", 0))
+        return ow[2] if ow else None
+
     for d, u in sorted(units.items()):
         if u["dk"] not in ("Fn", "AssocFn"):
             continue
         le = {x for x in u["eff"] if x != UNKNOWN}
         q = qual_of.get(d)
+        if q is None and why_absent.get(d, "").startswith("ABSENT(no scanner unit") and le:
+            # An item nested in a fn body (`fn with_features() { fn detect_family_inner() .. }`, an `impl Drop` inside a
+            # fn) is not a unit of candor-scan: its body is folded into the enclosing unit. No gate can name it; the gate
+            # that can is the enclosing unit's. Count it as folded when that unit carries every effect, else as a flip.
+            eq = enclosing_qual(u)
+            ee = rep.eff(eq) if eq else None
+            if ee is not None and le <= ee:
+                population["ABSENT nested items folded into an enclosing unit that carries their effects (not flips)"] += 1
+                continue
         population["lint units"] += 1
         if le:
             population["lint units with a concrete effect"] += 1

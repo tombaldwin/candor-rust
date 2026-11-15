@@ -459,6 +459,11 @@ impl Oracle {
                 // A method's result is typed from its receiver: the receiver's own origin is the next step.
                 self.origin(cx, r, depth + 1, out)
             }
+            // `x?` lowers to `match Try::branch(x) { .. }`: the value's producer is `x`, not the desugared `branch` call.
+            ExprKind::Call(callee, args) if callee.span.desugaring_kind().is_some() && !args.is_empty() => {
+                out.push("{\"k\":\"try\"}".into());
+                self.origin(cx, &args[0], depth + 1, out)
+            }
             ExprKind::Call(callee, _) => {
                 let sp = match callee.kind {
                     ExprKind::Path(QPath::Resolved(_, p)) => p.segments.last().map(|s| s.ident.span).unwrap_or(callee.span),
