@@ -1,7 +1,7 @@
 //! SOUNDNESS R1765 — `candor-query state` (the source-freshness key the wrapper compares to decide whether a saved report
 //! still matches the tree) skipped every directory NAMED `target`. An edit to a source module in `src/target/` (cc's `mod
 //! target;`) therefore left the key unchanged and a stale report read as current. The key now skips Cargo's build output
-//! only: `<root>/target`, or a directory Cargo tagged with `CACHEDIR.TAG`.
+//! only: a `target/` beside a `Cargo.toml`, or a directory Cargo tagged with `CACHEDIR.TAG`.
 
 use std::path::Path;
 use std::process::Command;
@@ -25,6 +25,7 @@ fn state(d: &Path) -> String {
 fn r1765_an_edit_under_src_target_moves_the_freshness_key_and_build_output_does_not() {
     let d = std::env::temp_dir().join(format!("candor-query-r1765-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
+    write(&d.join("Cargo.toml"), "[package]\nname = \"fx\"\nversion = \"0.1.0\"\n");
     write(&d.join("src/lib.rs"), "mod target;\n");
     write(&d.join("src/target.rs"), "pub mod info;\n");
     write(&d.join("src/target/info.rs"), "pub fn f() {}\n");

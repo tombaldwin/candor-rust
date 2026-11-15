@@ -1452,7 +1452,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // Prune build/tooling dirs first — it skips DESCENT into huge `target/` and `.git/` trees (the
             // dominant cost on a warm checkout) before the per-dir Cargo.toml stat. A name starting with `.` is a
             // hidden tooling dir (`.git`/`.github`/`.cargo`/…). SOUNDNESS R1765: the build directory is
-            // `<root>/target`, a tagged (`CACHEDIR.TAG`) or a configured target dir — NOT every directory named
+            // a `target/` beside a `Cargo.toml`, a tagged (`CACHEDIR.TAG`) or a configured target dir — NOT every directory named
             // `target`, which pruned cc's `src/target/` module with no record anywhere.
             if crate::deps::pruned_tooling_dir(e, &configured_target_dirs) {
                 return false;

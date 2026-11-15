@@ -6,7 +6,7 @@
 //! shape of the first fixture below): `R1765_PROBE=observed-from-env ./target/debug/run` prints the variable, and
 //! `deny Env` went 0 (published 0.42.0, and main 432eb075) -> 1.
 //!
-//! The build directory is `<root>/target`, a directory Cargo tagged with `CACHEDIR.TAG` (any name, any depth), or one
+//! The build directory is a `target/` beside a `Cargo.toml`, a directory Cargo tagged with `CACHEDIR.TAG` (any name, any depth), or one
 //! `CARGO_TARGET_DIR` / `CARGO_BUILD_TARGET_DIR` / `build.target-dir` names. Its generated code must stay out: a
 //! `generated_net` written there would otherwise FABRICATE `Net` on code the crate never compiles.
 
@@ -104,7 +104,7 @@ fn r1765_deeper_target_directories_are_walked_too() {
 fn r1765_the_cargo_build_directory_stays_out_of_the_scan() {
     let d = tmpdir("builddir");
     crate_with_target_module(&d);
-    // <root>/target — by name, with or without a tag (Cargo's default build directory; `cargo package` never ships one).
+    // <root>/target beside the manifest — by name, with or without a tag (Cargo's default build directory).
     write(&d.join("target/debug/build/fx-1/out/gen.rs"), GENERATED_NET);
     // A tagged build directory deeper down, named `target` (`CARGO_TARGET_DIR=nested/target`) and named anything else.
     write(&d.join("nested/target/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n");
@@ -220,4 +220,35 @@ fn r1765_the_dependency_source_index_reads_a_candidate_under_src_target() {
     let control = inferred(&under_other, "call_check_zq").unwrap_or_default();
     assert!(!control.is_empty(), "control: the chained caller of the bounded `check` is disclosed: {under_other:#}");
     assert_eq!(inferred(&under_target, "call_check_zq").unwrap_or_default(), control, "the directory name decided it: {under_target:#}");
+}
+
+/// Fable E3 on the first fix: the name rule assumed the scan root is a package root. `candor-scan <crate>/src` is a legal
+/// manifest-less scan, and there `src/target/` sits at depth 1 — it was pruned by name with `excluded: []` on main AND on the
+/// first fix. A `target/` is build output by name only beside a `Cargo.toml`. The other direction is pinned too: at a
+/// manifest-less root an untagged stale `target/` is READ (an over-report, named `target::…` on its face), a tagged one is not.
+#[test]
+fn r1765_a_manifest_less_scan_root_walks_its_target_module() {
+    let d = tmpdir("nomanifest");
+    crate_with_target_module(&d);
+    let src = d.join("src");
+    let (_, v, _) = scan(&src, None, &[]);
+    assert!(!fns_ending(&v, "from_env_zq").is_empty(), "the module under <manifest-less root>/target is analysed: {v:#}");
+    let (rc, _, _) = scan(&src, Some("deny Env\n"), &[]);
+    assert_eq!(rc, 1, "deny Env fires over the manifest-less root");
+    // The manifest-full root still prunes its own target/ by name, with or without a tag.
+    write(&d.join("target/debug/build/fx-1/out/gen.rs"), GENERATED_NET);
+    let (rc, v, _) = scan(&d, Some("deny Net\n"), &[]);
+    assert!(fns_ending(&v, "generated_net_zq").is_empty() && rc == 0, "<root>/target beside Cargo.toml is build output: {v:#}");
+    // Which way the rule fails at a manifest-less root: an untagged stale target/ is read as source (over-report) ...
+    let bare = tmpdir("nomanifest-stale");
+    write(&bare.join("lib.rs"), "pub fn f() {}\n");
+    write(&bare.join("target/debug/build/fx-1/out/gen.rs"), GENERATED_NET);
+    let (_, v, _) = scan(&bare, None, &[]);
+    assert_eq!(fns_ending(&v, "generated_net_zq").len(), 1, "untagged, no manifest: read (the over-report direction): {v:#}");
+    // ... and a tagged one is not.
+    write(&bare.join("target/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n");
+    let (_, v, _) = scan(&bare, None, &[]);
+    assert!(fns_ending(&v, "generated_net_zq").is_empty(), "tagged: pruned: {v:#}");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&bare);
 }

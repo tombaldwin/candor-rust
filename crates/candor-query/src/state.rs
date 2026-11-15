@@ -254,7 +254,7 @@ pub(crate) fn cmd_merge_hook(args: &[String]) -> i32 {
 /// Recursively collect `*.rs` files under `dir`, skipping Cargo build output and `.git` directories (and any
 /// symlinked dir, to avoid cycles). Order-independent; the caller sorts.
 ///
-/// SOUNDNESS R1765 — build output is `candor_report::walk::is_build_output_dir` (`<root>/target`, or a directory Cargo
+/// SOUNDNESS R1765 — build output is `candor_report::walk::is_build_output_dir` (a `target/` beside a `Cargo.toml`, or a directory Cargo
 /// tagged), not every directory named `target`: skipping cc's `src/target/` module left an edit there out of the
 /// freshness key, so a saved report read as current after the module changed. No configured target dir is passed: a
 /// hash that includes an untagged one is only slower, never stale.

@@ -16,6 +16,8 @@ path = "src/main.rs"
 syn = { version = "2", features = ["full", "visit", "extra-traits", "parsing", "printing"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
+# SOUNDNESS R1765 — the engine's own build-output predicate, so this denominator walks what the scan walks.
+candor-report = { path = "../../crates/candor-report" }
 
 [profile.release]
 debug = false
