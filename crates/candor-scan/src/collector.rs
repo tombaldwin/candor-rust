@@ -6757,6 +6757,15 @@ impl<'a> CallCollector<'a> {
                     // (`impl Reg { fn items(&self) -> Vec<G> }`): the declared element, keyed on
                     // (TYPE, method) like `impl_ret_key`, never on the method leaf alone.
                     let base = self.type_of(&m.receiver)?;
+                    // SOUNDNESS R1782 — the method twin: `p.ancestors()` over a std `Path`/`PathBuf` yields `&Path`.
+                    if let Some(item) = crate::lang::std_iter_source_item_method(&base, &m.method.to_string())
+                        .filter(|_| !candor_report::env::switch("CANDOR_R1782_OFF"))
+                    {
+                        if candor_report::env::trace("CANDOR_R1782_INSTR") {
+                            eprintln!("R1782SRC\t{base}::{}", m.method); // §E1 REACH COUNTER, on the CHANGED branch only
+                        }
+                        return Some(item.to_string());
+                    }
                     let base_leaf = base.rsplit("::").next().unwrap_or(&base);
                     self.returns
                         .get(&crate::model::impl_elem_ret_key(base_leaf, &m.method.to_string()))
@@ -6773,6 +6782,13 @@ impl<'a> CallCollector<'a> {
                 let syn::Expr::Path(p) = &*c.func else { return None };
                 let full = expand(&crate::lang::path_to_string_lc(&p.path), &self.uses);
                 if matches!(full.split("::").next(), Some("std" | "core" | "alloc")) {
+                    // SOUNDNESS R1782 — a std iterator SOURCE with a fixed path item (`env::split_paths(..)`).
+                    if let Some(item) = crate::lang::std_iter_source_item_fn(&full).filter(|_| !candor_report::env::switch("CANDOR_R1782_OFF")) {
+                        if candor_report::env::trace("CANDOR_R1782_INSTR") {
+                            eprintln!("R1782SRC\t{full}"); // §E1 REACH COUNTER, on the CHANGED branch only
+                        }
+                        return Some(item.to_string());
+                    }
                     return self.wrapper_ctor_elem(&full, c);
                 }
                 let leaf = full.rsplit("::").next().unwrap_or(&full);
@@ -15919,6 +15935,42 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             for a in &node.args {
                 if let syn::Expr::Closure(cl) = a {
                     if cl.inputs.len() == 1 && single_pat_ident(cl.inputs.first().unwrap()).as_deref() == Some(name.as_str()) {
+                        // SOUNDNESS R1782 — THE WRITTEN ANNOTATION, where no CONCRETE element resolved. This route
+                        // walked `cl.body` directly, so `visit_expr_closure` — the binder that reads a closure
+                        // parameter's annotation into `vars`/`trait_vars`/`fn_typed_vars` — never ran for an
+                        // ADAPTER closure: `|p: PathBuf| p.exists()` over an untyped iterator bound `p` to NOTHING,
+                        // and over an `impl Iterator<Item = PathBuf>` receiver bound it to the ITERATOR's own
+                        // dispatch leaves (`["Iterator"]`, which `resolve_elem_trait_leaves` answers for the
+                        // receiver, not its item), so `p.exists()` resolved to no unit (EXECUTED, both silent;
+                        // `let f = |p: PathBuf| p.exists()` and `fold(.., |acc, p: PathBuf| ..)`, which take the
+                        // default walk, charged). rustc checks the annotation against the item, so it IS the
+                        // parameter's type. The binding is cleared first exactly as before (a shadow never
+                        // inherits the outer name), and the closure's own binder installs what the annotation
+                        // names, or nothing. A CONCRETE or LAYERED element keeps its route unchanged. Over
+                        // dispatch leaves, only an annotation naming a concrete nominal type takes this route
+                        // (a `dyn`/`impl`/callable/unresolvable annotation keeps the leaves), so a genuine
+                        // trait-object element is never displaced by an annotation the binder cannot read.
+                        let ann = match cl.inputs.first() {
+                            Some(syn::Pat::Type(pt)) => Some(&*pt.ty),
+                            _ => None,
+                        };
+                        let ann_concrete = ann.is_some_and(|t| {
+                            trait_leaves(t, &self.generic_bounds).is_empty()
+                                && !is_callable_type(t, &self.generic_bounds, self.callable_aliases)
+                                && type_path(t, &self.uses).is_some()
+                        });
+                        if ann.is_some()
+                            && elem_ty.is_none()
+                            && !matches!(elem_bound, Some(Bound::Layered { .. }))
+                            && (elem_leaves.is_empty() || ann_concrete)
+                            && !candor_report::env::switch("CANDOR_R1782_OFF")
+                        {
+                            if candor_report::env::trace("CANDOR_R1782_INSTR") {
+                                eprintln!("R1782ANN\t{leaf}\t{}", !elem_leaves.is_empty()); // §E1 REACH COUNTER, CHANGED branch only
+                            }
+                            self.scoped_binding(&name, Bound::Unknown, |s| s.visit_expr_closure(cl));
+                            continue;
+                        }
                         if !elem_leaves.is_empty() {
                             // R71: `handlers.iter().for_each(|h| h())` over `Vec<Box<dyn Fn()>>` — the
                             // closure param is invoked with call syntax, so hedge it too.

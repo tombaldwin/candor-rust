@@ -11,6 +11,21 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **`Fs` on the items of `env::split_paths(..)` / `Path::ancestors()`, and a written closure-parameter annotation, are now charged**
+  (SOUNDNESS R1782; silent under-report, pre-existing on 0.42.0). `env::split_paths(v).find_map(|p| p.join(..).exists())`
+  read `['Env']` (cc `Build::find_working_gnu_prefix`): the element resolver had no answer for a std iterator SOURCE, so every
+  binder over it (`for`, `.any`, `.find_map`, `.fold`) bound nothing. `split_paths` now yields `PathBuf` and `ancestors` `&Path`.
+  Separately, a one-parameter adapter closure was walked body-only, so `|p: PathBuf| p.exists()` over an untyped iterator (or an
+  `impl Iterator<Item = PathBuf>`, whose own `Iterator` leaves were bound to the item) resolved nothing; the annotation is now
+  read wherever no concrete element resolved. Executed; `deny Fs <unit>` 0 → 1. `CANDOR_R1782_OFF=1` restores the old reading.
+  Scan cache rev191 → rev192.
+- ⚠ **A ruled `sqlx_core` call spelled through `sqlx_core::driver_prelude` is now charged** (SOUNDNESS R1786; silent under-report,
+  pre-existing on 0.42.0). Every sqlx driver does `pub(crate) use sqlx_core::driver_prelude::*;` and then `net::connect_tcp(..)`;
+  the rule tables are keyed on `sqlx_core::net::connect_tcp`, and a calibrated crate's unmatched call reads as reviewed-pure, so
+  sqlx-postgres `PgStream::connect` (a real TCP connect) had no row, locked or not. The classifier now reads a
+  `driver_prelude::<module>::` path as the module it re-exports: `PgStream::connect`/`establish` gain `Net`, the query paths gain
+  `Clock` (`QueryLogger::new`), sqlx-sqlite's file removals gain `Fs`. Executed (8 spellings, 8 connects); `deny Net` 0 → 1.
+
 - ⚠ **Resolver step 1: the module namespace answers per scope, per namespace and per `#[cfg]` arm set** (SOUNDNESS R1716,
   R1738, R1711 (b), R1426, R1771, R1741, R1727 — silent under-reports; R653/R753, R654 (impl keys only), R752 — precision; all
   pre-existing on 0.42.0; R900 is NOT closed: its arm sets are types, whose per-arm member resolution is step 4). An inline module that imports nothing sees the extern prelude, not its parent's `use`/`mod` of that name; a

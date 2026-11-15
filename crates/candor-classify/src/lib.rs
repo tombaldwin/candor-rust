@@ -1063,7 +1063,39 @@ pub fn is_std_effect_handle(ty: &str) -> bool {
 }
 
 /// Classify a resolved callee by the crate it belongs to and its full path.
+/// SOUNDNESS R1786 — the modules sqlx-core's `driver_prelude` re-exports, each as `pub use crate::{<m>}` (sqlx-core 0.8.6 and
+/// 0.9.0 `lib.rs`, identical in both). `sqlx_core::driver_prelude::<m>::<rest>` therefore names exactly
+/// `sqlx_core::<m>::<rest>`. The prelude's other names (`Error`, `Result`, `hash_map`, `HashMap`, `Either`) are types and a
+/// re-export of a third crate, and are not listed: nothing here may map a path to an item it is not.
+const SQLX_DRIVER_PRELUDE_MODULES: &[&str] = &[
+    "acquire", "common", "decode", "describe", "encode", "executor", "ext", "from_row", "fs", "io", "logger", "net", "pool",
+    "query", "query_as", "query_builder", "query_scalar", "rt", "sync",
+];
+
+/// SOUNDNESS R1786 — the canonical spelling of a path that enters a CALIBRATED crate through one of ITS OWN re-export modules,
+/// or `None` when the path is already canonical. The rule tables below are keyed on the defining path, and a calibrated crate
+/// is EXEMPT from the `invisible` floor (an unmatched call reads as "reviewed and pure"), so a consumer spelling that reaches
+/// a ruled item through a re-export module was SILENT, not disclosed: every sqlx driver does `pub(crate) use
+/// sqlx_core::driver_prelude::*;` and then `net::connect_tcp(..)`, which the scanner spells
+/// `sqlx_core::driver_prelude::net::connect_tcp` — no rule matched it, and sqlx-postgres `PgStream::connect`, a real TCP
+/// connect, had no row (EXECUTED: 8 connects over 8 spellings; the 3 spellings without the prelude segment charged `Net`,
+/// the 5 through it read ABSENT, lock present or not). Applied at the entry of every path-keyed table function, so the
+/// primary, the second effects and their `fs` direction all see one spelling.
+fn reexport_canonical(crate_name: &str, path: &str) -> Option<String> {
+    if crate_name == "sqlx_core" {
+        let rest = path.strip_prefix("sqlx_core::driver_prelude::")?;
+        let module = rest.split("::").next()?;
+        if rest.contains("::") && SQLX_DRIVER_PRELUDE_MODULES.contains(&module) {
+            return Some(format!("sqlx_core::{rest}"));
+        }
+    }
+    None
+}
+
 pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
+    if let Some(c) = reexport_canonical(crate_name, path) {
+        return classify(crate_name, &c);
+    }
     // Pure fd ownership-transfer/extraction leaves are never an effect, regardless of which std I/O
     // type they hang off — exempt them BEFORE the coarse prefix rules can fabricate Net/Fs/Ipc.
     if PURE_FD_TRANSFER.contains(&path.rsplit("::").next().unwrap_or(path)) {
@@ -6821,6 +6853,9 @@ pub const ALSO_EFFECTS: &[AlsoEffect] = &[
 /// `classify` charges the path (a second effect never stands alone: the κ ledger's "was this call classified" question
 /// stays the primary's), and never contains the primary itself.
 pub fn also_effects(crate_name: &str, path: &str) -> Vec<&'static str> {
+    if let Some(c) = reexport_canonical(crate_name, path) {
+        return also_effects(crate_name, &c); // SOUNDNESS R1786
+    }
     let Some(primary) = classify(crate_name, path) else { return Vec::new() };
     let mut out: Vec<&'static str> = Vec::new();
     for row in ALSO_EFFECTS {
@@ -6857,6 +6892,9 @@ pub fn also_effects_by_method(crate_name: &str, method: &str) -> Vec<&'static st
 /// The §2 `fs` direction of the second `Fs` [`also_effects`] charges for this path: the union of the matching rows'
 /// `fs_kind`, or empty (direction unknown — record the poison marker) if any matching `Fs` row declares none.
 pub fn also_fs_kind(crate_name: &str, path: &str) -> Vec<&'static str> {
+    if let Some(c) = reexport_canonical(crate_name, path) {
+        return also_fs_kind(crate_name, &c); // SOUNDNESS R1786
+    }
     let mut out: Vec<&'static str> = Vec::new();
     for row in ALSO_EFFECTS {
         if row.krate.contains(&crate_name) && row.on.matches(path) && row.effects.contains(&"Fs") {
@@ -9820,6 +9858,30 @@ mod masks_locator_tests {
         }
         assert_eq!(classify("aws_config", "aws_config::loader::ConfigLoader::load"), Some("Net"));
         assert_eq!(classify("mycrate", "mycrate::default_provider::use_fips::use_fips_provider"), None);
+    }
+
+    /// SOUNDNESS R1786 — the same rows reached through sqlx-core's `driver_prelude`, the spelling every sqlx driver produces
+    /// (`pub(crate) use sqlx_core::driver_prelude::*;` then `net::connect_tcp`). Each answers exactly as its canonical path, the
+    /// second effects included; the prelude's TYPE re-exports and an unlisted segment are not rewritten.
+    #[test]
+    fn r1786_driver_prelude_spellings_classify_as_their_canonical_path() {
+        for p in [
+            "net::connect_tcp", "net::connect_uds", "logger::QueryLogger::new", "logger::QueryLogger::finish", "fs::ReadDir::next",
+            "fs::read", "pool::PoolConnection::close", "pool::Pool::begin_with", "pool::Pool::acquire", "executor::Executor::execute",
+            "pool::PoolConnection::detach", "pool::PoolOptions::max_connections", "net::Socket::poll_read_ready",
+        ] {
+            let canon = format!("sqlx_core::{p}");
+            let prel = format!("sqlx_core::driver_prelude::{p}");
+            assert_eq!(classify("sqlx_core", &prel), classify("sqlx_core", &canon), "{prel}");
+            assert_eq!(also_effects("sqlx_core", &prel), also_effects("sqlx_core", &canon), "{prel}");
+        }
+        assert_eq!(classify("sqlx_core", "sqlx_core::driver_prelude::net::connect_tcp"), Some("Net"));
+        assert_eq!(classify("sqlx_core", "sqlx_core::driver_prelude::logger::QueryLogger::new"), Some("Clock"));
+        assert_eq!(reexport_canonical("sqlx_core", "sqlx_core::driver_prelude::Error"), None);
+        assert_eq!(reexport_canonical("sqlx_core", "sqlx_core::driver_prelude::Either::left"), None);
+        assert_eq!(reexport_canonical("sqlx_core", "sqlx_core::driver_prelude::net"), None);
+        assert_eq!(reexport_canonical("sqlx", "sqlx::driver_prelude::net::connect_tcp"), None);
+        assert_eq!(reexport_canonical("sqlx_core", "sqlx_core::net::connect_tcp"), None);
     }
 
     /// SOUNDNESS R1528 — the sqlx-core 0.9.0 rows given rules (10 of 22; 2 read pure, 8 conditional and 2 silent filed),

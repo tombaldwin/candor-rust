@@ -5618,6 +5618,35 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
     )
 }
 
+/// SOUNDNESS R1782 — the ITEM of a std iterator SOURCE whose item is a PATH, for the element resolver. A std free fn or
+/// std method that RETURNS an iterator is not a collection the scanner has a declaration for, so `resolve_elem_type_raw`
+/// had no answer and every binder over it (`for p in ..`, `.any(|p| ..)`, `.find_map(..)`) bound the name to nothing:
+/// `env::split_paths(..).find_map(|p| p.join(..).exists())` read SILENT for `Fs` (EXECUTED by replica; cc 1.4.7
+/// `find_working_gnu_prefix`), as did `p.ancestors().any(|a| a.join(..).exists())`.
+///
+/// THE BOUNDARY, and why it stops here. The question is "which std iterator sources yield an item whose members perform
+/// an effect", and the answer is the path-yielding ones: `Path`/`PathBuf` carry `exists`/`metadata`/`read_dir`/… . The
+/// other std sources are excluded on stated grounds, not by omission: `env::args`/`args_os`/`vars`/`vars_os` yield
+/// `String`/`OsString` (tuples of them for `vars`), which have no effect-bearing member; `fs::read_dir`/`Path::read_dir`
+/// yield `io::Result<DirEntry>`, whose source is already charged `Fs` at the loop by R1295 (`ReadDir::next`), so the unit
+/// is never silent there; `Path::components`/`iter` yield `Component`/`&OsStr`, likewise effect-free. A generic source
+/// (`iter::once(x)`, `repeat`) takes its item from an argument and is not a fixed table entry.
+pub(crate) fn std_iter_source_item_fn(full: &str) -> Option<&'static str> {
+    match full {
+        "std::env::split_paths" => Some("std::path::PathBuf"),
+        _ => None,
+    }
+}
+
+/// SOUNDNESS R1782 — the method twin of `std_iter_source_item_fn`, keyed on the receiver's resolved std type. `ancestors`
+/// yields `&Path` on both `Path` and (by `Deref`) `PathBuf`.
+pub(crate) fn std_iter_source_item_method(recv: &str, method: &str) -> Option<&'static str> {
+    match (recv, method) {
+        ("std::path::Path" | "std::path::PathBuf", "ancestors") => Some("std::path::Path"),
+        _ => None,
+    }
+}
+
 /// SOUNDNESS R349 — THE HOFs WHOSE ELEMENT PARAMETER IS **NOT** PARAMETER 0.
 ///
 /// The adapter list in `collector.rs` types parameter 0 of a SINGLE-parameter closure from the
