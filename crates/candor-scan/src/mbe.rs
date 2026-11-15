@@ -897,7 +897,7 @@ impl Ctx<'_> {
                 }
             }
             match &mut it {
-                syn::Item::Macro(m) if m.ident.is_none() => {
+                syn::Item::Macro(m) if m.ident.is_none() && !seed_dropped(&m.mac) => {
                     if let Some(gen) = self.expand_items(&m.mac, depth) {
                         // SOUNDNESS R1748 (a) — the TRAITS the expansion declares are not spliced (see below), but their
                         // existence is recorded: one inert `Item::Verbatim` marker per generated trait, naming it and its
@@ -942,12 +942,24 @@ impl Ctx<'_> {
                         // same-leaf twin elsewhere could claim them (R1678's class), which is why declarations ship WITH
                         // impls. `CANDOR_I1_OFF=1` restores the allowlist and keeps every invocation.
                         let i1_on = !candor_report::env::switch("CANDOR_I1_OFF");
+                        let seed_name = m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+                        let seed_body = !seed_name.is_empty()
+                            && candor_report::env::switch_value(
+                                "CANDOR_I1_SEED_BODY",
+                                candor_report::env::Selects::AnyOf(&[seed_name.as_str()]),
+                            );
                         let full = i1_on && gen.iter().all(|g| !i1_refused(g) || matches!(g, syn::Item::Trait(_)));
                         let mut fns: Vec<syn::Item> = gen
                             .into_iter()
                             .filter(|g| {
                                 if i1_on {
-                                    return !i1_refused(g);
+                                    // A nested invocation the expansion could not itself expand is KEPT in the output (Fable
+                                    // §1.3): it is still unexpanded program text, so R128 must see it as module evidence and
+                                    // `expansion_facts` must count its macro as invoked-unexpanded — dropped, it made the
+                                    // crate-wide retirement treat `__impl_public_bitflags` (bitflags 2.9.4, invoked by path
+                                    // inside `__impl_internal_bitflags`) as fully expanded and retire the `fn bits` evidence a
+                                    // `.bits()` call still needed: `parser::from_str_truncate` lost its `Flags::bits` key.
+                                    return !i1_refused(g) || matches!(g, syn::Item::Macro(n) if n.ident.is_none());
                                 }
                                 match g {
                                     syn::Item::Fn(_) | syn::Item::ForeignMod(_) => true,
@@ -1010,6 +1022,12 @@ impl Ctx<'_> {
                             // I1 stage 1 — a `$t:ty` group inside a spliced DECLARATION is peeled too, so a field, an alias or a
                             // const typed by a fragment reads as the hand-written spelling does.
                             peel_decl_groups(g);
+                            // I1 ORACLE SEED (an instrument, recorded as a switch): `CANDOR_I1_SEED_BODY=<macro>` empties every
+                            // fn body this macro's expansion yields, so the unit exists under the right name with the WRONG body.
+                            // `eval/i1/xcheck.py`'s effect-equality leg must report it; a presence-only oracle cannot.
+                            if seed_body {
+                                empty_bodies(g);
+                            }
                             if let Some(a) = crate::lang::item_attrs_mut(g) {
                                 let mut na = m.attrs.clone();
                                 na.append(a);
@@ -1117,6 +1135,29 @@ pub(crate) fn expansion_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>)
         syn::visit::Visit::visit_item(&mut v, it);
     }
     (v.expanded.into_iter().collect(), v.unexpanded.into_iter().collect())
+}
+
+/// I1 oracle seed — `CANDOR_I1_SEED_DROP=<macro>` leaves every item-position invocation of that macro unexpanded, so its
+/// units are ABSENT; the oracle's presence leg must report them. An instrument, recorded as a switch.
+fn seed_dropped(mac: &syn::Macro) -> bool {
+    let Some(id) = mac.path.get_ident() else { return false };
+    let n = id.to_string();
+    candor_report::env::switch_value("CANDOR_I1_SEED_DROP", candor_report::env::Selects::AnyOf(&[n.as_str()]))
+}
+
+/// I1 oracle seed — every fn body in a spliced item (a free fn, or an impl's methods) emptied to `{}`.
+fn empty_bodies(g: &mut syn::Item) {
+    match g {
+        syn::Item::Fn(f) => f.block.stmts.clear(),
+        syn::Item::Impl(i) => {
+            for ii in i.items.iter_mut() {
+                if let syn::ImplItem::Fn(f) = ii {
+                    f.block.stmts.clear();
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// I1 stage 1 — `peel_groups` over the types a spliced DECLARATION carries (struct / enum / union fields, an alias, a
