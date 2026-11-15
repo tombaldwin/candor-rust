@@ -48,7 +48,12 @@ fn rs_files(root: &Path) -> Vec<PathBuf> {
                 // NOT scanned: test/bench/example/fuzz trees and vendored deps. The engine's default
                 // is `include_tests = false`, so counting them would inflate reach with code no
                 // user's gate runs over. Stated in REACH.md as a deliberate exclusion.
-                if matches!(name.as_str(), "tests" | "benches" | "examples" | "fuzz" | "target" | ".git") {
+                // SOUNDNESS R1765 — `target` is skipped only where the engine skips it (Cargo's build output: a `target/`
+                // beside a `Cargo.toml`, or a `CACHEDIR.TAG` directory), not by name: cc's `src/target/` is a module, and
+                // skipping it under-counted the denominator. The depth argument only excludes the root itself.
+                if matches!(name.as_str(), "tests" | "benches" | "examples" | "fuzz" | ".git")
+                    || candor_report::walk::is_build_output_dir(&p, 1, &[])
+                {
                     continue;
                 }
                 stack.push(p);

@@ -208,7 +208,14 @@ for step in range(1, N+1):
     # Full scan-from-scratch of a PRISTINE COPY of the same edited tree (no cache at all).
     fresh = os.path.join(WORK, "fresh")
     shutil.rmtree(fresh, ignore_errors=True)
-    shutil.copytree(LIVE, fresh, ignore=shutil.ignore_patterns(".candor", "target"))
+    # SOUNDNESS R1765 — skip only what the engine treats as build output (a `target/` beside a `Cargo.toml`, or a
+    # `CACHEDIR.TAG` directory), never every directory named `target`: cc's `src/target/` module is source, and dropping
+    # it from the "fresh" copy made this gate FAIL falsely against the (correct) live scan.
+    def _skip(d, names):
+        manifest = os.path.isfile(os.path.join(d, "Cargo.toml"))
+        return [n for n in names if n == ".candor" or (n == "target" and manifest)
+                or os.path.isfile(os.path.join(d, n, "CACHEDIR.TAG"))]
+    shutil.copytree(LIVE, fresh, ignore=_skip)
     full_dig, full_n = scan(fresh, "full", incremental=False)
 
     if inc_dig != full_dig or inc_n != full_n:

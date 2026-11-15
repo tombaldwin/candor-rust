@@ -9963,6 +9963,34 @@
       ]
     },
     {
+      "fn": "deps::configured_target_dirs",
+      "loc": "crates/candor-scan/src/deps.rs:371:1: 371:77",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "04ff93ae19235341d9fdbc16ddaa8d8d",
+      "fs": [
+        "read"
+      ],
+      "invisible": [
+        "candor_report",
+        "toml"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "deps::declares_itself_incomplete",
       "loc": "crates/candor-scan/src/deps.rs:334:1: 334:72",
       "inferred": [],
@@ -10215,6 +10243,26 @@
       ],
       "overdeclared": [],
       "hash": "358c524ceb72adb10e20dac301c1a5e4",
+      "invisible": [
+        "candor_report",
+        "walkdir"
+      ]
+    },
+    {
+      "fn": "deps::pruned_tooling_dir",
+      "loc": "crates/candor-scan/src/deps.rs:403:1: 403:99",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "04ff93ae19235341e4f01083bf7cff34",
       "invisible": [
         "candor_report",
         "walkdir"

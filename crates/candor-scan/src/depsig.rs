@@ -1022,9 +1022,13 @@ impl SrcIndex {
         let mut files = Vec::new();
         let mut file_mods: Vec<Option<String>> = Vec::new();
         let mut unparsed = Vec::new();
+        // SOUNDNESS R1765 — build output and dot-directories by the scan walk's own rule (`deps::pruned_tooling_dir`), not
+        // every directory named `target`: a module there (cc's `src/target/`) holds candidates the union must see.
+        let configured = crate::deps::configured_target_dirs(src);
         let walk = crate::deps::ordered_walk(src).into_iter().filter_entry(|e| {
             let n = e.file_name().to_string_lossy();
-            e.depth() == 0 || !(n.starts_with('.') || n == "target" || n == "tests" || n == "benches" || n == "examples")
+            e.depth() == 0
+                || !(crate::deps::pruned_tooling_dir(e, &configured) || n == "tests" || n == "benches" || n == "examples")
         });
         for e in walk.flatten() {
             if e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rs") {
