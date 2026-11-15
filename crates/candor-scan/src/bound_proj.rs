@@ -515,6 +515,14 @@ impl<'a> super::CallCollector<'a> {
                 }
             }
         }
+        // `C: Deref` with no written `Target` but `where C::Target: Tr` (rand_core's, plotters' shape): the Target is the
+        // projection, and its bounds are the answer (step 4).
+        if out.is_empty()
+            && self.bp.env.bounds(g).iter().any(|t| matches!(t.leaf.as_str(), "Deref" | "DerefMut"))
+            && self.bp.env.of_projection.contains_key(&(g.to_string(), "Target".to_string()))
+        {
+            out.push(Val::Proj { g: g.to_string(), tr: Some("Deref".to_string()), assoc: "Target".to_string() });
+        }
         out
     }
 
@@ -598,8 +606,73 @@ impl<'a> super::CallCollector<'a> {
                 }
                 (!a.is_empty()).then_some(a)
             }
-            Val::Proj { .. } | Val::Opaque => None,
+            Val::Proj { g, tr, assoc } => self.bp_member_proj(g, tr.as_deref(), assoc, leaf, depth),
+            Val::Opaque => None,
         }
+    }
+
+    /// Design step 4, THE PROJECTION ARM (R1795): the member `leaf` on a value of `<g as tr>::assoc`. Three sources, in this
+    /// order: a written BINDING on a bound of `g` (`C: Has2<A = Conn>`, `C: Deref<Target = X>`) — the projection IS that
+    /// type; else the projection's BOUND SET, from a `where` clause (`where C::A: Tr`, `where C::Target: Tr`) and from the
+    /// local trait's own declaration (`type A: DoerD;`), dispatched like a parameter with those bounds. Nothing else: a
+    /// projection with neither is not answered here.
+    fn bp_member_proj(&self, g: &str, tr: Option<&str>, assoc: &str, leaf: &str, depth: usize) -> Option<Ans> {
+        if depth > MAX_DEREF {
+            return None;
+        }
+        let bound_tr = |t: &TraitRef| tr.is_none_or(|x| x == t.leaf || (assoc == "Target" && matches!(t.leaf.as_str(), "Deref" | "DerefMut")));
+        let mut bindings: Vec<Val> = Vec::new();
+        for t in self.bp.env.bounds(g).iter().filter(|t| bound_tr(t)) {
+            for (n, ty) in &t.bindings {
+                if n == assoc {
+                    let v = self.bp_written(ty);
+                    if !bindings.contains(&v) {
+                        bindings.push(v);
+                    }
+                }
+            }
+        }
+        if !bindings.is_empty() {
+            let mut a = Ans::default();
+            let mut answered = false;
+            for v in &bindings {
+                if let Some(x) = self.bp_member_val(v, leaf, depth + 1) {
+                    a.merge(x);
+                    answered = true;
+                }
+            }
+            a.facts.insert("projection");
+            return answered.then_some(a);
+        }
+        let mut bset: Vec<TraitRef> = self.bp.env.of_projection.get(&(g.to_string(), assoc.to_string())).cloned().unwrap_or_default();
+        for t in self.bp.env.bounds(g).iter().filter(|t| bound_tr(t)) {
+            let Some(lt) = self.local_traits.get(&t.leaf) else { continue };
+            for b in lt.assoc_types.get(assoc).into_iter().flatten() {
+                if !bset.iter().any(|x| &x.leaf == b) {
+                    bset.push(TraitRef { leaf: b.clone(), path: b.clone(), args: Vec::new(), bindings: Vec::new() });
+                }
+            }
+        }
+        if bset.is_empty() {
+            return None;
+        }
+        let s1 = self.bp_step1(&bset, leaf);
+        if !s1.hit {
+            return None;
+        }
+        let mut a = Ans { traits: s1.local_hits.clone(), ..Default::default() };
+        for st in &s1.std_hits {
+            if crate::lang::is_driving_io_member(st, leaf) {
+                a.hedges.push(format!("dispatch:{st}.{leaf}"));
+            }
+        }
+        for h in s1.incomplete {
+            if !a.hedges.contains(&h) {
+                a.hedges.push(h);
+            }
+        }
+        a.facts.insert("projection");
+        Some(a)
     }
 
     /// SOUNDNESS R1723's reading, for a FIELD typed by its owner's own type parameter: the impl-scope generic that position is
@@ -794,6 +867,8 @@ impl<'a> super::CallCollector<'a> {
         if let Some(node) = self.bp_node(recv, recv_ty) {
             let a = match &node {
                 Val::Generic(g) => self.bp_member_generic(g, leaf, 0)?,
+                // a binding typed `<C as Has>::A` (d4): no route answers it today, so the projection's own answer stands
+                Val::Proj { g, tr, assoc } => self.bp_member_proj(g, tr.as_deref(), assoc, leaf, 1)?,
                 _ => return None,
             };
             return (!a.is_empty()).then_some(a);
