@@ -10224,6 +10224,44 @@ impl<'a> CallCollector<'a> {
             || lt.supertraits.iter().any(|s| self.trait_declares_method(s, leaf, depth + 1))
     }
 
+    /// SOUNDNESS R1794 — the LOCAL trait(s) that DECLARE `leaf` for a call dispatched on `tr`: `tr` itself when it does
+    /// (or, with `assoc`, declares it as an associated fn), else the nearest supertraits along every local path that do (a
+    /// diamond can name two). `[tr]` when none is found, which is the old key.
+    ///
+    /// A declaring trait whose LEAF two local traits share (time's and http's `sealed::Sealed` pattern: `trait Parsable:
+    /// sealed::Sealed` beside `trait Formattable: sealed::Sealed`) cannot be spelled as a key at all (`union_trait_qual`
+    /// refuses an ambiguous leaf), so rewriting onto it would DROP the key: measured on the first A/B, 119 keys on time and
+    /// http had no replacement. Such a walk keeps `[tr]`, the old key.
+    fn declaring_traits(&self, tr: &str, leaf: &str, assoc: bool) -> Vec<String> {
+        let own = |t: &str| self.local_traits.get(t).is_some_and(|lt| lt.methods.contains(leaf) || (assoc && lt.assoc.contains(leaf)));
+        if own(tr) {
+            return vec![tr.to_string()];
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut stack: Vec<(String, usize)> = vec![(tr.to_string(), 0)];
+        while let Some((t, d)) = stack.pop() {
+            if d > 16 || !seen.insert(t.clone()) {
+                continue;
+            }
+            let Some(lt) = self.local_traits.get(&t) else { continue };
+            for s in &lt.supertraits {
+                if own(s) {
+                    if !out.contains(s) {
+                        out.push(s.clone());
+                    }
+                } else if self.local_traits.contains_key(s) {
+                    stack.push((s.clone(), d + 1));
+                }
+            }
+        }
+        if out.is_empty() || out.iter().any(|d| self.local_traits.get(d).is_none_or(|lt| lt.count > 1)) {
+            return vec![tr.to_string()];
+        }
+        out.sort();
+        out
+    }
+
     /// Does LOCAL trait `l` carry `tr` among its (transitively local) SUPERTRAIT leaves?
     /// `trait ServiceExt<R>: tower_service::Service<R>` → `trait_has_supertrait("ServiceExt", "Service")`.
     /// `supertraits` holds LEAVES (`bound_leaves` takes the last path segment), which is the same
@@ -11570,17 +11608,36 @@ impl<'a> CallCollector<'a> {
         // ⟨peek-scope-attribution⟩ Record the reachability fact BEFORE the ambiguity/bound gates below —
         // those decide whether an EFFECT edge is safe to fabricate, but "this fn dispatches on trait-leaf
         // `tr`'s method `leaf`" is true regardless of either, and costs nothing extra to record.
-        crate::sidecar::note("dispatch", &format!("{}::{}", tr, leaf));
-        self.dispatch_sites.insert((tr.to_string(), leaf.to_string()));
+        // SOUNDNESS R1794 — THE KEY NAMES THE TRAIT THAT DECLARES THE MEMBER. `t.s_go()` under `T: SubS`, with `s_go` declared
+        // by supertrait `BaseS`, published `supdep#SubS::s_go`, a member `SubS` does not declare (R549's shape), while a
+        // consumer publishes its implementor under the DECLARING trait (`supdep#BaseS::s_go`): the ⟨0.39⟩ obligation-3 join
+        // never matched, and a chained consumer whose `s_go` writes a file read `deny Fs` 0 where the one-variable control
+        // (member declared on the bound trait itself) reads 1 (EXECUTED, Fable's `sup/` fixture, 0.42.0 and main). The
+        // dispatch itself is unchanged (`trait_impls[tr]`, every implementor of `tr` implements its supertraits); only the
+        // reachability fact is minted on the declaring trait(s). `CANDOR_R1794_OFF=1` restores the bound trait's key.
+        let r1685_branch = !self.trait_declares_method(tr, leaf, 0) && !(assoc && lt.assoc.contains(leaf));
+        let key_traits: Vec<String> = if r1685_branch || candor_report::env::switch("CANDOR_R1794_OFF") {
+            vec![tr.to_string()]
+        } else {
+            self.declaring_traits(tr, leaf, assoc)
+        };
+        if key_traits.iter().any(|k| k != tr) && (crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1794_INSTR")) {
+            eprintln!("R1794KEY\t{tr}::{leaf}\t{}", key_traits.join(",")); // §E1 REACH COUNTER
+        }
+        for k in &key_traits {
+            crate::sidecar::note("dispatch", &format!("{}::{}", k, leaf));
+            self.dispatch_sites.insert((k.clone(), leaf.to_string()));
+        }
         // SOUNDNESS R1748 (a) — the R1685 branch: `tr`'s hand-written declaration does not declare `leaf`, which an impl
         // block of the same LEAF does. Record the trait the call site names, for `scan.rs` to check against the
         // macro-declared traits; otherwise the leaf spelling.
-        let r1685_branch = !self.trait_declares_method(tr, leaf, 0) && !(assoc && lt.assoc.contains(leaf));
         let named = if r1685_branch { self.r1748_named.clone().unwrap_or_default() } else { String::new() };
         if r1685_branch && crate::lang::reach_debug() {
             eprintln!("R1748SITE\t{tr}::{leaf}\t{named}"); // §E1 REACH COUNTER
         }
-        self.dispatch_named.insert((tr.to_string(), leaf.to_string(), named));
+        for k in &key_traits {
+            self.dispatch_named.insert((k.clone(), leaf.to_string(), named.clone()));
+        }
         if count > 1 {
             // R485 — `ambiguous:`, not `callback:`. TWO DISTINCT local traits declare this leaf, so no
             // owner could be formed AT ALL, which is exactly the condition §4 ⟨0.24⟩ defines the kind by.
