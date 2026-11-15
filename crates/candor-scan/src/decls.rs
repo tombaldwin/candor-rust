@@ -472,9 +472,11 @@ pub(crate) fn submodule_uses(
             }
         }
     }
+    let mut own_decls: std::collections::HashSet<String> = std::collections::HashSet::new();
     for it in inner {
         if let Some(name) = declared_item_name(it, include_tests) {
             subuses.remove(&name);
+            own_decls.insert(name);
         }
     }
     // SOUNDNESS R400 — EACH ANCESTOR'S OWN BINDINGS TRAVEL, KEYED BY DEPTH. The clone above is the flattened chain, so
@@ -500,6 +502,55 @@ pub(crate) fn submodule_uses(
             .collect();
         subuses.retain(|k, _| k == SUPER_SCOPE_MARKER || !k.starts_with(SUPER_SCOPE_MARKER));
         subuses.extend(carried);
+    }
+    // RESOLVER STEP 1 (SOUNDNESS R1716 / R1738) — THE EXTERN PRELUDE IS PER MODULE. An inline module that imports nothing by a
+    // glob and has no item-position macro binds a name only by its own declarations and `use`s; everything else it writes
+    // is the extern prelude's (or the std prelude's). So where the flattened clone above handed it the PARENT's binding of
+    // an extern-prelude name (`use crate::other::ffi;` in the file, `ffi::unlink` in `mod child`), or where the parent's own
+    // `mod ffi` kept the prelude seed out of the file's map, the child gets the prelude's answer: a renamed root `extern
+    // crate X as Y` is `Y -> X`, and a dependency / `std` / `core` / `alloc` name loses the parent's binding and stays the
+    // crate it names. The child's own `use` items, read after this map is built, still overwrite it. A child WITH a glob
+    // (`use super::*` is the usual one) or an item macro keeps the inherited reading, which approximates what the glob
+    // brings in; nothing here is decided for it. `use super::X` reads the parent's binding from the carried `super::X` key
+    // (`lang::collect_use`), so it is not changed by this.
+    subuses.remove(crate::lang::SCOPE_PRELUDE_KEY);
+    let mut prelude_names: Vec<String> = Vec::new();
+    if !crate::lang::step1_scope_off() && !child_may_import_unseen(inner, include_tests) {
+        if let Some(pre) = uses.get(crate::lang::XPRELUDE_KEY) {
+            for e in pre.split('\u{1}') {
+                if let Some((y, x)) = e.split_once('\u{2}') {
+                    if !own_decls.contains(y) && subuses.get(y).is_none_or(|v| v != x) {
+                        if candor_report::env::trace("CANDOR_STEP1_INSTR") {
+                            eprintln!("STEP1PRELUDE\t{y}\t{x}\t{}", subuses.get(y).map(String::as_str).unwrap_or("-")); // §E1 REACH
+                        }
+                        subuses.insert(y.to_string(), x.to_string());
+                        prelude_names.push(y.to_string());
+                    }
+                }
+            }
+        }
+        let deps = uses.get(crate::lang::DEPS_KEY).cloned().unwrap_or_default();
+        for d in deps.split('\u{1}').filter(|d| !d.is_empty()).chain(["std", "core", "alloc"]) {
+            if own_decls.contains(d) {
+                continue;
+            }
+            let renamed_prelude = uses
+                .get(crate::lang::XPRELUDE_KEY)
+                .is_some_and(|p| p.split('\u{1}').any(|e| e.split_once('\u{2}').is_some_and(|(y, _)| y == d)));
+            if renamed_prelude {
+                continue; // answered above
+            }
+            if let Some(v) = subuses.get(d).filter(|v| v.as_str() != d) {
+                if candor_report::env::trace("CANDOR_STEP1_INSTR") {
+                    eprintln!("STEP1PRELUDE\t{d}\t{d}\t{v}"); // §E1 REACH
+                }
+                subuses.remove(d);
+                prelude_names.push(d.to_string());
+            }
+        }
+    }
+    if !prelude_names.is_empty() {
+        subuses.insert(crate::lang::SCOPE_PRELUDE_KEY.to_string(), prelude_names.join("\u{1}"));
     }
     // SOUNDNESS R378 — MARK THIS MAP AS THE CHILD'S PARENT SCOPE. `use super::X` inside an INLINE
     // module names an item of the enclosing module, and for an inline module this map IS that module's
@@ -529,6 +580,49 @@ pub(crate) fn submodule_uses(
     // and that is the child's own glob, recorded when the child's `use` items are read).
     subuses.remove(crate::lang::ALLGLOB_KEY);
     subuses
+}
+
+/// RESOLVER STEP 1 — the kill switch for a cfg-gated definition arm beside an external re-export arm. Part `cfg`.
+pub(crate) fn step1_cfg_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| crate::lang::step1_part_off("cfg"))
+}
+
+/// RESOLVER STEP 1 — the kill switch for a crate-local trait bound resolved through the namespace. Part `bound`.
+pub(crate) fn step1_bound_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| crate::lang::step1_part_off("bound"))
+}
+
+/// RESOLVER STEP 1 — the kill switch for admitting a re-export key every claimant of which stands for one definition set
+/// (`collector::reexport_aliases`). Part `ident`.
+pub(crate) fn step1_ident_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| crate::lang::step1_part_off("ident"))
+}
+
+/// RESOLVER STEP 1 — the kill switch for block-scope resolution of the impl's self type (`fninfo`). Part `block`.
+pub(crate) fn step1_block_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| crate::lang::step1_part_off("block"))
+}
+
+/// RESOLVER STEP 1 — can an inline module bind a name by something its own named `use`s and declarations do not show: a
+/// glob `use` (any visibility, any base) or an item-position macro invocation (which may expand to a `use`)?
+fn child_may_import_unseen(inner: &[syn::Item], include_tests: bool) -> bool {
+    fn has_glob(t: &syn::UseTree) -> bool {
+        match t {
+            syn::UseTree::Path(p) => has_glob(&p.tree),
+            syn::UseTree::Group(g) => g.items.iter().any(has_glob),
+            syn::UseTree::Glob(_) => true,
+            _ => false,
+        }
+    }
+    inner.iter().any(|it| match it {
+        syn::Item::Use(u) => (include_tests || !is_cfg_test(&u.attrs)) && has_glob(&u.tree),
+        syn::Item::Macro(m) => m.ident.is_none() && (include_tests || !is_cfg_test(&m.attrs)),
+        _ => false,
+    })
 }
 
 /// VEIN A — give an inline `mod`'s map ITS OWN module path and declaration list, for a site that knows
@@ -2220,6 +2314,9 @@ pub(crate) struct NsIndex {
     pub(crate) private_placed: std::collections::HashSet<(String, String)>,
     pub(crate) private_ext_glob: std::collections::HashSet<String>,
     pub(crate) private_ext_use: std::collections::HashSet<String>,
+    /// RESOLVER STEP 1 (SOUNDNESS R900) — `(module, glob source)` of a placed glob that is one ARM of a `#[cfg]` set: the
+    /// edge carries a `#[cfg]`, or names several sources (a `#[path]`-redirected `mod` per arm).
+    pub(crate) arm_placed: std::collections::HashSet<(String, String)>,
     /// Pass B answers of `resolve_memo` (the installed table no longer changes then), by caller and key
     memo: std::sync::Mutex<HashMap<String, Option<Vec<String>>>>,
 }
@@ -2298,6 +2395,9 @@ impl NsIndex {
                         if !v.contains(f) {
                             v.push(f.clone());
                         }
+                        if e.cfg_gated || e.from.len() > 1 {
+                            ns.arm_placed.insert((e.module.clone(), f.clone()));
+                        }
                     }
                 }
                 _ => {}
@@ -2341,7 +2441,68 @@ impl NsIndex {
         let mut cands: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         self.collect_globs(m, x, table, (caller, ext_ok), &mut visited, &mut cands).ok()?;
+        if cands.len() > 1 && self.arms_supply_all(m, x, table, (caller, ext_ok), &cands) {
+            if candor_report::env::trace("CANDOR_STEP1_INSTR") {
+                eprintln!("STEP1ARMS\t{m}::{x}\t{}", cands.iter().cloned().collect::<Vec<_>>().join("|")); // §E1 REACH
+            }
+            return Some(cands.into_iter().collect());
+        }
         (cands.len() == 1).then(|| cands.into_iter().collect())
+    }
+
+    /// RESOLVER STEP 1 (SOUNDNESS R900) — CFG ARMS ARE A SET (DESIGN §2.4 rule 4). Several definitions of `x` through `m`'s globs
+    /// is E0659 in ONE build — unless each comes through a different ARM of a `#[cfg]` set (jiff `tz::db::zoneinfo`: `pub(crate)
+    /// use self::inner::*;` over `#[cfg(feature = ..)] #[path = "disabled.rs"] mod inner;` and its `enabled.rs` twin), which never
+    /// coexist, so the answer is their UNION and the refusal hedged a call whose targets are known. True only when every source
+    /// that supplies `x` is an arm glob of `m`, `m` has no external glob, and no arm is undetermined; any doubt keeps the
+    /// refusal.
+    fn arms_supply_all(
+        &self,
+        m: &str,
+        x: &str,
+        table: &HashMap<String, String>,
+        (caller, ext_ok): (Option<&str>, bool),
+        cands: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        if step1_cfg_off() || self.ext_globs.get(m).is_some_and(|v| !v.is_empty()) || self.opaque.contains(m) {
+            return false;
+        }
+        let sources: Vec<&String> = self
+            .placed
+            .get(m)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|s| !self.private_placed.contains(&(m.to_string(), (*s).clone())) || Self::sees(m, caller))
+            .filter(|s| s.as_str() != m)
+            .collect();
+        let mut covered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for s in sources {
+            let mut one: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            match self.explicit(s, x, table, Some(m)) {
+                Some(v) => one.extend(v),
+                None => {
+                    if self.opaque.contains(s.as_str()) || self.names.get(s.as_str()).is_some_and(|n| n.contains(x)) {
+                        return false;
+                    }
+                    if self.has_globs(s) {
+                        let mut visited: std::collections::HashSet<String> = [m.to_string()].into_iter().collect();
+                        if self.collect_globs(s, x, table, (Some(m), ext_ok), &mut visited, &mut one).is_err() {
+                            return false;
+                        }
+                    }
+                }
+            }
+            if one.is_empty() {
+                continue;
+            }
+            // a source that is not an arm supplies `x` in every build, so a second supplier is a real E0659 reading
+            if !self.arm_placed.contains(&(m.to_string(), s.clone())) || one.len() != 1 {
+                return false;
+            }
+            covered.extend(one);
+        }
+        covered == *cands
     }
 
     /// Every definition `x` may denote through `m`'s globs, into `cands`; `Err` when one of them is undetermined (an
@@ -2994,6 +3155,20 @@ pub(crate) fn collect_reexports(
                             let head = segs[0].as_str();
                             if !matches!(head, "crate" | "self" | "super") {
                                 let target = format!("{}::{name}", segs.join("::"));
+                                // RESOLVER STEP 1 (SOUNDNESS R1741) — CFG ARMS ARE A SET (DESIGN §2.4 rule 4). A `#[cfg]`-gated
+                                // external re-export beside a `#[cfg]`-gated DEFINITION of the same name (`#[cfg(not(target_os =
+                                // "none"))] pub fn digest(..)` / `#[cfg(target_os = "none")] pub use dgdep::go as digest;`) is one
+                                // name with two arms, and the external arm alone answered for both: `digest(t)` read `[]` +
+                                // `invisible:[dgdep]` while the host build runs the declared arm's `Command` (EXECUTED). R438's
+                                // MIXED rule recorded the definition arm only beside a LOCAL `use` arm; here the definition is
+                                // recorded as the alias key itself, so scan.rs's R105 arm loop edges it beside the external arm.
+                                let kinds = cfg_arm_kinds.get(&alias).copied().unwrap_or((false, false, false));
+                                if has_cfg(&u.attrs) && kinds.2 && !step1_cfg_off() {
+                                    if candor_report::env::trace("CANDOR_STEP1_INSTR") {
+                                        eprintln!("STEP1CFGDEF\t{}\t{target}", qualify(modpath, &alias)); // §E1 REACH
+                                    }
+                                    record_alias(aliases, qualify(modpath, &alias), qualify(modpath, &alias));
+                                }
                                 record_alias(aliases, qualify(modpath, &alias), target);
                             }
                         }
@@ -3941,6 +4116,9 @@ pub(crate) fn fninfo(
             }
         }
     }
+    // RESOLVER STEP 1 — the map of the scope the IMPL is written in, before the body's own `use`s and items are merged.
+    let impl_scope_uses: &HashMap<String, String> = uses;
+    let self_rebound = self_ty.is_some_and(|st| local_uses.contains_key(st) || shadowed.contains(st));
     let sig_merged: HashMap<String, String>;
     let sig_uses: &HashMap<String, String> = if local_uses.is_empty() {
         uses
@@ -4008,6 +4186,29 @@ pub(crate) fn fninfo(
     let mut trait_vars = seed_trait_vars(sig);
     let fn_typed_vars = seed_fn_typed_vars(sig, elems.callable_aliases);
     let mut vars = seed_vars(sig, self_ty, sig_uses);
+    // RESOLVER STEP 1 (SOUNDNESS R1771) — `self` IS THE IMPL'S TYPE, NAMED IN THE IMPL'S SCOPE. `self_ty` is the impl's written
+    // leaf, and every later reader expands it through THIS BODY's map, where a body-local `use crate::other::Foo;` (or a
+    // body-local `struct Foo`) rebinds that leaf: `self.run()` in `impl Foo { fn go(&self) { use crate::other::Foo; .. } }`
+    // edged to `other::Foo::run`, and the caller was ABSENT over an executed write. Block scopes nest INSIDE the impl, so
+    // they cannot rename its self type; where the body rebinds the leaf, `self` is spelled crate-rooted from the impl's
+    // own scope (its binding there, or the declaration `anchor_origin` names), which no body binding can reach. A leaf the
+    // body does not rebind is left exactly as it was.
+    if let Some(st) = self_ty.filter(|t| !t.contains("::") && !step1_block_off()) {
+        if self_rebound && vars.get("self").map(String::as_str) == Some(st) {
+            let outer = crate::lang::expand(st, impl_scope_uses);
+            let anchored = if outer != st {
+                (!outer.contains(ALIAS_ALT_SEP)).then_some(outer)
+            } else {
+                crate::lang::anchor_origin(st, impl_scope_uses)
+            };
+            if let Some(a) = anchored {
+                if candor_report::env::trace("CANDOR_STEP1_INSTR") {
+                    eprintln!("STEP1SELF\t{qual}\t{st}\t{a}"); // §E1 REACH
+                }
+                vars.insert("self".to_string(), a);
+            }
+        }
+    }
     // SOUNDNESS R1169 — in `impl Tr for dep::X`, `self` is the DEPENDENCY's `X`, as written. `self_ty` is the impl's
     // unit KEY (the leaf `X`, which is how this crate's units of that impl are filed), and typing `self` by it named a
     // crate-local `X` of the same leaf when there was one: hyper-util's `impl GracefulConnection for
@@ -4606,7 +4807,12 @@ pub(crate) fn fninfo(
             crate::lang::projection_assoc_leaves(sig_written, impl_generics, &mut v);
             v
         },
-        trait_quals_by_param: crate::lang::sig_trait_quals_by_param(sig),
+        trait_quals_by_param: {
+            let mut m = crate::lang::sig_trait_quals_by_param(sig);
+            // RESOLVER STEP 1 (SOUNDNESS R1727) — a bound written through a CRATE-LOCAL path is resolved in this scope.
+            crate::lang::merge_local_bound_quals(sig, sig_uses, &mut m);
+            m
+        },
         // SOUNDNESS R577 — the crate-wide fallback for the three declaration sites that record only a
         // bare leaf (a FIELD, a RETURN, and a closure parameter in a scope that shadows nothing).
         written_trait_quals: traits.written_quals,

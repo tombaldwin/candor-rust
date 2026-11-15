@@ -367,8 +367,13 @@ fn an_inline_modules_own_trait_is_not_keyed_through_the_parents_import() {
     let (rows, _) = scan(&app, Some(&reps), None, &[]);
     assert!(has(&rows, "e_ev", "Fs"), "control: the local trait's own call lost its effect: {:?}", rows.get("e_ev"));
     assert!(!has(&rows, "e_drive", "Fs"), "an inline module's own trait was keyed as the dependency's: {:?}", rows.get("e_drive"));
-    let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1745_OFF", "1")]);
+    // RESOLVER STEP 1 (R654) closes this shape a second way — `other` declares its own ungated `Visitor`, so the type
+    // namespace names it (`lang::collect_foreign_trait_impls`) — so the reach check turns both off.
+    let (off, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1745_OFF", "1"), ("CANDOR_RESOLVER_STEP1_OFF", "ns")]);
     assert!(has(&off, "e_drive", "Fs"), "R1745 off: the fixture does not reach the change: {:?}", off.get("e_drive"));
+    let (r1745_only, _) = scan(&app, Some(&reps), None, &[("CANDOR_R1745_OFF", "1")]);
+    assert!(!has(&r1745_only, "e_drive", "Fs"), "step 1's type-namespace rule alone keeps the fabrication closed: {:?}",
+        r1745_only.get("e_drive"));
     let app2 = pkg(&root, "app2", &["fac", "fac_core", "prod"],
         "use fac_core::de::Visitor;\n\
          mod inner { use super::*;\n pub struct L;\n\

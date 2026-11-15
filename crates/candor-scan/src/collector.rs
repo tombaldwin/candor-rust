@@ -6110,6 +6110,14 @@ impl<'a> CallCollector<'a> {
                         let e = self.expand_scoped(&name);
                         match crate::lang::imported_variant_owner(&e) {
                             Some(o) if self.variant_is_unit(&o, e.rsplit("::").next().unwrap_or(&e)) => o,
+                            // RESOLVER STEP 1 — the variant a crate-local ENUM glob puts in scope (`use crate::Kd::*; Aa`).
+                            _ if e == name => crate::lang::glob_enum_variant_owner(
+                                &name,
+                                &self.uses,
+                                &|owner, v| self.variant_is_unit(owner, v),
+                                &crate::lang::ns_is_module,
+                            )
+                            .unwrap_or(e),
                             _ => e,
                         }
                     })
@@ -19232,7 +19240,23 @@ pub(crate) fn reexport_aliases(
                 }
                 continue;
             }
-            if claimants.get(&key).is_none_or(|c| c.len() != 1) {
+            // RESOLVER STEP 1 (SOUNDNESS R752) — IDENTITY IS THE DEFINITION, NOT THE SPELLING (DESIGN §2.5 clause 3). Two
+            // modules claiming one tail2 key is ambiguous only when they could stand for DIFFERENT definitions. cap-primitives'
+            // `fs::beneath_supported` is claimed by `rustix::freebsd::fs` (`pub(crate) use check::beneath_supported`) and by
+            // `fs` (`pub(crate) use super::rustix::fs::*`, a glob that re-exports the first) — both stand for the one definition
+            // `rustix::freebsd::fs::check::beneath_supported`, so the refusal hedged a call whose target is known. Admitted only
+            // when EVERY claimant's definition set for this name is exactly this module's.
+            let same_defs = !crate::decls::step1_ident_off()
+                && claimants.get(&key).is_some_and(|c| {
+                    c.len() > 1
+                        && c.iter().all(|m| {
+                            exported.get(*m).and_then(|ns| ns.get(name)).is_some_and(|e| e.1 == *quals)
+                        })
+                });
+            if same_defs && candor_report::env::trace("CANDOR_STEP1_INSTR") {
+                eprintln!("STEP1SAMEDEF\t{key}\t{}", quals.iter().cloned().collect::<Vec<_>>().join("|")); // §E1 REACH
+            }
+            if !same_defs && claimants.get(&key).is_none_or(|c| c.len() != 1) {
                 // The same shape one test over: the 2-segment key is claimed by two modules (or by none
                 // this index can see), so it names no single definition and the call resolves to nothing.
                 // Recorded under its own reason so the two can be told apart in an A/B.

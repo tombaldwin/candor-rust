@@ -260,6 +260,118 @@ pub(crate) fn sig_trait_quals_by_param(sig: &syn::Signature) -> HashMap<String, 
     out
 }
 
+/// RESOLVER STEP 1 (SOUNDNESS R1727) — A TRAIT BOUND WRITTEN THROUGH A CRATE-LOCAL PATH, RESOLVED BY THE NAMESPACE.
+///
+/// `quals_from_bounds` drops every `crate`/`self`/`super` spelling, because handing `expand` such a path from a leaf-keyed
+/// map later strips its root and can mint a dependency-looking key (its own doc). But a crate-local spelling can name a
+/// DEPENDENCY's trait through a local re-export (`pub mod io { pub use fio::AsyncBufRead as BufRead; }`, then `fn p<T:
+/// crate::io::BufRead>(t: Pin<&mut T>, ..) { t.poll_fill_buf(cx) }`), and there the drop left `recv_trait_full` with the bare
+/// leaf: no key, no `dispatchesOn`, no disclosure — ABSENT, while `use crate::io::BufRead;` + a bare bound keyed
+/// `fio#AsyncBufRead::poll_fill_buf`. So the path is resolved HERE, in the declaring scope (`uses`), and recorded only when
+/// the namespace's answer is OUTSIDE the crate (headed by a manifest dependency or `std`/`core`/`alloc`) and single-armed —
+/// the same path the `use` spelling yields, never a stripped local one. A per-parameter entry the written spellings already
+/// supply wins (`or_insert`).
+pub(crate) fn merge_local_bound_quals(
+    sig: &syn::Signature,
+    uses: &HashMap<String, String>,
+    out: &mut HashMap<String, HashMap<String, String>>,
+) {
+    if crate::decls::step1_bound_off() {
+        return;
+    }
+    let deps = uses.get(DEPS_KEY).map(String::as_str).unwrap_or("");
+    let resolve = |bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>, m: &mut HashMap<String, String>| {
+        for b in bounds {
+            let syn::TypeParamBound::Trait(t) = b else { continue };
+            if t.path.segments.len() < 2 {
+                continue;
+            }
+            let head = t.path.segments[0].ident.to_string();
+            if !matches!(head.as_str(), "crate" | "self" | "super") {
+                continue;
+            }
+            let Some(leaf) = t.path.segments.last().map(|s| s.ident.to_string()) else { continue };
+            let e = expand(&path_to_string(&t.path), uses);
+            let h = e.split("::").next().unwrap_or("");
+            let outside = matches!(h, "std" | "core" | "alloc") || deps.split('\u{1}').any(|d| !d.is_empty() && d == h);
+            if !outside || !e.contains("::") || e.contains(crate::decls::ALIAS_ALT_SEP) {
+                continue;
+            }
+            if candor_report::env::trace("CANDOR_STEP1_INSTR") {
+                eprintln!("STEP1BOUND\t{}\t{e}", path_to_string(&t.path)); // §E1 REACH
+            }
+            m.entry(leaf).or_insert(e);
+        }
+    };
+    let mut by_tp: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for p in &sig.generics.params {
+        if let syn::GenericParam::Type(tp) = p {
+            resolve(&tp.bounds, by_tp.entry(tp.ident.to_string()).or_default());
+        }
+    }
+    if let Some(w) = &sig.generics.where_clause {
+        for pred in &w.predicates {
+            if let syn::WherePredicate::Type(pt) = pred {
+                let Some(name) = plain_type_ident(&pt.bounded_ty) else { continue };
+                resolve(&pt.bounds, by_tp.entry(name).or_default());
+            }
+        }
+    }
+    for arg in &sig.inputs {
+        let syn::FnArg::Typed(pt) = arg else { continue };
+        let syn::Pat::Ident(id) = &*pt.pat else { continue };
+        let mut per: HashMap<String, String> = HashMap::new();
+        let mut ty: &syn::Type = &pt.ty;
+        // `&dyn crate::x::Tr` / `impl crate::x::Tr` / `Pin<&mut T>` over a bounded `T`
+        loop {
+            match ty {
+                syn::Type::Reference(r) => ty = &r.elem,
+                syn::Type::Paren(p) => ty = &p.elem,
+                syn::Type::Group(g) => ty = &g.elem,
+                _ => break,
+            }
+        }
+        match ty {
+            syn::Type::TraitObject(t) => resolve(&t.bounds, &mut per),
+            syn::Type::ImplTrait(t) => resolve(&t.bounds, &mut per),
+            _ => {}
+        }
+        if let Some(tp) = plain_type_ident(&pt.ty).or_else(|| pinned_type_ident(&pt.ty)) {
+            if let Some(g) = by_tp.get(&tp) {
+                for (k, v) in g {
+                    per.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
+        if per.is_empty() {
+            continue;
+        }
+        let slot = out.entry(id.ident.to_string()).or_default();
+        for (k, v) in per {
+            slot.entry(k).or_insert(v);
+        }
+    }
+}
+
+/// RESOLVER STEP 1 — `Pin<&mut T>` / `Pin<&T>` / `Pin<Box<T>>` → `T`, the receiver shape of a poll method's bounded parameter.
+fn pinned_type_ident(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(p) = ty else { return None };
+    let seg = p.path.segments.last()?;
+    if seg.ident != "Pin" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(a) = &seg.arguments else { return None };
+    let Some(syn::GenericArgument::Type(inner)) = a.args.first() else { return None };
+    match inner {
+        syn::Type::Path(bp) if bp.path.segments.last().is_some_and(|s| s.ident == "Box") => {
+            let syn::PathArguments::AngleBracketed(b) = &bp.path.segments.last()?.arguments else { return None };
+            let Some(syn::GenericArgument::Type(t)) = b.args.first() else { return None };
+            plain_type_ident(t)
+        }
+        other => plain_type_ident(other),
+    }
+}
+
 /// The bare identifier of a type, peeling references/parens/groups: `A`, `&A`, `&mut A` -> `A`.
 /// Returns None for anything compound, which is exactly when a generic bound must not be attached.
 fn plain_type_ident(ty: &syn::Type) -> Option<String> {
@@ -2954,12 +3066,24 @@ fn expand_with_in(path: &str, uses: &HashMap<String, String>, anchor: bool, foll
         Some(m) if !m.is_empty() => None,
         _ => unique_glob(uses),
     };
+    // RESOLVER STEP 1 (SOUNDNESS R653 / R753) — R186'S RULE IN PASS A TOO. `root_declares` reads the crate root's declarations
+    // seeded at Pass B (`seed_root_decls`), which do not exist while Pass A walks the root file itself — so the root's own
+    // glob (`use extdep::types::*;` in lib.rs) still claimed `use crate::sink::Sink;` there, and the trait's impls were keyed
+    // `extdep#types::sink::Sink::emit`, a member minted into a dependency's namespace. But the only file whose own glob
+    // reaches this branch is the root (`file_glob` above), and when this map IS the root's (`MODPATH_KEY` empty) its own
+    // declaration list (`MODDECL_ALL_KEY`, seeded in both passes) is exactly the root's: an explicit item beats a glob.
+    let root_map_declares = !step1_passa_off()
+        && uses.get(MODPATH_KEY).is_some_and(|m| m.is_empty())
+        && uses.get(MODDECL_ALL_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == segs[0]));
+    if root_map_declares && candor_report::env::trace("CANDOR_STEP1_INSTR") && root_glob(uses).or(file_glob).is_some() {
+        eprintln!("STEP1ROOTDECL\t{path}"); // §E1 REACH
+    }
     match root_glob(uses).or(file_glob) {
         // R186 — THE REACH COUNTER (§E1), same shape and same reason as R160's `SELFALIAS` above: an
         // unchanged corpus row is not evidence this code ran, and "0 changed with 0 reaches" is a
         // different claim from "0 changed with 800 reaches". Gated on the cheap glob lookup having already
         // succeeded, so the env read happens only where the refusal is the thing being counted.
-        Some(glob) if !root_declares(uses, segs[0]) => format!("{glob}::{}", segs.join("::")),
+        Some(glob) if !root_declares(uses, segs[0]) && !root_map_declares => format!("{glob}::{}", segs.join("::")),
         Some(_) => {
             if candor_report::env::trace("CANDOR_R186_DEBUG") {
                 eprintln!("R186REFUSE {path}");
@@ -3241,7 +3365,20 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
         let h = a.split("::").next().unwrap_or(a);
         h != "crate" && (matches!(h, "std" | "core" | "alloc") || deps.split('\u{1}').any(|d| d == h) || !a.contains("::") && h.is_empty())
     };
-    if hits[0].split(crate::decls::ALIAS_ALT_SEP).any(external) && !table_hits.contains(&hits[0]) {
+    // RESOLVER STEP 1 (SOUNDNESS R1711 (b)) — …EXCEPT where the module namespace itself answers with a DEPENDENCY item the glob's
+    // source binds by an explicit `use` (`mod n { pub use libc as sys; }`, `use crate::n::*; sys::unlink(p)`). A crate-local glob
+    // is ENUMERABLE (DESIGN §2.4 rule 1a), so rustc's answer is exactly that binding, and the refusal left the call naming
+    // nothing: ABSENT over an executed `unlink`. A std/core/alloc answer keeps the refusal: there the resolution moves a
+    // generic-bound disclosure (writeable `fmt::Write`) whose removal is a (c″) question, not a namespace one.
+    let ns_dep_answer = !step1_glob_off()
+        && hits[0].split(crate::decls::ALIAS_ALT_SEP).all(|a| {
+            let h = a.split("::").next().unwrap_or(a);
+            !matches!(h, "std" | "core" | "alloc" | "crate") && deps.split('\u{1}').any(|d| d == h)
+        });
+    if ns_dep_answer && candor_report::env::trace("CANDOR_STEP1_INSTR") {
+        eprintln!("STEP1GLOBDEP\t{}\t{}", segs.join("::"), hits[0].replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+    }
+    if hits[0].split(crate::decls::ALIAS_ALT_SEP).any(external) && !table_hits.contains(&hits[0]) && !ns_dep_answer {
         return None;
     }
     let r = alias_join(&hits[0], &segs[1..]);
@@ -3249,6 +3386,82 @@ fn local_glob_alias(segs: &[&str], uses: &HashMap<String, String>) -> Option<Str
         eprintln!("R1684GLOB\t{}\t{}", segs.join("::"), r.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH COUNTER
     }
     Some(r)
+}
+
+/// RESOLVER STEP 1 (SOUNDNESS R1426, open half) — the crate-rooted path (no `crate::`) of every CRATE-LOCAL glob base in this
+/// scope (`use crate::Kd::*`, `use super::*`, `use self::m::*`), in `ALLGLOB_KEY` order. A base whose module this map cannot
+/// place is skipped.
+pub(crate) fn local_glob_bases(uses: &HashMap<String, String>) -> Vec<String> {
+    let Some(globs) = uses.get(ALLGLOB_KEY) else { return Vec::new() };
+    let mut out = Vec::new();
+    for g in globs.split('\u{1}').filter(|g| !g.is_empty()) {
+        let gs: Vec<&str> = g.split("::").collect();
+        let module: String = match gs[0] {
+            "crate" => gs[1..].join("::"),
+            "self" | "super" => {
+                let mut probe = gs.clone();
+                probe.push("_");
+                match absolutise(&probe, uses) {
+                    Some(a) => a.strip_suffix("::_").or_else(|| a.strip_suffix('_')).unwrap_or(&a).trim_end_matches("::").to_string(),
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        if !out.contains(&module) {
+            out.push(module);
+        }
+    }
+    out
+}
+
+/// RESOLVER STEP 1 (SOUNDNESS R1426, open half) — a BARE value `x` no `use` binds and this module does not declare, written
+/// where a crate-local glob of an ENUM is in scope (`use crate::Kd::*; Aa.go()`, at module or block scope): rustc's module
+/// namespace puts the enum's variants in scope through that glob, so `x` is `<enum>::x` when the enum declares it. Returns
+/// the enum's crate-rooted path (no `crate::`). `is_variant(enum_path, x)` is the caller's own declaration fact (a UNIT
+/// variant of exactly that enum); `is_module(path)` excludes a glob base that is a module of this crate. Exactly ONE glob
+/// may answer: two enum globs both supplying `x` would be E0659, so more than one answer means this reading is wrong and
+/// nothing is returned. A generic parameter, a dependency, a prelude name or a std root is never asked (`glob_candidates`'s
+/// exclusions).
+pub(crate) fn glob_enum_variant_owner(
+    x: &str,
+    uses: &HashMap<String, String>,
+    is_variant: &dyn Fn(&str, &str) -> bool,
+    is_module: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    if step1_variant_off() || x.contains("::") || uses.contains_key(x) {
+        return None;
+    }
+    if uses.get(MODDECL_ALL_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == x)) {
+        return None;
+    }
+    if PRELUDE_AND_PRIMS.contains(&x) || PRIMS_MORE.contains(&x) {
+        return None;
+    }
+    let owners: Vec<String> =
+        local_glob_bases(uses).into_iter().filter(|b| !b.is_empty() && !is_module(b) && is_variant(b, x)).collect();
+    if owners.len() != 1 {
+        return None;
+    }
+    if candor_report::env::trace("CANDOR_STEP1_INSTR") {
+        eprintln!("STEP1VARIANT\t{x}\t{}", owners[0]); // §E1 REACH
+    }
+    owners.into_iter().next()
+}
+
+/// RESOLVER STEP 1 — is `path` (crate-rooted, no `crate::`) one of this crate's modules, per the installed namespace index?
+/// `true` when no index is installed (Pass A, `CANDOR_R1697_OFF`): the caller then cannot tell, and refuses.
+pub(crate) fn ns_is_module(path: &str) -> bool {
+    match ns_cell().read() {
+        Ok(g) => g.as_ref().is_none_or(|ns| ns.mods.contains(path)),
+        Err(_) => true,
+    }
+}
+
+/// RESOLVER STEP 1 — the kill switch for a glob-imported enum variant's type (`glob_enum_variant_owner`). Part `variant`.
+pub(crate) fn step1_variant_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| step1_part_off("variant"))
 }
 
 /// R105 — append a caller's trailing segments to an alias target that may carry SEVERAL `#[cfg]`-duplicated
@@ -6405,6 +6618,30 @@ pub(crate) fn collect_use(
                 }
             }
             let head = supers.split("::").next().unwrap_or(supers);
+            // RESOLVER STEP 1 — `use super::X` at depth 1 names the PARENT's `X`. The bare key is the parent's binding unless
+            // `submodule_uses` replaced it with this module's extern-prelude answer; the carried `super::X` key is still the
+            // parent's, so where the two differ the parent's is put back for this one expansion.
+            let prelude_set = depth == 1
+                && !step1_scope_off()
+                && out.get(SCOPE_PRELUDE_KEY).is_some_and(|l| l.split('\u{1}').any(|n| n == head));
+            if prelude_set {
+                let mut parent = out.clone();
+                match out.get(&format!("{}{head}", crate::decls::SUPER_SCOPE_MARKER)) {
+                    Some(c) => {
+                        parent.insert(head.to_string(), c.clone());
+                    }
+                    None => {
+                        parent.remove(head);
+                    }
+                }
+                if parent.contains_key(head) {
+                    let resolved = expand(supers, &parent);
+                    if resolved != supers {
+                        return resolved;
+                    }
+                }
+                return anchored_value(full, out).unwrap_or_else(|| full.to_string());
+            }
             if out.contains_key(head) {
                 let resolved = expand(supers, out);
                 if resolved != supers {
@@ -7004,13 +7241,60 @@ pub(crate) fn seed_extern_prelude(
     let declared: std::collections::HashSet<String> =
         items.iter().filter_map(|it| crate::decls::declared_item_name(it, include_tests)).collect();
     let mut names: Vec<&str> = Vec::new();
+    let mut prelude: Vec<String> = Vec::new();
     for (y, x) in root {
         names.push(y);
+        prelude.push(format!("{y}\u{2}{x}"));
         if !declared.contains(y.as_str()) && !uses.contains_key(y.as_str()) {
             uses.insert(y.clone(), x.clone());
         }
     }
     uses.insert(XALIAS_KEY.to_string(), names.join("\u{1}"));
+    // RESOLVER STEP 1 — the renamed half of the extern prelude with its TARGETS, whatever this file declares, so an inline
+    // module that does not declare `Y` can be given the prelude's `Y` (`decls::submodule_uses`). Read nowhere else.
+    if !step1_scope_off() {
+        uses.insert(XPRELUDE_KEY.to_string(), prelude.join("\u{1}"));
+    }
+}
+
+/// RESOLVER STEP 1 — the reserved per-file key carrying the crate root's renamed extern bindings as `Y\u{2}X`, `\u{1}`-joined.
+pub(crate) const XPRELUDE_KEY: &str = "*xprelude";
+/// RESOLVER STEP 1 — the reserved per-scope key listing the names `decls::submodule_uses` re-answered from the extern prelude
+/// in THIS inline module (`\u{1}`-joined), so `use super::X` can still name the parent's `X`.
+pub(crate) const SCOPE_PRELUDE_KEY: &str = "*scopeprelude";
+
+/// RESOLVER STEP 1 (namespace authority) — the kill switch for PER-SCOPE name resolution of an inline module: the extern prelude
+/// a module that imports nothing sees (`decls::submodule_uses`). `CANDOR_RESOLVER_STEP1_OFF=1` (or a list naming `scope`).
+pub(crate) fn step1_scope_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| step1_part_off("scope"))
+}
+
+/// RESOLVER STEP 1 — the kill switch for the root map's own declarations refusing the root glob (`expand`). Part `passa`.
+pub(crate) fn step1_passa_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| step1_part_off("passa"))
+}
+
+/// RESOLVER STEP 1 — the kill switch for a type-namespace declaration beside a same-name `use` (`foreign_trait_owner_qual`).
+/// Part `ns`.
+pub(crate) fn step1_ns_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| step1_part_off("ns"))
+}
+
+/// RESOLVER STEP 1 — the kill switch for a crate-local glob's dependency answer (`local_glob_alias`). Part `glob`.
+pub(crate) fn step1_glob_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| step1_part_off("glob"))
+}
+
+/// RESOLVER STEP 1 — `CANDOR_RESOLVER_STEP1_OFF` is `1`/`all` (every part off) or a comma list of part names.
+pub(crate) fn step1_part_off(part: &str) -> bool {
+    candor_report::env::switch_value(
+        "CANDOR_RESOLVER_STEP1_OFF",
+        candor_report::env::Selects::ListOrAny { whole: &["1", "all"], member: part },
+    )
 }
 
 /// SOUNDNESS R1710 — the reserved per-file key listing the crate ROOT's renamed extern bindings (`\u{1}`-joined `Y`s),
@@ -7492,11 +7776,36 @@ pub(crate) fn collect_foreign_trait_impls(
     uses: &HashMap<String, String>,
     out: &mut HashMap<String, Vec<String>>,
 ) {
+    // RESOLVER STEP 1 (SOUNDNESS R654) — THE TYPE NAMESPACE IS NOT THE `use` MAP'S ONE NAMESPACE. A trait this module declares
+    // WITHOUT a `#[cfg]` owns its name in the type namespace, so a same-name `use` beside it (`pub use diesel_derives::
+    // AsChangeset;` beside `pub trait AsChangeset`, the derive-named-after-its-trait idiom) can bind only another namespace —
+    // a type-namespace import there is E0255. The `use` map holds one namespace, so `impl AsChangeset for W` expanded to the
+    // MACRO's crate and keyed `extdep#AsChangeset::build`, a member minted into a dependency that declares no such trait. A
+    // one-segment trait path naming such a declaration is this crate's own, never a foreign key.
+    let own_traits: std::collections::HashSet<String> = if step1_ns_off() {
+        Default::default()
+    } else {
+        items
+            .iter()
+            .filter_map(|it| match it {
+                syn::Item::Trait(t) if !t.attrs.iter().any(|a| a.path().is_ident("cfg")) && (include_tests || !is_cfg_test(&t.attrs)) => {
+                    Some(t.ident.to_string())
+                }
+                _ => None,
+            })
+            .collect()
+    };
     for it in items {
         match it {
             syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
                 let Some((None, tr, _)) = &im.trait_ else { continue };  // `impl !Tr for X` is not an impl
                 let Some(ty) = impl_type_name(&im.self_ty) else { continue };
+                if tr.leading_colon.is_none() && tr.segments.len() == 1 && own_traits.contains(&tr.segments[0].ident.to_string()) {
+                    if candor_report::env::trace("CANDOR_STEP1_INSTR") && foreign_trait_owner_qual(tr, uses).is_some() {
+                        eprintln!("STEP1OWNTRAIT\t{}\t{ty}", tr.segments[0].ident); // §E1 REACH, on the CHANGED branch only
+                    }
+                    continue;
+                }
                 // ONE AUTHORITY for the key — see `foreign_trait_owner_qual`.
                 let Some((root, qual)) = foreign_trait_owner_qual(tr, uses) else { continue };
                 for ii in &im.items {
