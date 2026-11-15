@@ -213,3 +213,21 @@ fn r1782_an_annotation_the_typer_cannot_resolve_keeps_the_receiver_disclosed() {
     }
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The dependency arm of `ann_type_resolves` ("resolves by construction"): a dependency-typed annotation takes the dependency-call
+/// route, which the classifier or the `invisible` floor answers exactly as for a signature parameter. Measured on main: `dep_ann`
+/// had NO row (the receiver was untyped and no local member shared its name); now it discloses the uncalibrated dependency.
+#[test]
+fn r1782_a_dependency_typed_annotation_reaches_the_dependency_floor() {
+    let d = fixture("depann", r#"use object::macho::Nlist64;
+use object::read::macho::Nlist;
+use object::LittleEndian as LE;
+pub fn dep_ann<T: AsRef<[Nlist64<LE>]>>(t: T) -> usize { t.as_ref().iter().filter(|n: &&Nlist64<LE>| n.n_strx(LE) > 0).count() }
+"#, "object = \"0.37\"\n");
+    let (_, v) = scan(&d, None, false);
+    let inv: Vec<String> = v["functions"].as_array().unwrap().iter().find(|r| r["fn"].as_str() == Some("dep_ann"))
+        .and_then(|r| r["invisible"].as_array())
+        .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    assert_eq!(inv, ["object"], "{v:#}");
+    let _ = std::fs::remove_dir_all(&d);
+}
