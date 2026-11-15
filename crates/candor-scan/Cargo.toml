@@ -31,6 +31,8 @@ syn = { version = "2", default-features = false, features = ["full", "visit", "e
 # report-schema format). Spans MUST be resolved on the thread that parsed the file — the source map is
 # thread-local — which is why loc derivation runs in the rayon parse closures, not single-threaded Pass B.
 proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
+# STEP 0b sidecar only (`src/sidecar.rs`): a parsed file back to its tokens, to index their positions. Already in the tree via syn.
+quote = { version = "1", default-features = false }
 walkdir = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

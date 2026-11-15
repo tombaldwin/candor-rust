@@ -223,9 +223,43 @@ pub(crate) fn apply_dep_fn(de: &DepFn, caller: &str, s: DepSink<'_>) {
 /// `load_dep_reports`: withdrawal made the caller read pure) — plus
 /// the covered crate set. A report whose producing version differs from this binary's is
 /// DOWNGRADED to `Unknown` rather than silently trusted (spec §2.1).
+/// STEP 0b — `DepIndex::by_key` behind a wrapper whose `get` tells the per-call-site sidecar which dependency entry a route
+/// looked up (`sidecar::dep_hit`, a no-op unless `CANDOR_SIDECAR` is on). Every other use reaches the map through `Deref`.
+#[derive(Default)]
+pub(crate) struct DepMap(pub(crate) HashMap<String, DepFn>);
+
+impl std::ops::Deref for DepMap {
+    type Target = HashMap<String, DepFn>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for DepMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl DepMap {
+    pub(crate) fn get<Q>(&self, k: &Q) -> Option<&DepFn>
+    where
+        String: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized + std::fmt::Display,
+    {
+        let r = self.0.get(k);
+        if let Some(e) = r {
+            if crate::sidecar::on() {
+                crate::sidecar::dep_hit(k.to_string(), !e.effects.is_empty());
+            }
+        }
+        r
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct DepIndex {
-    pub(crate) by_key: HashMap<String, DepFn>,
+    pub(crate) by_key: DepMap,
     pub(crate) crates: std::collections::HashSet<String>,
     /// Crates whose loaded report(s) include at least one the §2.1 staleness gate REFUSED TO TRUST.
     ///

@@ -3859,6 +3859,7 @@ pub(crate) fn fninfo(
     drop_relevant: &std::collections::HashSet<String>,
 ) -> FnInfo {
     let _ = crate::collector::fd_prov_take(); // F3 — nothing from a previous body
+    let sc_mark = crate::sidecar::notes_mark(); // STEP 0b — this body's site notes start here (a nested walk nests)
     let _ = crate::collector::r1657_take(); // SOUNDNESS R1652/R1657 — nor a previous body's refused field picks
     // SOUNDNESS R1652/R1657 — a generic parameter of this fn or its impl that shadows a nominal name the module declares is
     // the PARAMETER in this scope, so origin qualification (`lang::anchor_origin`) must not name the declaration for it.
@@ -4915,6 +4916,7 @@ pub(crate) fn fninfo(
         impl_trait: String::new(),
         impl_trait_path: String::new(),
         impl_flags: 0,
+        sc_notes: crate::sidecar::take_notes_from(sc_mark),
     }
 }
 

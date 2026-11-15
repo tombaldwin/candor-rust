@@ -60,6 +60,7 @@ mod config;
 mod gate;
 mod propagate;
 mod scan;
+mod sidecar;
 mod surface;
 mod typesurf;
 

@@ -126,6 +126,11 @@ pub(crate) struct Call {
     /// associated type declaring the member. `None` everywhere else, which is that union. Cached (`cache_schema` rev184).
     #[serde(rename = "av", default, skip_serializing_if = "Option::is_none")]
     pub(crate) assoc_via: Option<String>,
+    /// STEP 0b instrument only (`sidecar.rs`): the call SITE this call was recorded at — `[line, col, flag]`, flag 0 written
+    /// code, 1 inside a macro invocation (keyed to the outermost one), 2 a non-call expression. Set only when `CANDOR_SIDECAR`
+    /// is on, never read by any route, and never cached.
+    #[serde(skip)]
+    pub(crate) sp: Option<[u32; 3]>,
 }
 
 /// SOUNDNESS R1207/R1208 — the autoref/autoderef steps Rust's method probe tries for a receiver of `form` (1 a value,
@@ -389,6 +394,10 @@ pub(crate) struct FnInfo {
     /// trait's member runs — neither may be read as "the inherent method wins".
     #[serde(rename = "if", default, skip_serializing_if = "crate::model::is_zero_u8")]
     pub(crate) impl_flags: u8,
+    /// STEP 0b instrument only (`sidecar.rs`): the notes the collector made at this body's call sites (refusals, dispatches,
+    /// macro groups, visited call forms), each with its site. Empty unless `CANDOR_SIDECAR` is on; never read, never cached.
+    #[serde(skip)]
+    pub(crate) sc_notes: Vec<(String, Option<[u32; 3]>)>,
 }
 
 /// SOUNDNESS R1537 (c) — SPEC §2 ⟨0.42⟩: the BARE path of a co-path unit's `fn`, i.e. the name with its disambiguator removed —

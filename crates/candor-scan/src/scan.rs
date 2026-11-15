@@ -485,6 +485,7 @@ pub(crate) fn scan_main() {
     // ⟨0.31⟩ …and a run is ONE THREAD. This is the only mint outside tests; everything below carries it
     // by reference. See the note on `gate::RunToken` for what breaks if that stops being true.
     let run_tok = crate::gate::begin_run();
+    crate::sidecar::init(); // STEP 0b — the instrument's sink, read once
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dir = ".".to_string();
     let mut prefix = String::new();
@@ -1582,7 +1583,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // assembled FnInfo set (the merges below replay the original walk-order accumulation exactly). See
     // the cache section above for the soundness argument.
     use rayon::prelude::*;
-    let incremental = INCREMENTAL.with(|c| c.get());
+    // STEP 0b — an instrumented run (`CANDOR_SIDECAR`) neither reads nor writes the cache (the R1634 rule): its call
+    // positions are not cached, so a replayed entry would carry none, and nothing it derived may be replayed by an
+    // ordinary run. See `sidecar.rs`.
+    let incremental = INCREMENTAL.with(|c| c.get()) && !crate::sidecar::on();
     let schema = cache_schema(include_tests);
     let cache_dir = Path::new(dir).join(".candor").join("cache");
     let cache_path = cache_dir.join("scan-cache.json");
@@ -1679,6 +1683,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // Rust-2015 bare closure-trait objects normalised, because one elided `dyn` currently drops
             // every function in the file.
             let (mut file, _relaxed) = crate::lang::parse_file_2015_tolerant(&text)?;
+            crate::sidecar::index_file(rel, &file); // STEP 0b — before any splice; a no-op unless the sidecar is on
             // SOUNDNESS R145 — splice readable `include!` text in place, tag the unreadable rest. Done
             // HERE, on the parsing thread, because the spliced items' spans resolve only against this
             // thread's source map (see `fn_locs`).
@@ -2807,6 +2812,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // R308 — the round-2 twin of the round-1 parse above.
                 .and_then(|t| {
                     let (mut f, _) = crate::lang::parse_file_2015_tolerant(&t)?;
+                    crate::sidecar::index_file(rel, &f); // STEP 0b — the round-2 twin
                     // R145 — the round-2 twin of the round-1 splice. Its decls are the cached ones, which
                     // were derived from the same splice of the same bytes (the cache key covers them).
                     if t.contains("include!") {
@@ -2929,6 +2935,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // R167's `skip_test_fns` -- from `rel`, the SAME argument `fn_locs` derives it from, so the
             // two lockstep walks cannot disagree about which fns they emit.
             let _cfg_off = crate::lang::CfgOffScope::enter(cfg_off_files.contains(rel)); // R977
+            let _sc_file = crate::sidecar::FileScope::enter(rel); // STEP 0b — a no-op unless the sidecar is on
             scan_items(&file.items, &modpath, locs, &mut idx, include_tests, fields, &returns, traits, elems, lazy_statics, const_strings, local_macros, &drop_relevant, !crate::lang::is_nonlib_target_file(rel), &mut u, &mut out);
             (out, idx, u)
         }));
@@ -4240,6 +4247,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         }
         m
     };
+    let mut sc_records: Vec<serde_json::Value> = Vec::new(); // STEP 0b sidecar (empty unless on)
     for f in &fns {
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
@@ -4306,7 +4314,79 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .ret_idents
             .iter()
             .any(|r| fields.contains_key(r) || merged.drop_types.contains(r));
+        // STEP 0b sidecar — per-call attribution (see `sidecar.rs`). Off: `sc_on` is false and none of this runs. On: the
+        // function's own entries are taken out of the six sets before the loop, each call's additions are taken at the next
+        // call boundary, and the union goes back after the loop, so the maps end exactly as they would have.
+        let sc_on = crate::sidecar::on();
+        #[allow(clippy::type_complexity)]
+        let mut sc_st: (
+            Option<BTreeSet<String>>,
+            Option<BTreeSet<&'static str>>,
+            Option<BTreeSet<String>>,
+            Option<BTreeSet<&'static str>>,
+            Option<BTreeSet<String>>,
+            Option<BTreeSet<String>>,
+        ) = Default::default();
+        let mut sc_lens = [0usize; 7];
+        let mut sc_prev: Option<&Call> = None;
+        if sc_on {
+            let _ = crate::sidecar::take_dep_hits(); // nothing a previous function looked up belongs to this one
+            sc_st = (
+                calls.remove(&f.qual),
+                direct.remove(&f.qual),
+                unknown_why.remove(&f.qual),
+                incomplete.remove(&f.qual),
+                blind_direct.remove(&f.qual),
+                unresolved_ext.remove(&f.qual),
+            );
+            sc_lens = [veina_contested.len(), primop_contested.len(), stdrecv_contested.len(), witness_sites.len(), from_sites.len(), nonpath_contested.len(), untyped_contested.len()];
+        }
+        macro_rules! sc_step {
+            () => {
+                if sc_on {
+                    let edges = crate::sidecar::drain(&mut calls, &f.qual, &mut sc_st.0);
+                    let effects = crate::sidecar::drain(&mut direct, &f.qual, &mut sc_st.1);
+                    let unknown = crate::sidecar::drain(&mut unknown_why, &f.qual, &mut sc_st.2);
+                    let incompl = crate::sidecar::drain(&mut incomplete, &f.qual, &mut sc_st.3);
+                    let blind = crate::sidecar::drain(&mut blind_direct, &f.qual, &mut sc_st.4);
+                    let unres = crate::sidecar::drain(&mut unresolved_ext, &f.qual, &mut sc_st.5);
+                    let dep_hits = crate::sidecar::take_dep_hits();
+                    let mut deferred: Vec<serde_json::Value> = Vec::new();
+                    for x in veina_contested.iter().skip(sc_lens[0]) {
+                        deferred.push(serde_json::json!({"kind": "veina_contested", "cands": x.1}));
+                    }
+                    for x in primop_contested.iter().skip(sc_lens[1]) {
+                        deferred.push(serde_json::json!({"kind": "primop_contested", "label": x.1, "cands": x.2}));
+                    }
+                    for x in stdrecv_contested.iter().skip(sc_lens[2]) {
+                        deferred.push(serde_json::json!({"kind": "stdrecv_contested", "label": x.1, "cands": x.2}));
+                    }
+                    for x in witness_sites.iter().skip(sc_lens[3]) {
+                        deferred.push(serde_json::json!({"kind": "witness_sites", "dep": x.1, "ty": x.3, "callee": x.5}));
+                    }
+                    for x in from_sites.iter().skip(sc_lens[4]) {
+                        deferred.push(serde_json::json!({"kind": "from_sites", "dep": x.1, "ty": x.3, "callee": x.5}));
+                    }
+                    for x in nonpath_contested.iter().skip(sc_lens[5]) {
+                        deferred.push(serde_json::json!({"kind": "nonpath_contested", "cands": x.1}));
+                    }
+                    for x in untyped_contested.iter().skip(sc_lens[6]) {
+                        deferred.push(serde_json::json!({"kind": "untyped_contested", "label": x.1, "cands": x.2}));
+                    }
+                    sc_lens = [veina_contested.len(), primop_contested.len(), stdrecv_contested.len(), witness_sites.len(), from_sites.len(), nonpath_contested.len(), untyped_contested.len()];
+                    if let Some(pc) = sc_prev {
+                        sc_records.push(serde_json::json!({
+                            "rel": f.loc.split(':').next().unwrap_or(""), "sp": pc.sp, "caller": f.qual,
+                            "call": crate::sidecar::call_json(pc), "edges": edges, "effects": effects, "unknown": unknown,
+                            "incomplete": incompl, "blind": blind, "unresolved_ext": unres, "deferred": deferred, "dep_hits": dep_hits,
+                        }));
+                    }
+                }
+            };
+        }
         for c in &f.calls {
+            sc_step!();
+            sc_prev = Some(c);
             // SOUNDNESS R1578 — an UNTYPED receiver whose value an UNCHAINED dependency produced is typed from that
             // dependency's own source signature, and the call then goes down the ordinary typed-external path below
             // (classifier, κ ledger, masking) exactly as `js.m()` over a `js: &Context` parameter does. See `r1578_type`.
@@ -8402,6 +8482,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     .insert("macro:items hidden by an include! this scan could not read".to_string());
             }
         }
+        sc_step!();
+        let _ = sc_lens;
+        if sc_on {
+            let _ = sc_prev;
+            crate::sidecar::restore(&mut calls, &f.qual, sc_st.0.take());
+            crate::sidecar::restore(&mut direct, &f.qual, sc_st.1.take());
+            crate::sidecar::restore(&mut unknown_why, &f.qual, sc_st.2.take());
+            crate::sidecar::restore(&mut incomplete, &f.qual, sc_st.3.take());
+            crate::sidecar::restore(&mut blind_direct, &f.qual, sc_st.4.take());
+            crate::sidecar::restore(&mut unresolved_ext, &f.qual, sc_st.5.take());
+        }
         // DROP-GLUE EDGE (#3): for each LOCAL drop type this fn constructed, add the implicit scope-exit
         // edge to its `T::drop` body — but ONLY when that body is a UNIQUE local def (in `by_tail2` with
         // exactly one target), the same uniqueness discipline `resolve_target` uses. The drop body's
@@ -8703,6 +8794,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    crate::sidecar::write(dir, &fns, std::mem::take(&mut sc_records)); // STEP 0b — a no-op unless the sidecar is on
 
     // `all` DELIBERATELY KEEPS ONE ENTRY PER `FnInfo`, DUPLICATES INCLUDED — see the doc note on
     // `blind_direct`'s population loop above for why a genuine per-cfg-branch keying fix belongs there,

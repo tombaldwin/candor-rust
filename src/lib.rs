@@ -51,6 +51,7 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::TyCtxt;
 
 mod mir_spike;
+mod oracle;
 
 dylint_linting::impl_late_lint! {
     /// ### What it does
@@ -309,6 +310,9 @@ pub struct Candor {
     /// wrapper re-assembles once more after the whole run (`candor-query gate-verdict`) so the final
     /// verdict always covers every crate. `None` ⇒ no verdict requested.
     gate_sink: Option<String>,
+    /// STEP 0b — the resolution oracle's dump (`CANDOR_ORACLE_DUMP`); `None` unless the operator names a directory, and then
+    /// it only READS typeck results (see `oracle.rs`).
+    oracle: Option<oracle::Oracle>,
 }
 
 /// Where an effect enters a function's body — the callee that produced it and the source location.
@@ -469,6 +473,7 @@ impl Candor {
             // means "no machine signal requested" (audit, JSON, or a direct `cargo dylint` invocation).
             violations_sink: candor_report::env::operator("CANDOR_VIOLATIONS").ok().filter(|s| !s.is_empty()),
             gate_sink: candor_report::env::operator("CANDOR_GATE_JSON").ok().filter(|s| !s.is_empty()),
+            oracle: oracle::from_env(),
         }
     }
 
@@ -4238,6 +4243,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        // STEP 0b oracle dump — read-only, and absent unless `CANDOR_ORACLE_DUMP` is set.
+        if let Some(o) = self.oracle.as_mut() {
+            o.record(cx, expr);
+        }
         // Named-fn-as-value call edge — see edge_fn_value_reference.
         self.edge_fn_value_reference(cx, expr);
 
@@ -4552,6 +4561,9 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
     }
 
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
+        if let Some(o) = self.oracle.as_mut() {
+            o.flush(cx);
+        }
         // Bet 4 spike (CANDOR_MIR=1): run the experimental MIR-based extractor INSTEAD of the HIR
         // analysis and return. Non-production — it exists to gather evidence for a possible core rewrite.
         if candor_report::env::switch("CANDOR_MIR") {
