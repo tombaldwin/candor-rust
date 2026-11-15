@@ -3,6 +3,11 @@
 
 use crate::*;
 
+/// SOUNDNESS R1657 (bound projection) — structured bounds and the generic a binding holds. A child module, so its
+/// consumers can ask this collector's private resolvers.
+#[path = "bound_proj.rs"]
+pub(crate) mod bound_proj;
+
 /// **BACKLOG §6d S2 — CHARGE AT CONSTRUCTION. BUILT, PRICED OVER 1,561 CRATES, AND *NOT* ADOPTED.**
 ///
 /// The drop-glue charge is gated on `escaping_ctors` / `escapes.names`, computed by
@@ -268,6 +273,11 @@ pub(crate) struct CallCollector<'a> {
     /// really is. A NARROWING, so it obeys `mono_recv_traits`'s discipline exactly — cleared and restored at the same three
     /// regions, registered in `BoundNameState` — and a missing entry is the union as before (`Call::assoc_via` `None`).
     pub(crate) recv_via: HashMap<String, String>,
+    /// SOUNDNESS R1657 (bound projection) — this body's generics with their bounds AS WRITTEN (`bp.env`), and the NAME-KEYED
+    /// `bp.generic_vars`: binding -> the generic (or projection of one) it holds. A RESOLUTION table, so it obeys `trait_vars`'s
+    /// discipline: `scoped_binding` clears and restores it, `BoundNameState` carries it, `visit_local` clears it for every
+    /// name a `let` binds, the closure binder saves it, and a nested item starts with none. See `bound_proj`.
+    pub(crate) bp: bound_proj::BpState,
     /// This signature's generic parameter -> its trait bounds (`<T: Doer>` → `T -> ["Doer"]`), i.e.
     /// `lang::generic_bounds_of(sig)`. Pass A already threads exactly this into every PARAMETER, FIELD
     /// and RETURN position; the collector needs its own copy because a LOCAL `let` can name a generic
@@ -868,6 +878,8 @@ pub(crate) struct BoundNameState {
     mono_recv_traits: Option<Vec<String>>,
     /// R1740 — the per-name associated-type provenance (`recv_via`), a narrowing like R571's.
     recv_via: Option<String>,
+    /// R1657 (bound projection) — the generic this name holds (`bp.generic_vars`).
+    generic_vars: Option<bound_proj::BVal>,
     dep_bound_vars: Option<String>,
     trait_quals_by_param: Option<HashMap<String, String>>,
     elem_of: Option<String>,
@@ -13279,6 +13291,7 @@ impl<'a> CallCollector<'a> {
         // that cannot lose an effect: with no entry, nothing is subtracted from the CHA.
         let p_mono = self.mono_recv_traits.remove(name);
         let p_via = self.recv_via.remove(name); // R1740 — same half, same reason
+        let p_gen = self.bp.generic_vars.remove(name); // R1657 (bound projection) — a RESOLUTION table
         // DEPENDENCY PROVENANCE. Keyed by bare name like `vars`, so a shadow inherited the OUTER
         // binding's provenance and its member calls were attributed to a dependency they have nothing to
         // do with:  `let client = deplib::build();` then `for client in local_items() { client.go() }`.
@@ -13336,6 +13349,7 @@ impl<'a> CallCollector<'a> {
         restore(&mut self.vars, name, p_vars);
         restore(&mut self.mono_recv_traits, name, p_mono);
         restore(&mut self.recv_via, name, p_via);
+        restore(&mut self.bp.generic_vars, name, p_gen);
         restore(&mut self.dep_bound_vars, name, p_prov);
         restore(&mut self.fn_alias, name, p_alias);
         restore(&mut self.str_locals, name, p_str);
@@ -13392,6 +13406,7 @@ impl<'a> CallCollector<'a> {
                 trait_vars: self.trait_vars.get(n).cloned(),
                 mono_recv_traits: self.mono_recv_traits.get(n).cloned(),
                 recv_via: self.recv_via.get(n).cloned(),
+                generic_vars: self.bp.generic_vars.get(n).cloned(),
                 dep_bound_vars: self.dep_bound_vars.get(n).cloned(),
                 trait_quals_by_param: self.trait_quals_by_param.get(n).cloned(),
                 elem_of: self.elem_of.get(n).cloned(),
@@ -13425,6 +13440,7 @@ impl<'a> CallCollector<'a> {
             put(&mut self.trait_vars, n, &b.trait_vars);
             put(&mut self.mono_recv_traits, n, &b.mono_recv_traits);
             put(&mut self.recv_via, n, &b.recv_via);
+            put(&mut self.bp.generic_vars, n, &b.generic_vars);
             put(&mut self.dep_bound_vars, n, &b.dep_bound_vars);
             put(&mut self.trait_quals_by_param, n, &b.trait_quals_by_param);
             put(&mut self.elem_of, n, &b.elem_of);
@@ -13559,6 +13575,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // item's same-named parameter is its own binding, not the enclosing signature's.
         let outer_m = std::mem::take(&mut self.mono_recv_traits);
         let outer_via = std::mem::take(&mut self.recv_via); // R1740
+        let outer_bp = std::mem::take(&mut self.bp); // R1657 (bound projection) — a nested item's generics are its own
         let outer_g = std::mem::replace(
             &mut self.generic_bounds,
             crate::lang::generic_bounds_of(&node.sig),
@@ -13655,6 +13672,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.dyn_local_traits = outer_l;
         self.mono_recv_traits = outer_m;
         self.recv_via = outer_via;
+        self.bp = outer_bp;
         self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
@@ -13674,6 +13692,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // item's same-named parameter is its own binding, not the enclosing signature's.
         let outer_m = std::mem::take(&mut self.mono_recv_traits);
         let outer_via = std::mem::take(&mut self.recv_via); // R1740
+        let outer_bp = std::mem::take(&mut self.bp); // R1657 (bound projection) — a nested item's generics are its own
         // The impl BLOCK's own generics (`impl<T: Doer> Wrap<T>`) are the outer scope for every method
         // in it; `visit_impl_item_fn` layers each method's own on top.
         let outer_g = std::mem::replace(
@@ -13734,6 +13753,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.dyn_local_traits = outer_l;
         self.mono_recv_traits = outer_m;
         self.recv_via = outer_via;
+        self.bp = outer_bp;
         self.generic_bounds = outer_g;
         self.trait_quals = outer_q;
         self.trait_quals_by_param = outer_p;
@@ -16781,6 +16801,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // have its dispatch subtracted.
         let mut saved_mono: Vec<(String, Option<Vec<String>>)> = Vec::new();
         let mut saved_via: Vec<(String, Option<String>)> = Vec::new(); // R1740
+        let mut saved_gen: Vec<(String, Option<bound_proj::BVal>)> = Vec::new(); // R1657 (bound projection)
         // SOUNDNESS R577 — a closure parameter's own CRATE QUALIFICATION, which this binder threw away
         // exactly as the field and return sites do. `visit_local`'s annotated arm has recorded it since
         // R6; the closure list is the same kind of declaration and recorded only the bare leaf, so
@@ -16797,6 +16818,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             if let Some(name) = single_pat_ident(pat) {
                 let prev = self.mono_recv_traits.remove(&name);
                 saved_via.push((name.clone(), self.recv_via.remove(&name))); // R1740
+                saved_gen.push((name.clone(), self.bp.generic_vars.remove(&name))); // R1657 (bound projection)
                 saved_mono.push((name, prev));
             }
         }
@@ -16947,6 +16969,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 None => { self.recv_via.remove(&name); }
             }
         }
+        for (name, prev) in saved_gen {
+            match prev {
+                Some(v) => { self.bp.generic_vars.insert(name, v); }
+                None => { self.bp.generic_vars.remove(&name); }
+            }
+        }
         for (name, prev) in saved_qual {
             match prev {
                 Some(v) => { self.trait_quals_by_param.insert(name, v); }
@@ -17083,6 +17111,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         for n in &bound_names {
             self.mono_recv_traits.remove(n);
             self.recv_via.remove(n); // R1740
+            self.bp.generic_vars.remove(n); // R1657 (bound projection)
             self.veinb_typed.remove(n);
             self.std_made_vars.remove(n);
             self.err_of.remove(n); // SOUNDNESS R1196

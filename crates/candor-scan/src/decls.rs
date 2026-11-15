@@ -4808,6 +4808,9 @@ pub(crate) fn fninfo(
         // caller-monomorphized receiver apart from an erased one when the BODY contains both.
         mono_recv_traits: seed_mono_trait_vars(sig),
         recv_via: Default::default(),
+        // SOUNDNESS R1657 (bound projection) — the WRITTEN signature's structured bounds (inline, `where`, the impl's, and
+        // argument-position `impl Trait`) and the parameters holding a value of one of those generics.
+        bp: crate::collector::bound_proj::BpState::new(sig_written, impl_generics),
         // The FULL bound map (not just its erased subset), for the one position Pass A cannot reach:
         // a LOCAL `let`'s type annotation.
         // SOUNDNESS R1140 — the WRITTEN signature here, not the stripped one: a path call through a concrete type

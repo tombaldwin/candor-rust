@@ -239,7 +239,7 @@
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -292,7 +292,7 @@
             vars,
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -627,7 +627,7 @@ pub fn live_nested_block(s: &dyn Store) { { { { s.go(); } } } }
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, unbound_gen_fields: &trait_fields, dyn_trait_fields: &trait_fields, trait_impls: &trait_impls,
@@ -9540,7 +9540,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                 vars,
                 trait_vars,
                 dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
-                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
+                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -9596,7 +9596,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             let mut c = CallCollector {
             modpath: String::new(),
                 uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                 returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -9622,7 +9622,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                 let mut c = CallCollector {
             modpath: String::new(),
                     uses: std::borrow::Cow::Borrowed(&uses),
-            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
+            use_alts: Default::default(), include_tests: false, local_use_seen: Default::default(), vars: HashMap::new(), trait_vars: seed_trait_vars(&sig), dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(), dyn_sig_traits: dyn_sig_trait_leaves(&sig), generic_bounds: generic_bounds_of(&sig), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: sig_trait_quals(&sig), trait_quals_by_param: sig_trait_quals_by_param(&sig), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
                     fields: &fields, trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf, trait_impls: &ti2, local_traits: &td, foreign_impls: &std::collections::HashMap::new(),
                     returns: &returns, has_dyn_return: false, field_elem: &fe, field_elem_trait: &fet, enum_variants: &ev, enum_variant_traits: &evt, ambiguous_enum_leaves: &std::collections::HashSet::new(), callable_statics: &std::collections::HashSet::new(), static_types: &std::collections::HashMap::new(), callable_aliases: &std::collections::HashSet::new(), elem_of: HashMap::new(), elem_trait_of: HashMap::new(), tuple_of: HashMap::new(), tuple_trait_of: std::collections::HashMap::new(),
@@ -9658,7 +9658,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
             vars: HashMap::new(),
             trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields,
             trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -9697,7 +9697,7 @@ impl Report for Reports { mlib::reports_impl!(fn summarize(&self)); }\n";
                 vars: HashMap::new(),
                 trait_vars: HashMap::new(),
                 dyn_sig_traits: Default::default(), generic_bounds: Default::default(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(), trait_quals: Default::default(), trait_quals_by_param: Default::default(), written_trait_quals: &std::collections::HashMap::new(),
-                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
+                dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(),
  bound_trait_leaves: Default::default(), // R549
                 fields: &fields,
                 trait_fields: &tf, unbound_gen_fields: &tf, dyn_trait_fields: &tf,
@@ -23257,7 +23257,7 @@ pub fn go() {{ imp::doit(); }}
         let mut c = CallCollector {
             modpath: String::new(), uses: std::borrow::Cow::Borrowed(&uses), vars: HashMap::new(), trait_vars: HashMap::new(),
             dyn_sig_traits: Default::default(), generic_bounds: HashMap::new(), impl_generic_bounds: Default::default(), trait_self: None, impl_members: &std::collections::HashSet::new(), impl_owners: &std::collections::HashMap::new(), mbe_traits: &std::collections::HashMap::new(),
-            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(),
+            dyn_local_traits: Default::default(), mono_recv_traits: Default::default(), recv_via: Default::default(), bp: Default::default(),
             trait_quals_by_param: HashMap::new(), trait_quals: HashMap::new(), written_trait_quals: &std::collections::HashMap::new(),
  bound_trait_leaves: Default::default(), // R549
             fields: &fields, trait_fields: &trait_fields, unbound_gen_fields: &trait_fields, dyn_trait_fields: &trait_fields, trait_impls: &trait_impls,
