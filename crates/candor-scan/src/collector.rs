@@ -6604,6 +6604,32 @@ impl<'a> CallCollector<'a> {
     /// SOUNDNESS R1023 — one adapter over an element entry: a LAYERED entry takes it as one `layer_step`
     /// (the value `G` itself is not an element entry, so it answers `None`); a plain entry keeps the
     /// one-level route's answer, which is the entry unchanged.
+    /// SOUNDNESS R1782 (round 2) — does a type the annotation route would install into `vars` RESOLVE, so that a method
+    /// call on the parameter names a unit, a std or dependency path the classifier and the `invisible` floor answer, or
+    /// nothing at all because the type has no members? A std/core/alloc path, a primitive and a dependency-rooted path
+    /// resolve by construction. A crate-local or bare name resolves only when the crate DECLARES something about that leaf:
+    /// an inherent method (`RET_IMPL_FN`/`RET_IMPL`), a field, a trait impl. A type alias the typer could not dealias (a
+    /// projection, `type A = <M as Tr>::Assoc`) has none of these, and neither has a generic parameter, so both stay on the
+    /// untyped route, where the receiver is disclosed rather than dropped.
+    fn ann_type_resolves(&self, p: &str) -> bool {
+        let root = p.split("::").next().unwrap_or(p);
+        let leaf = p.rsplit("::").next().unwrap_or(p);
+        if !p.contains("::") && crate::model::PRIMITIVE_LEAVES.contains(&p) {
+            return true;
+        }
+        if matches!(root, "std" | "core" | "alloc") {
+            return true;
+        }
+        if p.contains("::") && !matches!(root, "crate" | "self" | "super") {
+            return true;
+        }
+        let fn_pre = format!("{}{leaf}\u{1f}", crate::model::RET_IMPL_FN);
+        let ret_pre = format!("{}{leaf}\u{1f}", crate::model::RET_IMPL);
+        self.fields.contains_key(leaf)
+            || self.returns.keys().any(|k| k.starts_with(&fn_pre) || k.starts_with(&ret_pre))
+            || self.trait_impls.values().any(|tys| tys.iter().any(|t| t == leaf))
+    }
+
     fn step_layer(t: String, method: &str) -> Option<String> {
         if !crate::lang::is_wrapped(&t) {
             return Some(t);
@@ -15954,20 +15980,39 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             Some(syn::Pat::Type(pt)) => Some(&*pt.ty),
                             _ => None,
                         };
-                        let ann_concrete = ann.is_some_and(|t| {
+                        // SOUNDNESS R1782 (round 2) — "names a concrete type" was SYNTACTIC: `type_path` answers for any path,
+                        // including a local alias of an associated-type projection (`type MachNlist = <Mach as Hdr>::Nl`) that
+                        // the typer cannot dealias. Installed into `vars`, such a type makes `nlist.name()` a typed call with
+                        // no claimant, which is dropped with no disclosure, so the untyped-receiver hedge this route used to
+                        // leave standing was deleted (Fable's probe: `deny Fs Unknown` 1 on 0.42.0 and main, 0 here). So an
+                        // annotation that would take the `vars` route is honoured only when its type RESOLVES (see
+                        // `ann_type_resolves`); otherwise the route is the one before R1782, and the hedge stands. A
+                        // dispatch-typed or callable annotation resolves through its trait leaves and keeps the rule it had.
+                        let ann_vars = ann.is_some_and(|t| {
                             trait_leaves(t, &self.generic_bounds).is_empty()
                                 && !is_callable_type(t, &self.generic_bounds, self.callable_aliases)
-                                && type_path(t, &self.uses).is_some()
                         });
-                        if ann.is_some()
+                        let ann_path = ann.and_then(|t| type_path(t, &self.uses));
+                        let ann_ok = if ann_vars {
+                            ann_path.as_deref().is_some_and(|p| self.ann_type_resolves(p))
+                        } else {
+                            elem_leaves.is_empty()
+                        };
+                        let route_open = ann.is_some()
                             && elem_ty.is_none()
                             && !matches!(elem_bound, Some(Bound::Layered { .. }))
-                            && (elem_leaves.is_empty() || ann_concrete)
-                            && !candor_report::env::switch("CANDOR_R1782_OFF")
-                        {
-                            if candor_report::env::trace("CANDOR_R1782_INSTR") {
-                                eprintln!("R1782ANN\t{leaf}\t{}", !elem_leaves.is_empty()); // §E1 REACH COUNTER, CHANGED branch only
-                            }
+                            && !candor_report::env::switch("CANDOR_R1782_OFF");
+                        if route_open && candor_report::env::trace("CANDOR_R1782_INSTR") {
+                            // §E1 REACH COUNTER: the type the binder installs, or UNRESOLVED (the route is refused).
+                            let shown = match (&ann_path, ann_vars, ann_ok) {
+                                (Some(p), true, true) => p.clone(),
+                                (p, true, _) => format!("UNRESOLVED {}", p.as_deref().unwrap_or("?")),
+                                (_, false, true) => "DISPATCH".to_string(),
+                                (_, false, false) => "DISPATCH-REFUSED".to_string(),
+                            };
+                            eprintln!("R1782ANN\t{leaf}\t{shown}");
+                        }
+                        if route_open && ann_ok {
                             self.scoped_binding(&name, Bound::Unknown, |s| s.visit_expr_closure(cl));
                             continue;
                         }

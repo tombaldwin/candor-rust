@@ -5628,8 +5628,8 @@ pub(crate) fn is_element_preserving_adapter(method: &str) -> bool {
 /// an effect", and the answer is the path-yielding ones: `Path`/`PathBuf` carry `exists`/`metadata`/`read_dir`/… . The
 /// other std sources are excluded on stated grounds, not by omission: `env::args`/`args_os`/`vars`/`vars_os` yield
 /// `String`/`OsString` (tuples of them for `vars`), which have no effect-bearing member; `fs::read_dir`/`Path::read_dir`
-/// yield `io::Result<DirEntry>`, whose source is already charged `Fs` at the loop by R1295 (`ReadDir::next`), so the unit
-/// is never silent there; `Path::components`/`iter` yield `Component`/`&OsStr`, likewise effect-free. A generic source
+/// yield `io::Result<DirEntry>`, and the source call itself (`std::fs::read_dir(..)`, `p.read_dir()`) is charged `Fs`, so
+/// the unit is never silent there; `Path::components`/`iter` yield `Component`/`&OsStr`, likewise effect-free. A generic source
 /// (`iter::once(x)`, `repeat`) takes its item from an argument and is not a fixed table entry.
 pub(crate) fn std_iter_source_item_fn(full: &str) -> Option<&'static str> {
     match full {

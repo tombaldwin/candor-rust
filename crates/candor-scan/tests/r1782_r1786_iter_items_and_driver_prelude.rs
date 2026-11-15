@@ -46,6 +46,10 @@ pub mod stream {
     pub async fn d_glob(h: &str, p: u16) { let _ = net::connect_tcp(h, p, crate::W).await; }
 }
 pub async fn d_glob_full(h: &str, p: u16) { let _ = crate::net::connect_tcp(h, p, W).await; }
+pub mod stream3 {
+    use crate::net;
+    pub async fn d_glob_use_plain(h: &str, p: u16) { let _ = net::connect_tcp(h, p, crate::W).await; }
+}
 pub async fn d_prelude(h: &str, p: u16) { let _ = sqlx_core::driver_prelude::net::connect_tcp(h, p, W).await; }
 pub mod lg {
     use crate::logger::QueryLogger;
@@ -53,6 +57,42 @@ pub mod lg {
 }
 // Pure control through the same prelude: a type re-exported by it, and a module the rules do not charge.
 pub fn q_error() -> Option<crate::Error> { None }
+"#;
+
+/// R1782 round 2 — the SECOND fixture, and the one the first round's change failed (Fable's probe, mirroring backtrace 0.3.77
+/// `macho.rs:17/197` with an EFFECTFUL member). The annotation names a local alias of an associated-type PROJECTION, which the typer
+/// cannot dealias. Installing it made `nlist.name()` a typed call with no claimant, dropped with no disclosure: `parse_ann` read
+/// `[Unknown]` on 0.42.0 and main and ABSENT on the round-1 branch (`deny Fs Unknown parse_ann` 1/1/0). EXECUTED
+/// (`rust-r1782/fixtures/alias`): `parse_ann` reads `/etc/hosts` once per element. The annotation is now taken only when its
+/// type resolves; an unresolvable one keeps the untyped route, so the hedge names the lost member. A concrete or one-hop
+/// alias annotation still resolves and charges. The imported spellings (`use crate::m::MachNlist`) install a crate-rooted path
+/// that is just as unresolvable, so a prefix test would not do.
+const ALIAS: &str = r#"use std::fs;
+pub trait Hdr { type Nl; }
+pub struct Mach;
+pub struct Sym;
+impl Sym { pub fn name(&self) -> String { fs::read_to_string("/etc/hosts").unwrap() } }
+impl Hdr for Mach { type Nl = Sym; }
+type MachNlist = <Mach as Hdr>::Nl;
+pub fn parse_ann<T: AsRef<[MachNlist]>>(t: T) -> Vec<String> {
+    t.as_ref().iter().filter_map(|nlist: &MachNlist| { let n = nlist.name(); Some(n) }).collect()
+}
+pub fn parse_un<T: AsRef<[MachNlist]>>(t: T) -> Vec<String> {
+    t.as_ref().iter().filter_map(|nlist| { let n = nlist.name(); Some(n) }).collect()
+}
+pub fn parse_conc<T: AsRef<[Sym]>>(t: T) -> Vec<String> {
+    t.as_ref().iter().filter_map(|nlist: &Sym| { let n = nlist.name(); Some(n) }).collect()
+}
+type PlainAlias = Sym;
+pub fn parse_plain<T: AsRef<[PlainAlias]>>(t: T) -> Vec<String> {
+    t.as_ref().iter().filter_map(|nlist: &PlainAlias| { let n = nlist.name(); Some(n) }).collect()
+}
+pub mod m { pub type Projected = <super::Mach as super::Hdr>::Nl; }
+pub mod user {
+    use crate::m::Projected;
+    pub fn imp_ann<T: AsRef<[Projected]>>(t: T) -> Vec<String> { t.as_ref().iter().filter_map(|n: &Projected| Some(n.name())).collect() }
+    pub fn qual_ann<T: AsRef<[Projected]>>(t: T) -> Vec<String> { t.as_ref().iter().filter_map(|n: &crate::m::Projected| Some(n.name())).collect() }
+}
 "#;
 
 fn fixture(tag: &str, src: &str, deps: &str) -> PathBuf {
@@ -142,13 +182,34 @@ fn r1782_switch_off_reproduces_the_silence() {
 fn r1786_a_ruled_call_through_the_driver_prelude_is_charged() {
     let d = fixture("prelude", PRELUDE, "sqlx-core = \"0.9.0\"\n");
     let (_, v) = scan(&d, None, false);
-    for u in ["d_direct", "stream::d_glob", "d_glob_full", "d_prelude"] {
+    for u in ["d_direct", "stream::d_glob", "d_glob_full", "stream3::d_glob_use_plain", "d_prelude"] {
         assert_eq!(inferred(&v, u), ["Net"], "{u}: {v:#}");
     }
     assert_eq!(inferred(&v, "lg::d_logger"), ["Clock"], "{v:#}");
     assert!(inferred(&v, "q_error").is_empty(), "{v:#}");
-    for u in ["stream::d_glob", "d_glob_full", "d_prelude"] {
+    for u in ["stream::d_glob", "d_glob_full", "stream3::d_glob_use_plain", "d_prelude"] {
         assert_eq!(scan(&d, Some(&format!("deny Net  {u}\n")), false).0, 1, "deny Net {u}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn r1782_an_annotation_the_typer_cannot_resolve_keeps_the_receiver_disclosed() {
+    let d = fixture("alias", ALIAS, "");
+    let (_, v) = scan(&d, None, false);
+    let why = |f: &str| -> Vec<String> {
+        v["functions"].as_array().unwrap().iter().find(|r| r["fn"].as_str() == Some(f))
+            .and_then(|r| r["unknownWhy"].as_array())
+            .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    };
+    for u in ["parse_ann", "parse_un", "user::imp_ann", "user::qual_ann"] {
+        assert_eq!(inferred(&v, u), ["Unknown"], "{u}: {v:#}");
+        assert!(why(u).iter().any(|w| w.starts_with("dispatch:untyped receiver of `name`")), "{u}: the hedge must name the lost member: {v:#}");
+        assert_eq!(scan(&d, Some(&format!("deny Fs Unknown  {u}\n")), false).0, 1, "deny Fs Unknown {u}");
+    }
+    for u in ["parse_conc", "parse_plain"] {
+        assert_eq!(inferred(&v, u), ["Fs"], "{u}: {v:#}");
+        assert_eq!(scan(&d, Some(&format!("deny Fs  {u}\n")), false).0, 1, "deny Fs {u}");
     }
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -17,8 +17,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   binder over it (`for`, `.any`, `.find_map`, `.fold`) bound nothing. `split_paths` now yields `PathBuf` and `ancestors` `&Path`.
   Separately, a one-parameter adapter closure was walked body-only, so `|p: PathBuf| p.exists()` over an untyped iterator (or an
   `impl Iterator<Item = PathBuf>`, whose own `Iterator` leaves were bound to the item) resolved nothing; the annotation is now
-  read wherever no concrete element resolved. Executed; `deny Fs <unit>` 0 → 1. `CANDOR_R1782_OFF=1` restores the old reading.
-  Scan cache rev191 → rev192.
+  read wherever no concrete element resolved, provided its type RESOLVES (a std, primitive or dependency path, or a crate type
+  with a declared method, field or trait impl). An alias the typer cannot dealias (`type A = <M as Tr>::Assoc`) keeps the
+  untyped route and its `dispatch:untyped receiver` disclosure. Executed; `deny Fs <unit>` 0 → 1. `CANDOR_R1782_OFF=1`
+  restores the old reading. Scan cache rev191 → rev193.
 - ⚠ **A ruled `sqlx_core` call spelled through `sqlx_core::driver_prelude` is now charged** (SOUNDNESS R1786; silent under-report,
   pre-existing on 0.42.0). Every sqlx driver does `pub(crate) use sqlx_core::driver_prelude::*;` and then `net::connect_tcp(..)`;
   the rule tables are keyed on `sqlx_core::net::connect_tcp`, and a calibrated crate's unmatched call reads as reviewed-pure, so
