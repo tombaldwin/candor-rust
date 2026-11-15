@@ -515,7 +515,11 @@ pub(crate) fn expand_invocation(def: &str, input: &TokenStream) -> Option<TokenS
 
 /// The file's `macro_rules!` definitions by name — a name defined more than once (a `#[cfg]` twin, a
 /// textual redefinition) is dropped: which one an invocation sees depends on order and configuration.
-fn collect_defs(items: &[syn::Item], defs: &mut HashMap<String, Option<TokenStream>>) {
+fn collect_defs(
+    items: &[syn::Item],
+    imported: &std::collections::HashSet<String>,
+    defs: &mut HashMap<String, Option<TokenStream>>,
+) {
     for it in items {
         match it {
             syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => {
@@ -524,11 +528,26 @@ fn collect_defs(items: &[syn::Item], defs: &mut HashMap<String, Option<TokenStre
                     if e.as_ref().is_some_and(|prev| prev.to_string() != m.mac.tokens.to_string()) {
                         *e = None;
                     }
+                    // SOUNDNESS R1541 / I1 step 1 — a `#[cfg]`-gated definition of a name this FILE ALSO IMPORTS through a
+                    // `use` is not the binding rustc picks where the cfg is off (deranged-0.5.8's `#[cfg(docsrs)] macro_rules!
+                    // int` beside `pub use deranged_macros::int`): refused exactly as a cfg twin is. A gated definition with no
+                    // competing import is kept — its invocations are gated with it (futures-util's `#[cfg(feature = "io")]
+                    // macro_rules! delegate_async_read`), and refusing those deleted 184 rows on the 181-entry A/B.
+                    // `CANDOR_I1_BIND_OFF=1` restores the old binding.
+                    if crate::lang::has_cfg(&m.attrs)
+                        && imported.contains(&name.to_string())
+                        && !candor_report::env::switch("CANDOR_I1_BIND_OFF")
+                    {
+                        if candor_report::env::trace("CANDOR_I1_INSTR") {
+                            eprintln!("I1REFUSE\tcfg-def\t{name}"); // §E1 REACH COUNTER
+                        }
+                        *e = None;
+                    }
                 }
             }
             syn::Item::Mod(md) => {
                 if let Some((_, inner)) = &md.content {
-                    collect_defs(inner, defs);
+                    collect_defs(inner, imported, defs);
                 }
             }
             _ => {}
@@ -544,8 +563,12 @@ pub(crate) type CrateMacros = HashMap<String, Option<String>>;
 
 /// This file's definitions, for `merge_crate_macros`.
 pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String>)> {
+    let mut imported = std::collections::HashSet::new();
+    if !candor_report::env::switch("CANDOR_I1_BIND_OFF") {
+        imported_names(items, &mut imported);
+    }
     let mut defs = HashMap::new();
-    collect_defs(items, &mut defs);
+    collect_defs(items, &imported, &mut defs);
     defs.into_iter().map(|(k, v)| (k, v.map(|t| t.to_string()))).collect()
 }
 
@@ -624,6 +647,41 @@ struct Ctx<'x> {
     /// `Some(tokens)` for an ungated one, `None` once a `#[cfg]`-gated definition of the name is in scope (no
     /// textual order picks between cfg twins). Consulted only for a name this file defines more than once.
     scope: HashMap<String, Option<String>>,
+    /// I1 step 1 — names a non-crate-rooted `use` in this file binds (see `local_name`).
+    imported: std::collections::HashSet<String>,
+}
+
+/// I1 step 1 — every name a `use` item of this file binds through a path that is NOT rooted at `crate`/`self`/`super`
+/// (a dependency, or a 2018 uniform path that may be one). Renames bind their new name. Globs bind nothing nameable.
+fn imported_names(items: &[syn::Item], out: &mut std::collections::HashSet<String>) {
+    fn walk(t: &syn::UseTree, root: Option<&str>, out: &mut std::collections::HashSet<String>) {
+        let local = |r: Option<&str>| matches!(r, Some("crate") | Some("self") | Some("super"));
+        match t {
+            syn::UseTree::Path(p) => {
+                let first = p.ident.to_string();
+                walk(&p.tree, Some(root.unwrap_or(first.as_str())), out);
+            }
+            syn::UseTree::Name(n) if !local(root) && root.is_some() => {
+                out.insert(n.ident.to_string());
+            }
+            syn::UseTree::Rename(r) if !local(root) && root.is_some() => {
+                out.insert(r.rename.to_string());
+            }
+            syn::UseTree::Group(g) => g.items.iter().for_each(|x| walk(x, root, out)),
+            _ => {}
+        }
+    }
+    for it in items {
+        match it {
+            syn::Item::Use(u) => walk(&u.tree, if u.leading_colon.is_some() { Some("::") } else { None }, out),
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    imported_names(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Ctx<'_> {
@@ -672,10 +730,20 @@ impl Ctx<'_> {
         if id == "macro_rules" {
             return None;
         }
-        match self.defs.get(&id) {
-            Some(d) => (d.is_some() || self.scoped_def(&id).is_some()).then_some(id),
-            None => self.xdefs.get(&id).is_some_and(|d| d.is_some()).then_some(id),
+        // SOUNDNESS R1541 / I1 step 1 — a name this file IMPORTS through a `use` that is not crate-rooted may be another
+        // crate's macro (`use bitflags::bitflags;` beside a local wrapper also named `bitflags`, redox_syscall); binding it
+        // to the local definition by name would mint the WRONG items. Refused: the invocation stays, and R128 discloses it.
+        let bound = match self.defs.get(&id) {
+            Some(d) => d.is_some() || self.scoped_def(&id).is_some(),
+            None => self.xdefs.get(&id).is_some_and(|d| d.is_some()),
+        };
+        if bound && self.imported.contains(&id) {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("I1REFUSE\timported\t{id}"); // §E1 REACH COUNTER
+            }
+            return None;
         }
+        bound.then_some(id)
     }
 
     /// The invocation's expansion tokens, and whether its definition came from ANOTHER file.
@@ -1370,13 +1438,17 @@ pub(crate) fn mbe_trait_of(it: &syn::Item) -> Option<(String, Vec<String>)> {
 /// Splice, beside every item-position invocation of a `macro_rules!` this file defines exactly once, the
 /// free functions and `extern` blocks it expands to. See the module doc for what is refused.
 pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacros) {
+    let mut imported = std::collections::HashSet::new();
+    if !candor_report::env::switch("CANDOR_I1_BIND_OFF") {
+        imported_names(items, &mut imported);
+    }
     let mut defs = HashMap::new();
-    collect_defs(items, &mut defs);
+    collect_defs(items, &imported, &mut defs);
     // R1156 — a name defined more than once (`None`) may still be expanded from its textual scope.
     if defs.is_empty() && xdefs.values().all(|d| d.is_none()) {
         return;
     }
-    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new() };
+    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported };
     cx.splice(items, 0);
 }
 
