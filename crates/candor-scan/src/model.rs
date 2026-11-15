@@ -872,6 +872,13 @@ pub(crate) fn ret_generic_key(fn_leaf: &str) -> String {
     format!("{RET_GENERIC}{fn_leaf}")
 }
 
+/// SOUNDNESS R1541 / I1 (the bitflags key loss) — a marker filed beside a `ret_generic_key` that `file_decl_fact` WITHDREW
+/// because same-leaf contributors disagree (a free `fn from_str<B: Flags>(..) -> Result<B, _>` beside a `FromStr::from_str`
+/// method). Withdrawn is not absent; see `collector::r1609_caller_generic_bounds`.
+pub(crate) fn withdrawn_ret_generic_key(fn_leaf: &str) -> String {
+    format!("<retgenw>{fn_leaf}")
+}
+
 /// SOUNDNESS R1120 — whether a fn leaf's recorded return type is reached THROUGH A BORROW (`-> &G`,
 /// `-> &'a mut G`, `-> Option<&G>`, `-> Result<&G, E>`, `-> MutexGuard<'_, G>`): `RET_BORROWED` when it
 /// is, `RET_OWNED` when it is not. The leaf-keyed entry beside it answers `G` either way, and must —

@@ -1116,18 +1116,39 @@ impl<'a> CallCollector<'a> {
         if candor_report::env::switch("CANDOR_R1609_OFF") {
             return Vec::new();
         }
+        let mut out: Vec<String> = Vec::new();
+        let add = |id: &str, out: &mut Vec<String>| {
+            for l in self.generic_bounds.get(id).into_iter().chain(self.impl_generic_bounds.get(id)).flatten() {
+                if !out.contains(l) {
+                    out.push(l.clone());
+                }
+            }
+        };
         let Some(pos) = self.returns.get(&crate::model::ret_generic_key(leaf)).and_then(|p| p.parse::<usize>().ok()) else {
-            return Vec::new();
+            // SOUNDNESS R1541 / I1 — the leaf's position was WITHDRAWN by a same-leaf contributor that disagrees (bitflags 2.9.4:
+            // `parser::from_str<B: Flags>` beside the `impl FromStr for Field0` an expanded `__impl_internal_bitflags!` now
+            // splices). Withdrawn is not absent: the turbofish still names the caller's generics, and the value is one of
+            // them, so every caller generic the turbofish names dispatches through its bounds (a union, the over-approximating
+            // side). Before, `from_str::<B>(input)?.bits()` lost `dispatch:Flags.bits` and the `Flags::bits` key outright —
+            // pre-existing for the same shape written by hand (`impl FromStr` beside a generic `fn from_str`), exposed by I1.
+            // `CANDOR_I1_RETGENW_OFF=1` restores the old reading.
+            if self.returns.contains_key(&crate::model::withdrawn_ret_generic_key(leaf))
+                && !candor_report::env::switch("CANDOR_I1_RETGENW_OFF")
+            {
+                for a in &args.args {
+                    if let syn::GenericArgument::Type(syn::Type::Path(tp)) = a {
+                        if let Some(id) = tp.path.get_ident().filter(|_| tp.qself.is_none()) {
+                            add(&id.to_string(), &mut out);
+                        }
+                    }
+                }
+            }
+            return out;
         };
         let t = crate::lang::turbofish_nth_param(args, pos);
         let Some(syn::Type::Path(tp)) = t else { return Vec::new() };
         let Some(id) = tp.path.get_ident().filter(|_| tp.qself.is_none()).map(|i| i.to_string()) else { return Vec::new() };
-        let mut out: Vec<String> = Vec::new();
-        for l in self.generic_bounds.get(&id).into_iter().chain(self.impl_generic_bounds.get(&id)).flatten() {
-            if !out.contains(l) {
-                out.push(l.clone());
-            }
-        }
+        add(&id, &mut out);
         out
     }
 

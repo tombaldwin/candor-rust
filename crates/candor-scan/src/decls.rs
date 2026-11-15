@@ -4892,7 +4892,10 @@ pub(crate) fn fninfo(
         // the audit drew its boundary around its own trigger (a dyn COLLECTION reached by name) and
         // did not ask what else the gated arms read. The answer was in the arms' own source and took
         // one `grep` for `self\.` to produce.
-        has_dyn_return: returns.values().any(|t| crate::collector::ret_dispatch_leaves(t).is_some()),
+        // SOUNDNESS R1541 / I1 — a WITHDRAWN generic-return marker is a dispatch source too: `r1609_caller_generic_bounds`
+        // reads it (with `generic_bounds`) in the `Call` arm this flag gates (`resolve_recv_traits_walk`'s guard).
+        has_dyn_return: returns.values().any(|t| crate::collector::ret_dispatch_leaves(t).is_some())
+            || returns.keys().any(|k| k.starts_with("<retgenw>")),
         field_elem: field_elem_ix,
         field_elem_trait: elems.field_elem_trait,
         enum_variants: elems.enum_variants,

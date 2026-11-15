@@ -312,3 +312,50 @@ fn i1_step3_same_file_expansions_carry_the_invocation_loc() {
     let off = locs(&[("CANDOR_I1_RESPAN_OFF", "1")]);
     assert_eq!(off.get("R::a_lookup"), off.get("R::b_lookup"), "OFF: both at the definition span: {off:?}");
 }
+
+/// Step 2b — a NESTED invocation an expansion could not expand (here `crate::mk3!`, invoked by path inside `outer!`) stays
+/// unexpanded program text: it must still count as an unexpanded invocation of `mk3`, so R828's hedge for `mk3`'s impls
+/// stands even though another, bare invocation of `mk3` was expanded in full. Dropped, it made the crate-wide retirement
+/// retire the evidence (bitflags 2.9.4: `__impl_public_bitflags` invoked by `$crate::` path inside `__impl_internal_bitflags`).
+#[test]
+fn i1_step2b_a_nested_unexpanded_invocation_keeps_the_hedge() {
+    let d = tmpdir("nested");
+    write_crate(
+        &d,
+        "nested",
+        "",
+        "pub trait T3 { fn go(&self); }\npub struct Pure; impl T3 for Pure { fn go(&self) {} }\n\
+         #[macro_export]\nmacro_rules! mk3 { ($t:ident) => { impl crate::T3 for $t { fn go(&self) { EFF } } } }\n\
+         macro_rules! outer { ($t:ident) => { pub struct $t; crate::mk3!($t); } }\n\
+         pub struct M3; mk3!(M3);\nouter!(Hid);\npub fn l3(t: &dyn T3) { t.go() }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    assert!(eff(&rows, "l3").contains(&"Unknown".to_string()), "the R828 hedge must stay: {rows:?}");
+    assert!(eff(&rows, "l3").contains(&"Fs".to_string()), "and the expanded M3 impl is charged: {rows:?}");
+}
+
+/// Step 4 — a free fn's generic-return position WITHDRAWN by a same-leaf contributor (`parser::from_str<B: Flags>` beside a
+/// `FromStr::from_str` method) is not an absent one: `from_str::<B>(s)?.bits()` dispatches through `B`'s bounds and keeps
+/// the `Flags::bits` key. Pre-existing for the hand-written shape (ABSENT on main), exposed in bitflags by I1's spliced
+/// `impl FromStr`. `CANDOR_I1_RETGENW_OFF=1` restores the silence.
+#[test]
+fn i1_step4_withdrawn_generic_return_still_dispatches() {
+    let d = tmpdir("retgenw");
+    write_crate(
+        &d,
+        "retgenw",
+        "",
+        "pub trait Flags: Sized { fn bits(&self) -> u32; }\n\
+         pub mod parser {\n    pub fn from_str<B: crate::Flags>(_s: &str) -> Result<B, ()> { Err(()) }\n\
+             pub fn from_str_truncate<B: crate::Flags>(s: &str) -> Result<u32, ()> { Ok(from_str::<B>(s)?.bits()) }\n}\n\
+         pub struct Field0(u32);\nimpl core::str::FromStr for Field0 { type Err = (); fn from_str(s: &str) -> Result<Self, ()> { \
+         crate::parser::from_str::<Pub>(s).map(|_| Field0(0)) } }\n\
+         pub struct Pub(u32);\nimpl Flags for Pub { fn bits(&self) -> u32 { EFF self.0 } }\n",
+    );
+    let (rows, units) = scan(&d, None, &[]);
+    assert_eq!(eff(&rows, "parser::from_str_truncate"), vec!["Fs".to_string()], "{rows:?} {units:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_I1_RETGENW_OFF", "1")]);
+    // OFF: with an EFFECTFUL implementor the untyped-receiver hedge discloses (`Unknown`, no charge); with only pure
+    // implementors (the bitflags shape) the row was ABSENT and the `Flags::bits` key gone — the silence this closes.
+    assert!(!eff(&off, "parser::from_str_truncate").contains(&"Fs".to_string()), "OFF reads no resolution: {off:?}");
+}

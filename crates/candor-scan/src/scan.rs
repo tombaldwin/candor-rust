@@ -2230,6 +2230,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             if let Some(rest) = k.strip_prefix("<implretgen>") {
                 returns.insert(format!("<implretgenw>{rest}"), "1".to_string());
             }
+            // SOUNDNESS R1541 / I1 — and a withdrawn FREE-fn generic-return position (`<retgen>leaf`).
+            if let Some(rest) = k.strip_prefix(crate::model::RET_GENERIC) {
+                returns.insert(crate::model::withdrawn_ret_generic_key(rest), "1".to_string());
+            }
             // SOUNDNESS R1660 — and a withdrawn impl-qualified RETURN (`<implret>`), read by R1663's guessed-hop floor.
             if let Some(rest) = k.strip_prefix(crate::model::RET_IMPL) {
                 if let Some((tl, fl)) = rest.split_once('\u{1f}') {
