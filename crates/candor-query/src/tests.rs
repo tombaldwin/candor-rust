@@ -241,6 +241,9 @@
         std::fs::write(dir.join("target/x/c.rs"), "fn c(){}").unwrap(); // must be ignored
         std::fs::write(dir.join(".git/d.rs"), "fn d(){}").unwrap(); // must be ignored
         std::fs::write(dir.join("src/notrust.txt"), "ignored").unwrap();
+        // SOUNDNESS R1765 — `target/` is Cargo's build dir (and so outside the key) only BESIDE a manifest; the project
+        // root `state` is run at has one. Without it an untagged `target/` is hashed: more invalidation, never staleness.
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
 
         let hash = |root: &Path| -> u64 {
             let mut files = Vec::new();
