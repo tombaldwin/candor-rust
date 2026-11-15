@@ -7283,6 +7283,13 @@ pub(crate) fn step1_ns_off() -> bool {
     *OFF.get_or_init(|| step1_part_off("ns"))
 }
 
+/// RESOLVER STEP 1 — the kill switch for the associated-type dispatch disclosure (`collector`, the `assoc_via` site). Part
+/// `assoc`.
+pub(crate) fn step1_assoc_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| step1_part_off("assoc"))
+}
+
 /// RESOLVER STEP 1 — the kill switch for a crate-local glob's dependency answer (`local_glob_alias`). Part `glob`.
 pub(crate) fn step1_glob_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

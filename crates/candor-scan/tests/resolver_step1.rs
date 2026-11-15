@@ -343,3 +343,33 @@ fn a_static_through_a_cfg_arm_set_is_not_unioned() {
     assert!(has(&on, "modarm_zq", "Env") && has(&on, "fnarm_zq", "Env"), "{v:#}");
     assert!(has(&on, "static_zq", "Unknown"), "control: the static keeps its disclosure\n{v:#}");
 }
+
+/// Step 1 round 4 (part `assoc`): a dependency dispatch on an ASSOCIATED-TYPE value (`s.seq().end()`, serde's
+/// `s.serialize_seq(..)?.end()`) is keyed under the PARENT trait (`fio#Ser::end`), while a consumer's implementor of the
+/// associated type is keyed under ITS trait (`SeqT::end`) and nothing joins the two: EXECUTED with real serde (fixture `assoc`),
+/// a consumer whose `SerializeSeq` writes a file read `[]` + `invisible` on 0.42.0 and main. The site now discloses. A chained
+/// `Result`/`Option` method on a direct call (`seed.deserialize(d).map(..)`, R549 drift) is not this shape and is left alone.
+#[test]
+fn a_dependency_dispatch_on_an_associated_type_value_is_disclosed() {
+    let src = "pub fn named_zq<S: fio::Ser>(s: S) { let q = s.seq(); q.end() }\n\
+        pub fn chained_zq<S: fio::Ser>(s: S) { s.seq().end() }\n\
+        pub fn direct_zq<S: fio::Ser>(s: S) { s.done() }\n";
+    let fio = "pub trait SeqT { fn end(self); }\n\
+        pub trait Ser { type Seq: SeqT; fn seq(self) -> Self::Seq; fn done(self); }\n";
+    let d = fixture(
+        "assocv",
+        "fio = { path = \"fio\" }\n",
+        &[
+            ("src/lib.rs", src),
+            ("fio/Cargo.toml", "[package]\nname = \"fio\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+            ("fio/src/lib.rs", fio),
+        ],
+    );
+    let why = |rows: &Rows, f: &str| strs(rows, f, "unknownWhy").iter().any(|w| w.contains("on the associated type"));
+    let (on, v) = scan(&d);
+    assert!(has(&on, "named_zq", "Unknown") && why(&on, "named_zq"), "binding spelling discloses\n{v:#}");
+    assert!(has(&on, "chained_zq", "Unknown") && why(&on, "chained_zq"), "chained spelling discloses\n{v:#}");
+    assert!(!why(&on, "direct_zq"), "control: a direct member of the bound trait is not this shape\n{v:#}");
+    let off = scan_off(&d, "assoc");
+    assert!(!why(&off, "named_zq") && !why(&off, "chained_zq"), "part `assoc` off restores the old reading");
+}

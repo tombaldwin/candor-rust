@@ -15404,6 +15404,43 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     if full.contains("::") && !crate::lang::is_std_trait_root(root) {
                         // SOUNDNESS R1740 — the associated type this receiver is, where it was carried through one call.
                         let assoc_via = if candor_report::env::switch("CANDOR_R1740_OFF") { None } else { self.recv_assoc_via(&node.receiver) };
+                        // RESOLVER STEP 1 (part `assoc`) — A DEPENDENCY DISPATCH ON AN ASSOCIATED-TYPE VALUE IS DISCLOSED. The key
+                        // minted below names the PARENT trait (`serde_core#ser::Serializer::end` for `s.serialize_seq(..)?.end()`),
+                        // while a consumer's implementor of the associated type is keyed under ITS trait (`SerializeSeq::end`), and
+                        // no join matches the two: a consumer whose `SerializeSeq` writes a file read `[]` + `invisible` on 0.42.0,
+                        // main and this lane (EXECUTED, fixture `assoc`, `deny Fs` 0). Until the consumer join goes through the
+                        // associated type's bound (R1740 / R1715 F2), the site says so instead of reading pure. Only this shape: a
+                        // dependency trait, and a receiver that is the return of one of its methods (`recv_assoc_via`).
+                        // NOT a chained wrapper method: `seed.deserialize(d).map(..)` reaches here with the trait leaf drifted onto
+                        // `Result::map` (the R549 chain-drift keys, pre-existing); the value there is a `Result`/`Option`, not the
+                        // associated type, so an `Option`/`Result` combinator called directly on an un-`?`ed call is left alone. A
+                        // name std also has elsewhere (`end` is `RangeInclusive::end`) is NOT excluded: that is the main shape.
+                        let drift = {
+                            let mut r: &syn::Expr = &node.receiver;
+                            while let syn::Expr::Paren(p) = r {
+                                r = &p.expr;
+                            }
+                            matches!(r, syn::Expr::MethodCall(_))
+                                && matches!(
+                                    leaf.as_str(),
+                                    "map" | "map_err" | "and_then" | "or_else" | "unwrap" | "expect" | "unwrap_or"
+                                        | "unwrap_or_else" | "unwrap_or_default" | "ok" | "err" | "ok_or" | "ok_or_else"
+                                        | "is_some" | "is_none" | "is_ok" | "is_err" | "as_ref" | "as_mut" | "map_or"
+                                        | "map_or_else" | "cloned" | "copied" | "flatten" | "filter" | "inspect"
+                                        | "inspect_err" | "unwrap_err" | "expect_err" | "and" | "or" | "xor" | "zip"
+                                )
+                        };
+                        if let Some(via) = assoc_via.as_deref().filter(|_| !drift) {
+                            if !crate::lang::step1_assoc_off() && crate::lang::is_dependency_crate_root(root) {
+                                let tl = full.rsplit("::").next().unwrap_or(&full);
+                                if candor_report::env::trace("CANDOR_STEP1_INSTR") {
+                                    eprintln!("STEP1ASSOC\t{full}::{leaf}\t{via}"); // §E1 REACH
+                                }
+                                self.mark_unresolved(format!(
+                                    "dispatch:{tl}.{leaf} on the associated type `{via}` returns (its implementors are not joined)"
+                                ));
+                            }
+                        }
                         self.calls.push(Call { sp: None, assoc_via, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false,
                             path: format!("{full}::{leaf}"),
                             leaf: leaf.clone(),
