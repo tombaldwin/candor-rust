@@ -73,6 +73,11 @@ def map_unit(u, scan):
     """The candor-scan qual of a lint unit, or (None, why)."""
     sp = u.get("span") or {}
     f = C.norm(sp.get("file", ""))
+    if u.get("exp") and (not f or not f.startswith(scan.root + os.sep)):
+        # A LOCAL unit a DEPENDENCY's macro generated (sqlx_core's item macros): its span is in the dependency's source,
+        # but it is this crate's code and candor-scan has no unit for it. ABSENT, not NOT-COVERED (Fable census-2 §1.5):
+        # the tree test used to run first and filed it as outside the scan.
+        return None, "ABSENT(macro-generated unit, span in dependency source)"
     if not f or not f.startswith(scan.root + os.sep):
         return None, "NOT-COVERED(outside scanned tree)"
     if f in scan.excluded:
@@ -118,21 +123,29 @@ def t_cause(row, osite, site_rows, osites_by_key):
                 upstream.append((s["k"], "AGREE(ctor/const)" if st == "not-fn" else "NO-ROW", None))
     if any(v and not v.startswith("AGREE") and c == "N/M" for (_, v, c) in upstream):
         return "T<-N (a name upstream did not resolve)"
+    # The NEAREST producer decides (Fable census-2 review §1.2): the steps run from the receiver outward, and almost every
+    # chain bottoms out in a parameter (`self`). `self.connection().await?.execute(..)` was lost at `connection()`'s
+    # return type, not at `self`; reading the parameter first misfiled such sites as "annotated fn parameter".
+    ui = iter(upstream)
     for s in steps:
-        if s.get("k") == "param":
+        k = s.get("k")
+        if k in ("call", "mcall") and s.get("key"):
+            (_, v, c) = next(ui)
+            if v == "AGREE(ctor/const)":
+                return "T:typer(value built by a constructor)"
+            if v and v.startswith("AGREE"):
+                return "T:typer(return type of a resolved call not followed)"
+            if v and c == "T":
+                return "T<-T (an untyped value upstream)"
+            if v and v != "NO-ROW":
+                return "T<-%s upstream" % (c or v)
+            continue
+        if k == "param":
             if s.get("closure") and not s.get("annotated"):
                 return "T:typer(unannotated closure parameter)"
             if s.get("annotated") and not s.get("closure"):
                 return "T:typer?(annotated fn parameter%s)" % (", destructured" if s.get("destructured") else "")
             return "T:typer(parameter)"
-    if any(v and not v.startswith("AGREE") and c == "T" for (_, v, c) in upstream):
-        return "T<-T (an untyped value upstream)"
-    if any(v == "AGREE(ctor/const)" for (_, v, c) in upstream):
-        return "T:typer(value built by a constructor)"
-    if any(v and v.startswith("AGREE") for (_, v, c) in upstream):
-        return "T:typer(return type of a resolved call not followed)"
-    if any(v and not v.startswith("AGREE") for (_, v, c) in upstream):
-        return "T<-%s upstream" % next(c or v for (_, v, c) in upstream if v and not v.startswith("AGREE"))
     return "T:typer(%s)" % ",".join(s.get("k", "?") for s in steps[:3])
 
 
@@ -195,7 +208,15 @@ def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
             r = site_rows.get(k)
             loc = "%s:%s:%s" % (os.path.relpath(k[0], scan.root), k[1], k[2])
             if e in c.get("eff", []) or e in c.get("cross", []):
-                if e in c.get("eff", []) and ((r is not None and r.get("target_kind") == "local") or c.get("edges")):
+                o = osite_by_key.get(k) or {}
+                tdef = ((o.get("resolved") or {}).get("def")) or (o.get("named") or {})
+                foreign = ((tdef.get("parent") or {}).get("kind")) == "ForeignMod"
+                if foreign:
+                    # A locally DECLARED FFI import (`extern "C" { fn getentropy(..); }`) is a local DefId whose leaf charge
+                    # is genuine (the classifier's FFI-thin tier charges by leaf name), so it is never an artefact (Fable
+                    # census-2 §1.1). Judge it as an ordinary leaf.
+                    pass
+                if not foreign and e in c.get("eff", []) and ((r is not None and r.get("target_kind") == "local") or c.get("edges")):
                     # A LEAF charge on a call whose rustc target is a LOCAL item (or that the lint itself edged to a local
                     # unit): the lint classified this crate's own function by the crate's calibrated NAME (getrandom ->
                     # Rand) or by the member's name (no-std-net's own `to_socket_addrs` -> Net). Not an effect the body
