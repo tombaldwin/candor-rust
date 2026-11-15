@@ -7639,6 +7639,7 @@ pub(crate) fn collect_macro_hidden_decls(
     macro_modules: &std::collections::HashSet<String>,
     types: &mut std::collections::HashSet<String>,
     fns: &mut std::collections::HashSet<String>,
+    tagged: &mut std::collections::BTreeSet<String>,
 ) {
     let hidden = macro_modules.contains(modpath);
     for it in items {
@@ -7701,7 +7702,17 @@ pub(crate) fn collect_macro_hidden_decls(
                 }
                 for t in toks.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
                     if prev_fn && !t.is_empty() {
-                        fns.insert(t.to_string());
+                        match &m.ident {
+                            // I1 stage 1 — a `macro_rules!` BODY's names are tagged with the macro, so the merge can retire
+                            // them once every invocation of it was expanded (`cache::retire_expanded`); an invocation's own
+                            // tokens are evidence only while it stays unexpanded, which is all an `Item::Macro` here is.
+                            Some(name) if !candor_report::env::switch("CANDOR_I1_OFF") => {
+                                tagged.insert(format!("{name}{I1_TAG_SEP}FN{I1_TAG_SEP}{t}"));
+                            }
+                            _ => {
+                                fns.insert(t.to_string());
+                            }
+                        }
                     }
                     if !t.is_empty() {
                         prev_fn = t == "fn";
@@ -7717,7 +7728,7 @@ pub(crate) fn collect_macro_hidden_decls(
                     } else {
                         format!("{modpath}::{}", m.ident)
                     };
-                    collect_macro_hidden_decls(inner, &sub, include_tests, macro_modules, types, fns);
+                    collect_macro_hidden_decls(inner, &sub, include_tests, macro_modules, types, fns, tagged);
                 }
             }
         }
@@ -14092,6 +14103,9 @@ pub(crate) fn from_impl_facts(
 /// has no unit to edge to — so a wrong entry costs an over-disclosure and never a purity claim. The
 /// RESOLVED (non-nominal) ones edge to `{modpath}::{method}`; Pass B hedges instead when no unit carries
 /// that qual, and a same-named free fn in the same module is unioned in (an over-charge, stated).
+/// I1 stage 1 — the separator of a tagged `macro_rules!`-body hedge record: `{macro}␟{L|F|FN}␟{key}`.
+pub(crate) const I1_TAG_SEP: char = '\u{1f}';
+
 pub(crate) fn collect_opaque_trait_impls(
     items: &[syn::Item],
     include_tests: bool,
@@ -14100,6 +14114,7 @@ pub(crate) fn collect_opaque_trait_impls(
     local: &mut std::collections::BTreeSet<String>,
     foreign: &mut std::collections::BTreeSet<String>,
     nonnominal: &mut std::collections::BTreeSet<String>,
+    tagged: &mut std::collections::BTreeSet<String>,
 ) {
     fn record(
         tr: &syn::Path,
@@ -14133,7 +14148,7 @@ pub(crate) fn collect_opaque_trait_impls(
                     let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs); // R977 — see `lang::CfgOffScope`
                     let sub = inner_module_impl_uses(uses, inner, include_tests);
                     let sub_mod = crate::decls::qualify(modpath, &m.ident.to_string());
-                    collect_opaque_trait_impls(inner, include_tests, &sub_mod, &sub, local, foreign, nonnominal);
+                    collect_opaque_trait_impls(inner, include_tests, &sub_mod, &sub, local, foreign, nonnominal, tagged);
                 }
             }
             syn::Item::Impl(im) if include_tests || !is_cfg_test(&im.attrs) => {
@@ -14194,8 +14209,19 @@ pub(crate) fn collect_opaque_trait_impls(
                 }
                 let mut found: Vec<(syn::Path, Vec<String>)> = Vec::new();
                 macro_token_impls(mm.mac.tokens.clone(), &mut found);
+                // I1 stage 1 — tagged with the macro's name, so the merge retires the hedge once every invocation of it
+                // was expanded (its impls then stand as units; `cache::retire_expanded`). `CANDOR_I1_OFF` records as before.
+                let name = mm.ident.as_ref().map(|i| i.to_string());
                 for (tr, members) in found {
-                    record(&tr, &members, uses, local, foreign, "macro");
+                    match &name {
+                        Some(n) if !candor_report::env::switch("CANDOR_I1_OFF") => {
+                            let (mut l, mut f) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+                            record(&tr, &members, uses, &mut l, &mut f, "macro");
+                            tagged.extend(l.into_iter().map(|k| format!("{n}{I1_TAG_SEP}L{I1_TAG_SEP}{k}")));
+                            tagged.extend(f.into_iter().map(|k| format!("{n}{I1_TAG_SEP}F{I1_TAG_SEP}{k}")));
+                        }
+                        _ => record(&tr, &members, uses, local, foreign, "macro"),
+                    }
                 }
             }
             syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Union(_) => {

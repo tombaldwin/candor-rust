@@ -927,16 +927,31 @@ impl Ctx<'_> {
                         //
                         // The INVOCATION STAYS, so R128's "this module holds hidden items" evidence is
                         // unchanged for whatever the expansion declared besides functions.
+                        // SOUNDNESS R1541 / I1 stage 1 — EXPAND, DO NOT FILTER. Every item the expansion parses as is
+                        // spliced beside the invocation, as rustc places it, EXCEPT an explicit refusal list (`i1_refused`):
+                        // modules, `use`s and `extern crate`s (stage 2, where the cfg-arm union lives), a nested
+                        // invocation or `macro_rules!` this pass could not expand (R1784), and traits (the R1748/R1754
+                        // markers above stand for them). The allowlist this replaces kept free fns, inherent impls and
+                        // operator impls only, so a macro-made TRAIT impl had no unit (R1541: `<AtomicU32 as LoadIt>::load_it`
+                        // read pure over a write) and a macro-made struct left its impls keyed to no declared type — a
+                        // same-leaf twin elsewhere could claim them (R1678's class), which is why declarations ship WITH
+                        // impls. `CANDOR_I1_OFF=1` restores the allowlist and keeps every invocation.
+                        let i1_on = !candor_report::env::switch("CANDOR_I1_OFF");
+                        let full = i1_on && gen.iter().all(|g| !i1_refused(g) || matches!(g, syn::Item::Trait(_)));
                         let mut fns: Vec<syn::Item> = gen
                             .into_iter()
-                            .filter(|g| match g {
-                                syn::Item::Fn(_) | syn::Item::ForeignMod(_) => true,
-                                // SOUNDNESS R1004 (impl residual) — an INHERENT impl: its methods are
-                                // reached BY PATH (`W::touch(&w)`) and by a typed receiver, exactly as a
-                                // free fn is, and no dispatch universe holds them, so splicing it cannot
-                                // move a CHA fan-out. A TRAIT impl stays unexpanded (see above).
-                                syn::Item::Impl(i) => i.trait_.is_none() || operator_trait_impl(i) || prim_operator_impl(i),
-                                _ => false,
+                            .filter(|g| {
+                                if i1_on {
+                                    return !i1_refused(g);
+                                }
+                                match g {
+                                    syn::Item::Fn(_) | syn::Item::ForeignMod(_) => true,
+                                    // SOUNDNESS R1004 (impl residual) — an INHERENT impl (the pre-I1 allowlist).
+                                    syn::Item::Impl(i) => {
+                                        i.trait_.is_none() || operator_trait_impl(i) || prim_operator_impl(i)
+                                    }
+                                    _ => false,
+                                }
                             })
                             .collect();
                         if !fns.is_empty() && candor_report::env::trace("CANDOR_R1004_INSTR") {
@@ -987,13 +1002,39 @@ impl Ctx<'_> {
                                     }
                                 }
                             }
+                            // I1 stage 1 — a `$t:ty` group inside a spliced DECLARATION is peeled too, so a field, an alias or a
+                            // const typed by a fragment reads as the hand-written spelling does.
+                            peel_decl_groups(g);
                             if let Some(a) = crate::lang::item_attrs_mut(g) {
                                 let mut na = m.attrs.clone();
                                 na.append(a);
                                 *a = na;
                             }
                         }
-                        out.push(it);
+                        // I1 stage 1 — ONE fact, "this invocation was expanded": a FULLY expanded invocation is REPLACED by an
+                        // inert marker (`mbe_expanded_of`), so every model that reads an item-position `Item::Macro` as hidden
+                        // text (R128's module evidence, R452/R1636's names, `typesurf`'s unclosable mark, the module-macro
+                        // `use`-map key) no longer re-discloses what now stands spliced beside it; R828 and R452's
+                        // `macro_rules!`-BODY evidence is retired crate-wide from the same markers (`cache::retire_expanded`).
+                        // A partial expansion (anything on the refusal list) keeps the invocation, and with it every hedge.
+                        if full {
+                            let name = m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+                            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                                eprintln!("I1EXPANDED\t{name}"); // §E1 REACH COUNTER
+                            }
+                            match format!("{MBE_EXPANDED_MARK} {name}").parse::<TokenStream>() {
+                                Ok(ts) => out.push(syn::Item::Verbatim(ts)),
+                                Err(_) => out.push(it),
+                            }
+                        } else {
+                            if i1_on && candor_report::env::trace("CANDOR_I1_INSTR") {
+                                eprintln!(
+                                    "I1PARTIAL\t{}",
+                                    m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default()
+                                ); // §E1 REACH COUNTER
+                            }
+                            out.push(it);
+                        }
                         out.extend(fns);
                         out.append(&mut markers);
                         continue;
@@ -1017,6 +1058,78 @@ impl Ctx<'_> {
             out.push(it);
         }
         *items = out;
+    }
+}
+
+/// I1 stage 1 — the explicit REFUSAL list for a spliced expansion (the denylist that replaced the R1004 allowlist).
+fn i1_refused(g: &syn::Item) -> bool {
+    matches!(
+        g,
+        syn::Item::Mod(_) | syn::Item::Use(_) | syn::Item::ExternCrate(_) | syn::Item::Macro(_) | syn::Item::Trait(_)
+            | syn::Item::TraitAlias(_)
+    )
+}
+
+/// I1 stage 1 — the marker that stands where a fully expanded invocation was. Read by `mbe_expanded_of`.
+const MBE_EXPANDED_MARK: &str = "__candor_mbe_expanded";
+
+/// I1 stage 1 — the macro name of a marker `splice` left for a fully expanded invocation.
+pub(crate) fn mbe_expanded_of(it: &syn::Item) -> Option<String> {
+    let syn::Item::Verbatim(ts) = it else { return None };
+    let mut ids = ts.clone().into_iter();
+    match (ids.next(), ids.next(), ids.next()) {
+        (Some(TokenTree::Ident(a)), Some(TokenTree::Ident(n)), None) if a == MBE_EXPANDED_MARK => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// I1 stage 1 — the crate-wide retirement input of one file: the macros it holds a fully expanded invocation of, and
+/// the LAST segment of every macro path it still holds as an unexpanded invocation anywhere (item, impl-item, statement
+/// or expression position). A `macro_rules!` body's hedge evidence is retired only for a name in the first set and not
+/// in the second.
+pub(crate) fn expansion_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>) {
+    struct V {
+        expanded: std::collections::BTreeSet<String>,
+        unexpanded: std::collections::BTreeSet<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_item(&mut self, i: &'ast syn::Item) {
+            if let Some(n) = mbe_expanded_of(i) {
+                self.expanded.insert(n);
+            }
+            syn::visit::visit_item(self, i);
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            if let Some(s) = m.path.segments.last() {
+                if s.ident != "macro_rules" {
+                    self.unexpanded.insert(s.ident.to_string());
+                }
+            }
+        }
+    }
+    let mut v = V { expanded: Default::default(), unexpanded: Default::default() };
+    for it in items {
+        syn::visit::Visit::visit_item(&mut v, it);
+    }
+    (v.expanded.into_iter().collect(), v.unexpanded.into_iter().collect())
+}
+
+/// I1 stage 1 — `peel_groups` over the types a spliced DECLARATION carries (struct / enum / union fields, an alias, a
+/// const or static). Impls are peeled where they always were.
+fn peel_decl_groups(g: &mut syn::Item) {
+    fn fields(f: &mut syn::Fields) {
+        for x in f.iter_mut() {
+            peel_groups(&mut x.ty);
+        }
+    }
+    match g {
+        syn::Item::Struct(s) => fields(&mut s.fields),
+        syn::Item::Union(u) => u.fields.named.iter_mut().for_each(|x| peel_groups(&mut x.ty)),
+        syn::Item::Enum(e) => e.variants.iter_mut().for_each(|v| fields(&mut v.fields)),
+        syn::Item::Type(t) => peel_groups(&mut t.ty),
+        syn::Item::Const(c) => peel_groups(&mut c.ty),
+        syn::Item::Static(st) => peel_groups(&mut st.ty),
+        _ => {}
     }
 }
 

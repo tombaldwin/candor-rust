@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev195 (rustagent-i1, I1 stage 1, SOUNDNESS R1541): a macro expansion splices trait impls and declarations and a
+    // fully expanded invocation becomes a marker (cached `FileDecls` move); `FileDecls` gained `i1_tagged`/`i1_expanded`/
+    // `i1_unexpanded` (a pre-rev195 entry deserializes them EMPTY and would retire nothing while minting no units).
     // rev194 (rustagent-typerproj): SOUNDNESS R1657 bound projection — a generic receiver's member follows its bound's Target,
     // conversion argument and projection (cached `calls`/`unresolved_why` move); R1794 — a supertrait member's dispatch key
     // names the declaring trait (cached `dispatch` moves); Pass A files `model::blanket_bounds_key`.
@@ -702,7 +705,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev194/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev195/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -936,6 +939,16 @@ pub(crate) struct FileDecls {
     /// away; see `lang::collect_written_trait_quals`.
     #[serde(default)]
     pub(crate) written_trait_quals: HashMap<String, String>,
+    /// I1 stage 1 — `macro_rules!`-BODY hedge evidence (R828 trait impls, R452 fn names), tagged with the macro
+    /// (`{macro}␟{L|F|FN}␟{key}`); placed into `nested_impl_*` / `macro_hidden_fns` at the merge unless retired.
+    #[serde(default)]
+    pub(crate) i1_tagged: Vec<String>,
+    /// I1 stage 1 — macros this file holds a FULLY expanded invocation of (the `mbe` marker).
+    #[serde(default)]
+    pub(crate) i1_expanded: Vec<String>,
+    /// I1 stage 1 — last segments of every macro path this file still holds as an unexpanded invocation.
+    #[serde(default)]
+    pub(crate) i1_unexpanded: Vec<String>,
     /// SOUNDNESS R529 — the `"{trait leaf}::{method}"` pairs this file implements INSIDE A BLOCK, which
     /// no other Pass A index can see. See `lang::collect_block_nested_trait_impls`. A pre-rev36 entry
     /// deserializes EMPTY, which re-serves exactly the silent purity claim the row closes — hence the
@@ -1075,8 +1088,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     crate::lang::collect_local_globs(items, modpath, include_tests, &mut local_globs);
     let mut macro_hidden_ty = std::collections::HashSet::new();
     let mut macro_hidden_fn = std::collections::HashSet::new();
+    let mut i1_tagged: std::collections::BTreeSet<String> = std::collections::BTreeSet::new(); // I1 stage 1
     crate::lang::collect_macro_hidden_decls(
-        items, modpath, include_tests, &macro_mods, &mut macro_hidden_ty, &mut macro_hidden_fn);
+        items, modpath, include_tests, &macro_mods, &mut macro_hidden_ty, &mut macro_hidden_fn, &mut i1_tagged);
     // SOUNDNESS R1630 — a generic `Deref` wrapper declared where candor could not read all its items (tokio's `PollEvented`,
     // whose `poll_write` / `poll_read_ready` live in `cfg_io_driver! { impl<E: Source> PollEvented<E> { .. } }`) may declare
     // the very method a call names, so auto-derefing to its target would skip the wrapper's own member: Rust picks
@@ -1134,7 +1148,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // ("does this crate implement that member somewhere the index cannot see?"), one answer.
     let mut nonnominal: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     crate::lang::collect_opaque_trait_impls(
-        items, include_tests, modpath, &uses, &mut nested_local, &mut nested_foreign, &mut nonnominal);
+        items, include_tests, modpath, &uses, &mut nested_local, &mut nested_foreign, &mut nonnominal, &mut i1_tagged);
+    // I1 stage 1 — the retirement input: which macros this file expanded in full, and which it still invokes unexpanded.
+    let (i1_expanded, i1_unexpanded) = crate::mbe::expansion_facts(items);
     let mut nonpath_receivers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     crate::lang::collect_nonpath_receivers(items, include_tests, modpath, &uses, &mut nonpath_receivers); // R1034
     let mut glob_impl_foreign: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -1248,6 +1264,9 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         mbe_traits: mbe_traits.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect(),
         written_trait_quals,
         // R529 — `BTreeSet` in, sorted `Vec` out; the cache entry is content-hashed.
+        i1_tagged: i1_tagged.into_iter().collect(),
+        i1_expanded,
+        i1_unexpanded,
         nested_impl_members: nested_local.into_iter().collect(),
         nested_impl_foreign: nested_foreign.into_iter().collect(),
         nonnominal_impls: nonnominal.into_iter().collect(),
@@ -1357,6 +1376,10 @@ pub(crate) struct MergedDecls {
     /// `FileDecls::nested_impl_members`. Read as a HEDGE (a dispatch on one of these members cannot be
     /// certified from the visible implementors alone), never as an implementor set — the body-local
     /// method has no unit to edge to.
+    /// I1 stage 1 — see `FileDecls::i1_tagged` / `i1_expanded` / `i1_unexpanded`, unioned; consumed by `retire_expanded`.
+    pub(crate) i1_tagged: std::collections::BTreeSet<String>,
+    pub(crate) i1_expanded: std::collections::BTreeSet<String>,
+    pub(crate) i1_unexpanded: std::collections::BTreeSet<String>,
     pub(crate) nested_impl_members: std::collections::HashSet<String>,
     /// R529 — the same, keyed under the OWNING crate for an abstraction this crate does not own.
     pub(crate) nested_impl_foreign: std::collections::HashSet<String>,
@@ -1382,6 +1405,40 @@ pub(crate) struct MergedDecls {
 /// so it is untouched. A `#[cfg]` pair binding `Y` to two crates is left as written (one arm would be a guess). Returns
 /// the number of keys rewritten. `CANDOR_R1711C_OFF=1` disables it (as does `CANDOR_R1710_OFF=1`, the whole extern-alias
 /// reading).
+/// SOUNDNESS R1541 / I1 stage 1 — ONE FACT, "this invocation was expanded", read by the `macro_rules!`-BODY hedges. R828's
+/// macro-made trait impls and R452's macro-declared fn names were read off a definition's TOKENS because the splice dropped
+/// what the expansion declared. A definition every invocation of which was FULLY expanded (some file holds its marker, and
+/// no file holds it unexpanded at any position) now stands as units, so its evidence is RETIRED; any other definition keeps
+/// it, exactly as before. Must run before `rekey_root_extern_owners`, which canonicalises the foreign keys this places.
+/// Returns how many tagged records were retired (a reach counter).
+pub(crate) fn retire_expanded(m: &mut MergedDecls) -> usize {
+    let sep = crate::lang::I1_TAG_SEP;
+    let mut retired = 0;
+    for t in std::mem::take(&mut m.i1_tagged) {
+        let mut it = t.splitn(3, sep);
+        let (Some(mac), Some(kind), Some(key)) = (it.next(), it.next(), it.next()) else { continue };
+        if m.i1_expanded.contains(mac) && !m.i1_unexpanded.contains(mac) {
+            retired += 1;
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("I1RETIRE\t{mac}\t{kind}\t{key}"); // §E1 REACH COUNTER
+            }
+            continue;
+        }
+        match kind {
+            "L" => {
+                m.nested_impl_members.insert(key.to_string());
+            }
+            "F" => {
+                m.nested_impl_foreign.insert(key.to_string());
+            }
+            _ => {
+                m.macro_hidden_fns.insert(key.to_string());
+            }
+        }
+    }
+    retired
+}
+
 pub(crate) fn rekey_root_extern_owners(m: &mut MergedDecls) -> usize {
     if crate::lang::r1710_off() || candor_report::env::switch("CANDOR_R1711C_OFF") {
         return 0;
@@ -2294,6 +2351,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.nested_impl_members {
         acc.nested_impl_members.insert(n.clone()); // set union — order-independent (R529)
     }
+    acc.i1_tagged.extend(fd.i1_tagged.iter().cloned()); // set union — order-independent (I1)
+    acc.i1_expanded.extend(fd.i1_expanded.iter().cloned());
+    acc.i1_unexpanded.extend(fd.i1_unexpanded.iter().cloned());
     for n in &fd.nested_impl_foreign {
         acc.nested_impl_foreign.insert(n.clone()); // set union — order-independent (R529)
     }
@@ -2666,6 +2726,15 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     // impl_members — R598. Decides whether `{ty}::{method}` is read as this trait's implementation at
     // all, so a file that gains or loses an impl member changes what the interface-union publishes for
     // the whole crate and for every chained consumer of it.
+    // I1 stage 1 — the retirement input (`retire_expanded`): which `macro_rules!`-body hedges stand depends on these.
+    for (label, set) in [("i1_tagged", &m.i1_tagged), ("i1_expanded", &m.i1_expanded), ("i1_unexpanded", &m.i1_unexpanded)] {
+        s.push_str(label);
+        for a in set {
+            s.push('|');
+            s.push_str(a);
+        }
+        s.push('\n');
+    }
     for (label, set) in [
         ("nested_impl_members", &m.nested_impl_members),
         ("nested_impl_foreign", &m.nested_impl_foreign),

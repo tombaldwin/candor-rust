@@ -16859,6 +16859,9 @@ trait G {
             impl_members => |m| { m.impl_members.insert(crate::model::impl_member_key("Enc", "RData", "to_bytes")); },
             // SOUNDNESS R1484: which `mod` items place a module, which decides whether a cross-arm edge is dropped.
             mod_places => |m| { m.mod_places.entry("u".into()).or_default().insert("imp".into()); },
+            i1_tagged => |m| { m.i1_tagged.insert("mk\u{1f}L\u{1f}Tr::m".into()); },
+            i1_expanded => |m| { m.i1_expanded.insert("mk".into()); },
+            i1_unexpanded => |m| { m.i1_unexpanded.insert("mk".into()); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {
@@ -18511,7 +18514,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172", "rev173", "rev174", "rev175", "rev176", "rev177", "rev178", "rev179", "rev180", "rev181", "rev182", "rev183", "rev184", "rev185", "rev190"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172", "rev173", "rev174", "rev175", "rev176", "rev177", "rev178", "rev179", "rev180", "rev181", "rev182", "rev183", "rev184", "rev185", "rev190", "rev194"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18522,7 +18525,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev194/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev195/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -27304,13 +27307,15 @@ pub fn go() {{ imp::doit(); }}
             pub fn l5(t: &dyn T5, p: &str) { t.go(p) }\n\
             pub fn l10(t: &dyn T10, p: &str) { t.go(p) }\n\
             pub fn lc(t: &dyn Tc, p: &str) { t.go(p) }\n");
+        // I1 stage 1 (R1541) — the `macro_rules!` implementor is now EXPANDED: `M1::go` is a unit, so the dispatch and the
+        // published union carry its `Fs` instead of R828's `Unknown` (retired for a macro every invocation of which was
+        // expanded). The R828 disclosure for an UNEXPANDED invocation is pinned in `tests/i1_macro_units.rs`.
         let e = fn_entry(&v, "l1");
-        assert_eq!(effs(e), vec!["Unknown".to_string()], "R828 `l1`:\n{v:#}");
-        assert_eq!(e["unknownWhy"], serde_json::json!(["dispatch:T1.go"]), "{v:#}");
+        assert_eq!(effs(e), vec!["Fs".to_string()], "R828 `l1`, resolved by I1:\n{v:#}");
         let u = v["functions"].as_array().unwrap().iter()
             .find(|x| x["fn"] == "T1::go" && x["interfaceUnion"] == true)
             .unwrap_or_else(|| panic!("`T1::go` union row:\n{v:#}"));
-        assert_eq!(effs(u), vec!["Unknown".to_string()], "the published union must not claim purity:\n{v:#}");
+        assert_eq!(effs(u), vec!["Fs".to_string()], "the published union carries the expanded impl:\n{v:#}");
         assert_eq!(effs(fn_entry(&v, "l10")), vec!["Fs".to_string()], "the renamed impl resolves:\n{v:#}");
         assert_eq!(effs(fn_entry(&v, "l5")), vec!["Fs".to_string()], "the tuple impl resolves:\n{v:#}");
         let u5 = v["functions"].as_array().unwrap().iter()
@@ -27874,8 +27879,9 @@ pub fn trait_path() { Y::tm(&Y) }\n";
         for f in ["W::touch", "via_impl", "via_path"] {
             assert_eq!(fixture_effects(&v, f), vec!["Fs".to_string()], "`{f}`:\n{v:#}");
         }
-        assert_eq!(fixture_effects(&v, "trait_path"), vec!["Unknown".to_string()], "{v:#}");
-        assert!(fixture_why(&v, "trait_path").iter().any(|w| w.starts_with("macro:")), "{v:#}");
+        // I1 stage 1 (R1541) — the generated TRAIT impl is expanded too now, so its path spelling resolves (it was
+        // `macro:` before, and EXECUTED it wrote the file).
+        assert_eq!(fixture_effects(&v, "trait_path"), vec!["Fs".to_string()], "{v:#}");
     }
 
     /// SOUNDNESS R529c — a struct declared INSIDE a fn body was in no `fields` entry, so `h.c.go()` through it
