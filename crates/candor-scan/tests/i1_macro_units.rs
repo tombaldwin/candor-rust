@@ -359,3 +359,26 @@ fn i1_step4_withdrawn_generic_return_still_dispatches() {
     // implementors (the bitflags shape) the row was ABSENT and the `Flags::bits` key gone — the silence this closes.
     assert!(!eff(&off, "parser::from_str_truncate").contains(&"Fs".to_string()), "OFF reads no resolution: {off:?}");
 }
+
+/// Step 5 — a PATH call through a type alias of a PRIMITIVE the crate implements a trait for (`type Cursor = u32;` beside
+/// `impl TryParse for u32`) was skipped as "std/core's assoc fn" and read PURE (pre-existing; x11rb-protocol was covered
+/// only by the `macro:` evidence of its unexpanded `implement_try_parse!`, which I1 retires). Disclosed at the lost site.
+#[test]
+fn i1_step5_alias_to_a_primitive_with_a_local_impl_discloses() {
+    let d = tmpdir("primalias");
+    write_crate(
+        &d,
+        "primalias",
+        "",
+        "pub trait TryParse: Sized { fn try_parse(v: &[u8]) -> Result<(Self, &[u8]), ()>; }\n\
+         impl TryParse for u32 { fn try_parse(v: &[u8]) -> Result<(Self, &[u8]), ()> { EFF Ok((0, v)) } }\n\
+         pub type Cursor = u32;\n\
+         pub fn tp(v: &[u8]) -> Result<u32, ()> { let (c, _) = Cursor::try_parse(v)?; Ok(c) }\n\
+         pub fn tp_direct(v: &[u8]) -> Result<u32, ()> { let (c, _) = u32::try_parse(v)?; Ok(c) }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    assert_eq!(eff(&rows, "tp"), vec!["Unknown".to_string()], "{rows:?}");
+    assert_eq!(eff(&rows, "tp_direct"), vec!["Fs".to_string()], "control: {rows:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_I1_PRIMALIAS_OFF", "1")]);
+    assert!(off.get("tp").is_none(), "OFF: the pre-existing silence: {off:?}");
+}

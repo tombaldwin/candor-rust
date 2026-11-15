@@ -8378,6 +8378,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert("ambiguous:type alias and nominal type share a leaf".to_string());
             }
+            // SOUNDNESS R1541 / I1 — THE ALIAS SKIP OVER A PRIMITIVE THE CRATE IMPLEMENTS A TRAIT FOR. `type Cursor = u32;` beside a
+            // local `impl TryParse for u32` (x11rb-protocol's `implement_try_parse!(u32)`): `Cursor::try_parse(v)` is skipped as
+            // "a std/core assoc fn" and read PURE, while the hand-written `u32::try_parse(v)` is charged — pre-existing (fixture
+            // `alias`, ABSENT on main over a write). In x11rb the call was covered by R452's `macro:` evidence from the unexpanded
+            // impl macro; I1 expands the macro and retires that cover, so the silence is disclosed here at the lost site, with a
+            // true reason, whenever a local unit `<primitive>::<leaf>` exists. A resolution (rewrite the alias to its target and
+            // join the std-receiver route) is the owner's: the typer's alias-target fact. `CANDOR_I1_PRIMALIAS_OFF=1`.
+            if !c.is_macro && classified.is_none() && !resolved_local && aliased && resolvable
+                && !candor_report::env::switch("CANDOR_I1_PRIMALIAS_OFF")
+            {
+                const PRIMS: &[&str] = &[
+                    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64",
+                    "bool", "char", "str",
+                ];
+                let leaf = c.path.rsplit("::").next().unwrap_or("");
+                if PRIMS.iter().any(|p| by_tail2.contains_key(&format!("{p}::{leaf}"))) {
+                    if candor_report::env::trace("CANDOR_I1_INSTR") {
+                        eprintln!("I1PRIMALIAS\t{}", c.path); // §E1 REACH COUNTER
+                    }
+                    direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                    unknown_why
+                        .entry(f.qual.clone())
+                        .or_default()
+                        .insert("ambiguous:type alias to a primitive the crate implements a trait for".to_string());
+                }
+            }
             // §4 HONESTY — SOUNDNESS R190(e): A RE-EXPORT KEY THE ALIAS INDEX REFUSED TO ADMIT.
             // `reexport_aliases` declines a key three ways — the fan-out cap, a key two modules claim,
             // and R169's macro-hidden-contest guard — and each decline is correct (it will not guess
