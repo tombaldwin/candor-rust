@@ -69,6 +69,77 @@ class Report:
         return self.fns.get(q)
 
 
+def path_qual(path):
+    """rustc's printed item path to the scanner's qual: `<impl A for B>` segments become B's last segment, generic
+    arguments are dropped. `None` when the path has a shape this does not read."""
+    import re
+    p = path
+    # `<X as Tr>::m` (the UFCS form rustc prints for a trait impl) -> `X::m`
+    m0 = re.match(r"^<(.+?) as .+>::(\w+)$", p)
+    if m0:
+        p = C.strip_generics(m0.group(1)).strip().lstrip("&").replace("mut ", "").strip() + "::" + m0.group(2)
+    while True:
+        m = re.search(r"<impl\b", p)
+        if not m:
+            break
+        d, i = 0, m.start()
+        while i < len(p):
+            if p[i] == "<": d += 1
+            elif p[i] == ">":
+                d -= 1
+                if d == 0: break
+            i += 1
+        inner = p[m.start() + 1:i]
+        ty = inner.split(" for ", 1)[1] if " for " in inner else inner[len("impl "):]
+        ty = C.strip_generics(ty).strip().lstrip("&").strip()
+        ty = ty.replace("mut ", "").split("::")[-1]
+        p = p[:m.start()] + ty + p[i + 1:]
+    p = re.sub(r"(::)+", "::", C.strip_generics(p)).strip(":")
+    return p if re.fullmatch(r"[A-Za-z_][\w]*(::[A-Za-z_][\w]*)*", p) else None
+
+
+_SRC = {}
+
+
+def i1_kind(u, root):
+    """SOUNDNESS R1541 (I1) — WHICH macro made an unmapped unit, read from the source at the lint unit's `ident` (rustc's ident
+    span of an expanded item is inside the INVOCATION): the nearest preceding `name!(`, `#[derive(..)]` or attribute.
+    `: L <name>` a crate-local `macro_rules!`; `: D1 <name>` a bang macro the crate does not define (a dependency's);
+    `: P1` a derive; `: P2` an attribute macro; `` when nothing is found. A heuristic over text, stated as one."""
+    import re
+    idn = u.get("ident") or {}
+    f = C.norm(idn.get("file", ""))
+    if not f or not os.path.exists(f):
+        return ""
+    if f not in _SRC:
+        _SRC[f] = open(f, errors="replace").read().split("\n")
+    lines = _SRC[f]
+    ln = idn.get("line", 0)
+    text = "\n".join(lines[max(0, ln - 40):ln])
+    best, kind = -1, ""
+    for m in re.finditer(r"([A-Za-z_][\w:]*)!\s*[({\[]", text):
+        if m.start() > best and m.group(1).split("::")[-1] != "macro_rules":
+            best, kind = m.start(), "bang:" + m.group(1).split("::")[-1]
+    for m in re.finditer(r"#\[derive\(", text):
+        if m.start() > best:
+            best, kind = m.start(), "P1"
+    for m in re.finditer(r"#\[(?!derive|cfg|doc|allow|warn|deny|inline|repr|must_use|non_exhaustive|deprecated|test)[\w:]+", text):
+        if m.start() > best:
+            best, kind = m.start(), "P2"
+    if kind.startswith("bang:"):
+        name = kind[5:]
+        if "__local_macros" not in _SRC:
+            names = set()
+            for g in glob.glob(os.path.join(root, "**", "*.rs"), recursive=True):
+                try:
+                    names |= set(re.findall(r"macro_rules!\s*([A-Za-z_]\w*)", open(g, errors="replace").read()))
+                except OSError:
+                    pass
+            _SRC["__local_macros"] = names
+        return ": %s %s" % ("L" if name in _SRC["__local_macros"] else "D1", name)
+    return (": " + kind) if kind else ""
+
+
 def map_unit(u, scan):
     """The candor-scan qual of a lint unit, or (None, why)."""
     sp = u.get("span") or {}
@@ -84,23 +155,48 @@ def map_unit(u, scan):
         return None, "NOT-COVERED(excluded, disclosed: %s)" % scan.excluded[f]
     rows = scan.fn_rows.get(f) or []
     line, col = sp.get("line"), sp.get("col")
-    for (l, c, q) in rows:
-        if l == line and c == col:
-            return q, None
+    leaf = C.strip_generics(u.get("path") or "").split("::")[-1].strip()
+    exact = [q for (l, c, q) in rows if l == line and c == col]
+    if len(set(exact)) == 1:
+        return exact[0], None
+    # SOUNDNESS R1802 — N expansions of ONE macro can share a span (one per invocation, or — before candor-scan re-spanned
+    # same-file expansions to the invocation — every one at the macro DEFINITION). Among rows sharing a position the leaf
+    # decides; the first-row-wins reading filed N-1 of hickory-resolver's eleven `*_lookup` units as ABSENT.
+    if exact:
+        byleaf = [q for q in exact if q.split("::")[-1] == leaf]
+        if len(set(byleaf)) == 1:
+            return byleaf[0], None
     idl = (u.get("ident") or {}).get("line")
     same = [q for (l, c, q) in rows if l in (line, idl)]
     if len(set(same)) == 1:
         return same[0], None
+    byleaf = [q for q in same if q.split("::")[-1] == leaf]
+    if len(set(byleaf)) == 1:
+        return byleaf[0], None
     # candor-scan's row starts at the item's first ATTRIBUTE or doc comment; rustc's def span at the item itself. The row
     # is the nearest one at or before rustc's span whose leaf is this unit's name, with no other unit's row in between.
-    leaf = C.strip_generics(u.get("path") or "").split("::")[-1].strip()
+    # R1802: every row AT that nearest position is a candidate, not only the last one sorted.
     before = [(l, c, q) for (l, c, q) in rows if (l, c) <= (line, col)]
     if before:
-        l0, c0, q0 = before[-1]
-        if q0.split("::")[-1] == leaf:
-            return q0, None
+        l0, c0, _ = before[-1]
+        at = [q for (l, c, q) in before if (l, c) == (l0, c0) and q.split("::")[-1] == leaf]
+        if len(set(at)) == 1:
+            return at[0], None
     if u.get("exp"):
-        return None, "ABSENT(macro-generated unit)"
+        # SOUNDNESS R1541 / R1802 — an expanded unit's rustc span and ident can both sit in the macro DEFINITION
+        # (`fn sample` written in `float_impls!`'s body) while candor-scan, re-spanning to the invocation, puts the row at
+        # the invocation. Fall back to the QUALIFIED path rustc prints (`m::<impl Tr<X> for T>::f` -> `m::T::f`), matched
+        # against the rows of the same file only, and only when exactly one row carries it.
+        q = path_qual(u.get("path") or "")
+        cands = {qq for (_, _, qq) in rows if qq == q} if q else set()
+        if not cands and q:
+            # `#[path]` modules are spelled differently by rustc and the scanner (`uniform::int` vs `uniform_int`): the
+            # last two segments (`UniformInt::sample_single`), within the same FILE, unique as a set of quals.
+            t2 = "::".join(q.split("::")[-2:])
+            cands = {qq for (_, _, qq) in rows if "::".join(qq.split("::")[-2:]) == t2}
+        if len(cands) == 1:
+            return cands.pop(), None
+        return None, "ABSENT(macro-generated unit%s)" % i1_kind(u, scan.root)
     if not rows:
         return None, "ABSENT(file has no scanned unit)"
     return None, "ABSENT(no scanner unit at this definition)"
