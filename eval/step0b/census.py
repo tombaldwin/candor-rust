@@ -173,14 +173,68 @@ def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
             # (`raw_sql(..)?`): the written call's row wins.
             if k not in site_rows or (site_rows[k].get("desugar") and not r.get("desugar")):
                 site_rows[k] = r
+    osite_by_raw = {}
+    for o in osites:
+        if o.get("raw"):
+            osite_by_raw.setdefault(key3(o["raw"]), o)
     osite_by_key = {}
     for o in osites:
         if o.get("key") and not o.get("exp"):
             osite_by_key.setdefault(key3(o["key"]), o)
 
+    # CLEANED LINT SETS. The lint charges a calibrated crate's OWN items by the crate's name (getrandom, rand -> Rand) or
+    # by member name (no-std-net's own `to_socket_addrs` -> Net). Excluding those leaves only at the root (LINT-ARTEFACT)
+    # is not enough: the artefact effect PROPAGATES, and a caller's flip then gets an innocent-looking root (a D site
+    # whose callee carries only an artefact Rand). So the lint's sets are recomputed from its own per-expression record
+    # with artefact leaves dropped, and every flip is judged against the cleaned set. Self-check: recomputed WITHOUT the
+    # drop, the sets must equal the dump's, or the record is incomplete and the run says so.
+    def is_artefact_leaf(c):
+        # Judge by the oracle's OWN record of this expression (matched on its raw span, which is unique even inside a
+        # macro expansion where many sites share one key), falling back to the comparator row and the lint's own edge.
+        o = osite_by_raw.get(key3(c["raw"])) if c.get("raw") else None
+        if o is None:
+            o = osite_by_key.get(key3(c["key"])) or {}
+        tdef = ((o.get("resolved") or {}).get("def")) or (o.get("named") or {})
+        if ((tdef.get("parent") or {}).get("kind")) == "ForeignMod":
+            return False
+        if tdef.get("local"):
+            return True
+        r = site_rows.get(key3(c["key"]))
+        return (r is not None and r.get("target_kind") == "local") or bool(c.get("edges"))
+
+    def recompute(drop_artefacts):
+        direct, calls = collections.defaultdict(set), collections.defaultdict(set)
+        for d0, cs in contrib.items():
+            for c in cs:
+                eff = set(c.get("eff", []))
+                if drop_artefacts and eff - {UNKNOWN} and is_artefact_leaf(c):
+                    eff &= {UNKNOWN}
+                direct[d0] |= eff | set(c.get("cross", []))
+                calls[d0] |= set(c.get("edges", []))
+        for d0, ps in post.items():
+            for pe in ps:
+                calls[d0].add(pe["target"])
+        acc = {d0: set(direct.get(d0, set())) for d0 in set(units) | set(direct)}
+        changed = True
+        while changed:
+            changed = False
+            for f0, gs in calls.items():
+                add = set()
+                for g in gs:
+                    add |= acc.get(g, set())
+                cur = acc.setdefault(f0, set())
+                if not add <= cur:
+                    cur |= add
+                    changed = True
+        return acc
+
+    raw = recompute(False)
+    mism = [d0 for d0, u in units.items() if u["dk"] in ("Fn", "AssocFn") and
+            {x for x in u["eff"] if x != UNKNOWN} != {x for x in raw.get(d0, set()) if x != UNKNOWN}]
+    clean = recompute(True)
+
     def lint_eff(d):
-        u = units.get(d)
-        return set(u["eff"]) if u else set()
+        return set(clean.get(d, set())) if d in units else set()
 
     qual_of, why_absent = {}, {}
     for d, u in units.items():
@@ -216,7 +270,7 @@ def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
                     # is genuine (the classifier's FFI-thin tier charges by leaf name), so it is never an artefact (Fable
                     # census-2 §1.1). Judge it as an ordinary leaf.
                     pass
-                if not foreign and e in c.get("eff", []) and ((r is not None and r.get("target_kind") == "local") or c.get("edges")):
+                if not foreign and e in c.get("eff", []) and is_artefact_leaf(c):
                     # A LEAF charge on a call whose rustc target is a LOCAL item (or that the lint itself edged to a local
                     # unit): the lint classified this crate's own function by the crate's calibrated NAME (getrandom ->
                     # Rand) or by the member's name (no-std-net's own `to_socket_addrs` -> Net). Not an effect the body
@@ -307,7 +361,9 @@ def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
     for d, u in sorted(units.items()):
         if u["dk"] not in ("Fn", "AssocFn"):
             continue
-        le = {x for x in u["eff"] if x != UNKNOWN}
+        le = {x for x in lint_eff(d) if x != UNKNOWN}
+        if {x for x in u["eff"] if x != UNKNOWN} - le:
+            population["lint units losing an effect to artefact cleaning"] += 1
         q = qual_of.get(d)
         if q is None and why_absent.get(d, "").startswith("ABSENT(no scanner unit") and le:
             # An item nested in a fn body (`fn with_features() { fn detect_family_inner() .. }`, an `impl Drop` inside a
@@ -359,10 +415,11 @@ def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
         if q is None:
             continue
         se = {x for x in (rep.eff(q) or set()) if x != UNKNOWN}
-        le = {x for x in units[d]["eff"] if x != UNKNOWN}
+        le = {x for x in lint_eff(d) if x != UNKNOWN}
         if se - le:
             extra.append({"unit": d, "qual": q, "scan_only": sorted(se - le)})
-    return {"label": label, "population": population, "flips": flips, "pub_flips": pub_flips, "scan_only": extra, "excluded": excluded,
+    population["SELF-CHECK: units whose recomputed lint set differs from the dump (must be 0)"] = len(mism)
+    return {"label": label, "self_check_mismatch": mism[:20], "population": population, "flips": flips, "pub_flips": pub_flips, "scan_only": extra, "excluded": excluded,
             "census_files": cfiles, "site_rows": len(rows)}
 
 
