@@ -128,6 +128,10 @@ class Scan:
         self.fn_rows = collections.defaultdict(list)  # file -> sorted [(line, col, qual)]
         self.qual_rows = collections.defaultdict(list)  # qual -> [(file, line, col)]
         self.fns = doc["fns"]
+        # SOUNDNESS R1768 — files the scan left out BY POLICY and disclosed in the report's `excluded` (the sidecar carries
+        # the walk's per-file record; the report carries only the classes). A site in one is NOT-COVERED, never SILENT.
+        self.excluded = {norm(x["file"]): x["class"] for x in (doc.get("excluded") or [])}
+        self.has_excluded_record = "excluded" in doc
         for f in doc["fns"]:
             at = f.get("at") or ""
             try:
@@ -337,13 +341,24 @@ def classify_site(o, scan, sites_written, sites_exp, used):
     named = o.get("named") or {}
     if dispatch_site:
         truth_ext = ext_identities(named)
+    # `x.into()` through core's blanket `Into` runs `U::from(x)`: when that `From` impl is this crate's, the local unit is
+    # the target (step 1's finding: a correctly typed `.into()` read SILENT because rustc's item was the blanket `into`).
+    vi = ((o.get("via_into") or {}).get("def")) if (o.get("via_into") or {}).get("status") == "item" else None
+    if vi and vi.get("ident") and (vi.get("local") or norm(vi["ident"]["file"]).startswith(scan.root + os.sep)):
+        ow = scan.owner_of(vi["ident"]["file"], vi["ident"]["line"], vi["ident"]["col"])
+        if ow:
+            truth_local = ("L", norm(vi["ident"]["file"]), ow[0], ow[1])
+            truth_ext = set()
+            d = vi
 
     # Verdict.
     verdict, extras = None, 0
-    if not matched or not has_output:
+    if (not matched or not has_output) and not (vi and truth_local and truth_local[0] == "L" and scan.final_cg):
         verdict = silent()
     else:
         reached = False
+        if a is None:
+            a = answer(scan, [], None)
         size = len(a["targets"]) + len(a["ext"])
         if truth_local and truth_local[0] == "L":
             reached = truth_local in a["targets"]
@@ -364,6 +379,16 @@ def classify_site(o, scan, sites_written, sites_exp, used):
                               x.split("::")[-2] in {o_ for (_, o_, _) in truth_ext} for x in a["dispatch"])
                 if reached:
                     size = max(size, 1)
+        if not reached and vi and truth_local and truth_local[0] == "L" and scan.final_cg:
+            # `.into()` -> a local `From`: the scanner forms that edge after the fixpoint, so it is not in the per-site
+            # record. The FINAL call graph answers it, but only for this one route: credit from the graph is per caller, not
+            # per site, so another call to the same target elsewhere in the caller would read as this site's (a false
+            # AGREE). Every other site is judged on its own record.
+            ow = scan.owner_of(file, line, col)
+            tqual = next((r[2] for r in scan.fn_rows.get(truth_local[1], []) if (r[0], r[1]) == (truth_local[2], truth_local[3])), None)
+            if ow and tqual and tqual in scan.final_cg.get(ow[2], ()):
+                reached = True
+                via = (via or "") + "+final-graph"
         if reached:
             verdict = "AGREE-EXACT" if size <= 1 else "AGREE-SUPERSET"
             extras = max(0, size - 1)
@@ -373,6 +398,8 @@ def classify_site(o, scan, sites_written, sites_exp, used):
             verdict = "DISAGREE-TARGET"
         else:
             verdict = silent()
+            if not matched:
+                a = None
 
     # Class (non-AGREE only).
     cls = None
@@ -444,7 +471,7 @@ def macro_origin(o):
     return ("std-macro:" if std else "macro:") + outer
 
 
-def compare(oracle_dir, sidecar_dir, root=None, not_covered=None):
+def compare(oracle_dir, sidecar_dir, root=None, not_covered=None, report=None):
     crates, osites = load_oracle(oracle_dir) if oracle_dir and os.path.isdir(oracle_dir) else ([], [])
     docs = load_sidecar(sidecar_dir)
     root = norm(root) if root else None
@@ -455,6 +482,11 @@ def compare(oracle_dir, sidecar_dir, root=None, not_covered=None):
         scan = Scan(doc)
         if root and not scan.root.startswith(root):
             continue
+        scan.final_cg = {}
+        if report:
+            cg = report.replace(".scan.json", ".scan.callgraph.json")
+            if os.path.exists(cg):
+                scan.final_cg = {k: set(v) for k, v in json.load(open(cg)).items()}
         sites_written = {k: v for k, v in scan.sites.items() if k[3] == 0}
         sites_exp = {k: v for k, v in scan.sites.items() if k[3] == 1}
         used = set()
@@ -487,6 +519,13 @@ def compare(oracle_dir, sidecar_dir, root=None, not_covered=None):
                          "why": "span outside the scanned source tree", "file": o["key"]["file"],
                          "line": o["key"]["line"], "col": o["key"]["col"], "form": o["form"], "member": o.get("member")})
         for o in mine:
+            xf = scan.excluded.get(norm(o["key"]["file"]))
+            if xf:
+                excluded["oracle-site-in-disclosed-exclusion(R1768)"] += 1
+                rows.append({"side": "oracle", "verdict": "NOT-COVERED", "class": None,
+                             "why": "file excluded by the scan and disclosed (excluded: %s)" % xf, "file": norm(o["key"]["file"]),
+                             "line": o["key"]["line"], "col": o["key"]["col"], "form": o["form"], "member": o.get("member")})
+                continue
             st = (o.get("resolved") or {}).get("status")
             if st in ("not-fn", None) and o["form"] != "callexpr":
                 excluded["not-a-fn-call(ctor/const)"] += 1
@@ -603,8 +642,9 @@ def main():
     ap.add_argument("--json")
     ap.add_argument("--sites")
     ap.add_argument("--not-covered")
+    ap.add_argument("--report", help="the scan report (its .callgraph.json is the scanner's final graph)")
     a = ap.parse_args()
-    crates, rows, excluded = compare(a.oracle, a.sidecar, a.root, a.not_covered)
+    crates, rows, excluded = compare(a.oracle, a.sidecar, a.root, a.not_covered, a.report)
     print(summarize(rows, excluded, a.label))
     if a.json:
         with open(a.json, "w") as fh:

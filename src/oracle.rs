@@ -16,11 +16,11 @@
 //!
 //! Desugared calls (`for`, `?`, `.await`, operators) are LABELLED, not dropped. A site inside a macro expansion is keyed
 //! to the OUTERMOST invocation in written code and marked `exp`.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
-use rustc_hir::def::DefKind;
-use rustc_hir::def_id::DefId;
-use rustc_hir::{Expr, ExprKind, QPath};
+use rustc_hir::def::{DefKind, Res};
+use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_hir::{Expr, ExprKind, HirId, Node, PatKind, QPath};
 use rustc_lint::LateContext;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
 use rustc_span::{ExpnKind, Span};
@@ -29,6 +29,11 @@ pub(crate) struct Oracle {
     dir: String,
     lines: Vec<String>,
     files: HashMap<String, String>,
+    /// CENSUS — the expression `record` last keyed (its HirId and its `site` fragment), so the effects and edges the lint
+    /// adds while analysing that same expression are keyed to the same site.
+    cur: Option<(HirId, String)>,
+    /// CENSUS — unit, contribution and post-edge lines, written to their own file (`.census`) beside the site dump.
+    census: Vec<String>,
 }
 
 pub(crate) fn from_env() -> Option<Oracle> {
@@ -36,7 +41,7 @@ pub(crate) fn from_env() -> Option<Oracle> {
     if dir.is_empty() {
         return None;
     }
-    Some(Oracle { dir, lines: Vec::new(), files: HashMap::new() })
+    Some(Oracle { dir, lines: Vec::new(), files: HashMap::new(), cur: None, census: Vec::new() })
 }
 
 fn esc(s: &str) -> String {
@@ -309,6 +314,25 @@ impl Oracle {
             (Some(d), Some(a)) => (self.resolve(cx, d, a, false), self.resolve(cx, d, a, true)),
             _ => ("null".into(), "null".into()),
         };
+        // CENSUS — `x.into()` runs core's blanket `impl<T, U: From<T>> Into<U> for T`, whose body calls `U::from(x)`: the
+        // item that really runs is the `From` impl. rustc's `resolved` names the blanket item; this names the impl.
+        let via_into = match (named, args) {
+            (Some(d), Some(a)) if tcx.opt_item_name(d).is_some_and(|n| n.as_str() == "into")
+                && tcx.trait_of_assoc(d).is_some_and(|t| tcx.is_diagnostic_item(rustc_span::sym::Into, t))
+                && a.len() == 2 =>
+            {
+                match tcx.get_diagnostic_item(rustc_span::sym::From).and_then(|ft| {
+                    tcx.associated_item_def_ids(ft).iter().copied().find(|f| tcx.opt_item_name(*f).is_some_and(|n| n.as_str() == "from"))
+                }) {
+                    Some(from_fn) => {
+                        let fa = tcx.mk_args(&[a[1], a[0]]);
+                        self.resolve(cx, from_fn, fa, true)
+                    }
+                    None => "null".into(),
+                }
+            }
+            _ => "null".into(),
+        };
         // Receiver: unadjusted, adjusted, and every autoderef/autoref step between.
         let recv_s = match recv {
             Some(r) => {
@@ -369,12 +393,258 @@ impl Oracle {
             Some(d) => tcx.opt_item_name(d).map(|n| n.to_string()).unwrap_or_default(),
             None => String::new(),
         };
+        self.cur = Some((expr.hir_id, site.clone()));
+        let recv_origin = match recv {
+            Some(r) => {
+                let mut v = Vec::new();
+                self.origin(cx, r, 0, &mut v);
+                format!("[{}]", v.join(","))
+            }
+            None => "null".into(),
+        };
         self.lines.push(format!(
-            "{{\"kind\":\"site\",\"form\":{},\"member\":{},{site},\"named\":{named_s},\"resolved\":{resolved},\"mono\":{mono},\"recv\":{recv_s},\"written_self\":{},\"caller\":{caller},\"caller_exp\":{caller_exp}}}",
+            "{{\"kind\":\"site\",\"via_into\":{via_into},\"recv_origin\":{recv_origin},\"form\":{},\"member\":{},{site},\"named\":{named_s},\"resolved\":{resolved},\"mono\":{mono},\"recv\":{recv_s},\"written_self\":{},\"caller\":{caller},\"caller_exp\":{caller_exp}}}",
             esc(&form),
             esc(&member),
             written_self.as_deref().map(esc).unwrap_or_else(|| "null".into())
         ));
+    }
+
+    /// The `key` fragment `site` would give a span (outermost macro invocation, else the span itself).
+    fn key_of(&mut self, cx: &LateContext<'_>, sp: Span) -> String {
+        let mut s = sp;
+        let mut in_macro = false;
+        let mut guard = 0;
+        while s.from_expansion() && guard < 64 {
+            guard += 1;
+            let d = s.ctxt().outer_expn_data();
+            match d.kind {
+                ExpnKind::Macro(..) => in_macro = true,
+                ExpnKind::Root => break,
+                _ => {}
+            }
+            s = d.call_site;
+        }
+        if in_macro { self.pos(cx, s) } else { self.pos(cx, sp) }
+    }
+
+    /// CENSUS — where a method receiver's VALUE came from, in rustc's own HIR: a chain of steps from the receiver to the
+    /// call, binding or parameter that produced it. The comparator joins each call step to the scanner's verdict at that
+    /// site, which is what splits an untyped receiver into "a name upstream did not resolve" and "the typer could not
+    /// follow the value". Bounded; never consulted by the lint.
+    fn origin<'tcx>(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'tcx>, depth: usize, out: &mut Vec<String>) {
+        if depth > 6 || out.len() > 8 {
+            return;
+        }
+        let tcx = cx.tcx;
+        match e.kind {
+            ExprKind::AddrOf(_, _, x) | ExprKind::DropTemps(x) | ExprKind::Cast(x, _) | ExprKind::Type(x, _) => {
+                self.origin(cx, x, depth, out)
+            }
+            ExprKind::Unary(_, x) => {
+                out.push("{\"k\":\"unary\"}".into());
+                self.origin(cx, x, depth + 1, out)
+            }
+            ExprKind::Field(b, f) => {
+                out.push(format!("{{\"k\":\"field\",\"name\":{}}}", esc(f.as_str())));
+                self.origin(cx, b, depth + 1, out)
+            }
+            ExprKind::Index(b, _, _) => {
+                out.push("{\"k\":\"index\"}".into());
+                self.origin(cx, b, depth + 1, out)
+            }
+            ExprKind::MethodCall(seg, r, _, _) => {
+                let key = self.key_of(cx, seg.ident.span);
+                out.push(format!("{{\"k\":\"mcall\",\"member\":{},\"key\":{key}}}", esc(seg.ident.as_str())));
+                // A method's result is typed from its receiver: the receiver's own origin is the next step.
+                self.origin(cx, r, depth + 1, out)
+            }
+            ExprKind::Call(callee, _) => {
+                let sp = match callee.kind {
+                    ExprKind::Path(QPath::Resolved(_, p)) => p.segments.last().map(|s| s.ident.span).unwrap_or(callee.span),
+                    ExprKind::Path(QPath::TypeRelative(_, seg)) => seg.ident.span,
+                    _ => callee.span,
+                };
+                let key = self.key_of(cx, sp);
+                out.push(format!("{{\"k\":\"call\",\"key\":{key}}}"));
+            }
+            ExprKind::Match(scrut, _, src) => {
+                out.push(format!("{{\"k\":\"match\",\"src\":{}}}", esc(&format!("{src:?}"))));
+                self.origin(cx, scrut, depth + 1, out)
+            }
+            ExprKind::Path(QPath::Resolved(None, p)) => match p.res {
+                Res::Local(hid) => self.binding_origin(cx, hid, depth, out),
+                Res::Def(dk, _) => out.push(format!("{{\"k\":\"item\",\"dk\":{}}}", esc(&format!("{dk:?}")))),
+                ref r => out.push(format!("{{\"k\":\"res\",\"res\":{}}}", esc(&format!("{r:?}")))),
+            },
+            _ => {
+                let k = format!("{:?}", e.kind);
+                let k = k.split(['(', ' ', '{']).next().unwrap_or("?").to_string();
+                let in_mac = e.span.from_expansion();
+                out.push(format!("{{\"k\":\"expr\",\"expr\":{},\"exp\":{in_mac}}}", esc(&k)));
+            }
+        }
+        let _ = tcx;
+    }
+
+    fn binding_origin<'tcx>(&mut self, cx: &LateContext<'tcx>, hid: HirId, depth: usize, out: &mut Vec<String>) {
+        let tcx = cx.tcx;
+        // Climb out of the binding pattern to the node that introduces it.
+        let mut cur = hid;
+        let mut nested = false;
+        for _ in 0..16 {
+            match tcx.parent_hir_node(cur) {
+                Node::Pat(p) => {
+                    nested = true;
+                    cur = p.hir_id;
+                }
+                Node::PatField(f) => {
+                    nested = true;
+                    cur = f.hir_id;
+                }
+                Node::Param(param) => {
+                    let owner = tcx.hir_enclosing_body_owner(param.hir_id);
+                    let closure = matches!(tcx.def_kind(owner.to_def_id()), DefKind::Closure);
+                    let annotated = param.ty_span != param.pat.span;
+                    let simple = matches!(param.pat.kind, PatKind::Binding(..)) && !nested;
+                    out.push(format!(
+                        "{{\"k\":\"param\",\"closure\":{closure},\"annotated\":{annotated},\"destructured\":{}}}",
+                        !simple
+                    ));
+                    return;
+                }
+                Node::LetStmt(l) => {
+                    out.push(format!(
+                        "{{\"k\":\"let\",\"annotated\":{},\"destructured\":{nested},\"init\":{}}}",
+                        l.ty.is_some(),
+                        l.init.is_some()
+                    ));
+                    if let Some(i) = l.init {
+                        self.origin(cx, i, depth + 1, out);
+                    }
+                    return;
+                }
+                Node::Arm(_) => {
+                    out.push("{\"k\":\"arm-binding\"}".into());
+                    if let Node::Expr(m) = tcx.parent_hir_node(tcx.parent_hir_id(cur))
+                        && let ExprKind::Match(scrut, ..) = m.kind
+                    {
+                        self.origin(cx, scrut, depth + 1, out);
+                    }
+                    return;
+                }
+                Node::Expr(e) => {
+                    if let ExprKind::Let(le) = e.kind {
+                        out.push("{\"k\":\"if-let-binding\"}".into());
+                        self.origin(cx, le.init, depth + 1, out);
+                    } else {
+                        out.push("{\"k\":\"binding\",\"in\":\"expr\"}".into());
+                    }
+                    return;
+                }
+                other => {
+                    let k = format!("{other:?}");
+                    let k = k.split(['(', ' ', '{']).next().unwrap_or("?").to_string();
+                    out.push(format!("{{\"k\":\"binding\",\"in\":{}}}", esc(&k)));
+                    return;
+                }
+            }
+        }
+    }
+
+    fn vpath(cx: &LateContext<'_>, d: LocalDefId) -> String {
+        esc(&cx.tcx.def_path(d.to_def_id()).to_string_no_crate_verbose())
+    }
+
+    /// CENSUS — the direct effects and local edges the lint added while analysing ONE expression (see `check_expr`).
+    pub(crate) fn note_expr<'tcx>(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        expr: &'tcx Expr<'tcx>,
+        caller: LocalDefId,
+        direct: Option<&BTreeSet<&'static str>>,
+        calls: Option<&HashSet<LocalDefId>>,
+        cross: Option<&BTreeSet<&'static str>>,
+    ) {
+        let empty = |n: usize| n == 0;
+        if empty(direct.map_or(0, |d| d.len())) && empty(calls.map_or(0, |c| c.len())) && empty(cross.map_or(0, |c| c.len())) {
+            return;
+        }
+        let (site, nosite) = match &self.cur {
+            Some((h, s)) if *h == expr.hir_id => (s.clone(), false),
+            _ => {
+                // A path in CALLEE position (`f(..)`'s `f`) is its call's site: `record` keys the call by the path's last
+                // segment, so the same key joins the edge the lint forms while visiting the path to that call.
+                let callee_of_call = matches!(expr.kind, ExprKind::Path(_))
+                    && matches!(cx.tcx.parent_hir_node(expr.hir_id), Node::Expr(p) if matches!(p.kind, ExprKind::Call(c, _) if c.hir_id == expr.hir_id));
+                let sp = match expr.kind {
+                    ExprKind::Path(QPath::Resolved(_, p)) if callee_of_call => p.segments.last().map(|s| s.ident.span).unwrap_or(expr.span),
+                    ExprKind::Path(QPath::TypeRelative(_, seg)) if callee_of_call => seg.ident.span,
+                    _ => expr.span,
+                };
+                let k = self.key_of(cx, sp);
+                (format!("\"key\":{k}"), !callee_of_call)
+            }
+        };
+        let eff = direct.map(|d| d.iter().map(|e| esc(e)).collect::<Vec<_>>().join(",")).unwrap_or_default();
+        let crs = cross.map(|d| d.iter().map(|e| esc(e)).collect::<Vec<_>>().join(",")).unwrap_or_default();
+        let mut edges: Vec<String> = calls.map(|c| c.iter().map(|d| Self::vpath(cx, *d)).collect()).unwrap_or_default();
+        edges.sort();
+        let ek = format!("{:?}", expr.kind);
+        let ek = ek.split(['(', ' ', '{']).next().unwrap_or("?").to_string();
+        self.census.push(format!(
+            "{{\"kind\":\"contrib\",{site},\"nosite\":{nosite},\"expr\":{},\"caller\":{},\"eff\":[{eff}],\"cross\":[{crs}],\"edges\":[{}]}}",
+            esc(&ek),
+            Self::vpath(cx, caller),
+            edges.join(",")
+        ));
+    }
+
+    /// CENSUS — edges the lint adds after the walk (callback flow, implicit drops), which no single expression owns.
+    pub(crate) fn note_post_edges(
+        &mut self,
+        cx: &LateContext<'_>,
+        kind: &str,
+        before: &HashMap<LocalDefId, HashSet<LocalDefId>>,
+        after: &HashMap<LocalDefId, HashSet<LocalDefId>>,
+    ) {
+        let none = HashSet::new();
+        for (f, ts) in after {
+            let b = before.get(f).unwrap_or(&none);
+            for t in ts.difference(b) {
+                self.census.push(format!(
+                    "{{\"kind\":\"postedge\",\"ekind\":{},\"caller\":{},\"target\":{}}}",
+                    esc(kind),
+                    Self::vpath(cx, *f),
+                    Self::vpath(cx, *t)
+                ));
+            }
+        }
+    }
+
+    /// CENSUS — every unit the lint analysed, with its final (transitive) effect set and its own direct set.
+    pub(crate) fn units(
+        &mut self,
+        cx: &LateContext<'_>,
+        eff: &HashMap<LocalDefId, BTreeSet<&'static str>>,
+        direct: &HashMap<LocalDefId, BTreeSet<&'static str>>,
+    ) {
+        let tcx = cx.tcx;
+        for (f, es) in eff {
+            let did = f.to_def_id();
+            let ident = tcx.def_ident_span(did).map(|s| self.pos(cx, s)).unwrap_or_else(|| "null".into());
+            let span = self.pos(cx, tcx.def_span(did));
+            let path = rustc_middle::ty::print::with_no_trimmed_paths!(tcx.def_path_str(did));
+            let d = direct.get(f).map(|d| d.iter().map(|e| esc(e)).collect::<Vec<_>>().join(",")).unwrap_or_default();
+            self.census.push(format!(
+                "{{\"kind\":\"unit\",\"def\":{},\"path\":{},\"dk\":{},\"ident\":{ident},\"span\":{span},\"exp\":{},\"eff\":[{}],\"direct\":[{d}]}}",
+                Self::vpath(cx, *f),
+                esc(&path),
+                esc(&format!("{:?}", tcx.def_kind(did))),
+                tcx.def_span(did).from_expansion(),
+                es.iter().map(|e| esc(e)).collect::<Vec<_>>().join(",")
+            ));
+        }
     }
 
     pub(crate) fn flush(&mut self, cx: &LateContext<'_>) {
@@ -418,5 +688,11 @@ impl Oracle {
         }
         let _ = std::fs::write(file, body);
         self.lines.clear();
+        if !self.census.is_empty() {
+            let mut c = self.census.join("\n");
+            c.push('\n');
+            let _ = std::fs::write(format!("{}/{krate}.{types}.{}.census", self.dir, std::process::id()), c);
+            self.census.clear();
+        }
     }
 }

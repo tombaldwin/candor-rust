@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Unit-level census: which effects does candor-scan miss, PER UNIT, against an independent engine, and which site loses each.
+
+    census.py --oracle DIR --sidecar DIR --report SCAN_JSON [--root SRC] [--pub-report SCAN_JSON] [--json OUT] [--label L]
+
+THE INDEPENDENT ENGINE is the dylint lint in this repo (rustc-typed, HIR + MIR drop edges), whose per-unit TRANSITIVE effect
+set the oracle dump writes beside its site records (`*.census`, `CANDOR_ORACLE_DUMP`). It shares candor-scan's leaf
+classifier (`candor-classify`), so a classification difference is held constant and what remains is resolution, typing,
+dispatch and coverage. Its own under-reports are invisible here (both engines silent): the matrix calibration measures that.
+
+A GATE FLIP is a (unit, effect E) where the lint's unit carries E and candor-scan's unit does not, so `deny E <unit>` reads 0
+on candor-scan. `flipEU` additionally requires candor-scan's unit to carry no `Unknown`, so `deny E Unknown <unit>` reads 0 too.
+
+ATTRIBUTION. For each flip, the lint's own per-expression record says which expressions in the unit's body contributed E:
+a leaf (a classified call), or a local edge to a callee whose lint set carries E. Each is resolved against candor-scan:
+  * an edge candor-scan's FINAL call graph also has (any route, including post-fixpoint ones such as `.into()` -> `From`):
+    the loss is downstream, in the callee -> recurse;
+  * otherwise the comparator's verdict and class at that site (compare.py), or LINT-MECHANISM when the lint formed the
+    edge with no call site of its own (deref adjustment, static force, callback flow, implicit drop).
+The leaf-level causes reached are the flip's ROOT causes.
+"""
+import argparse
+import collections
+import glob
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compare as C  # noqa: E402  (the in-tree comparator; never copy it -- R288)
+
+UNKNOWN = "Unknown"
+
+
+def load_census(d):
+    units, contrib, post = {}, collections.defaultdict(list), collections.defaultdict(list)
+    files = sorted(glob.glob(os.path.join(d, "*.census")))
+    for f in files:
+        for line in open(f):
+            r = json.loads(line)
+            k = r["kind"]
+            if k == "unit":
+                units[r["def"]] = r
+            elif k == "contrib":
+                contrib[r["caller"]].append(r)
+            elif k == "postedge":
+                post[r["caller"]].append(r)
+    return files, units, contrib, post
+
+
+def key3(k):
+    return (C.norm(k["file"]), k["line"], k["col"])
+
+
+class Report:
+    def __init__(self, path):
+        d = json.load(open(path))
+        self.doc = d
+        self.fns = {}
+        for f in d.get("functions", []):
+            self.fns.setdefault(f["fn"], set()).update(f.get("inferred", []))
+        cg = path.replace(".scan.json", ".scan.callgraph.json")
+        self.cg = {}
+        if os.path.exists(cg):
+            self.cg = {k: set(v) for k, v in json.load(open(cg)).items()}
+        self.excluded_classes = [x.get("class") for x in d.get("excluded", [])]
+
+    def eff(self, q):
+        return self.fns.get(q)
+
+
+def map_unit(u, scan):
+    """The candor-scan qual of a lint unit, or (None, why)."""
+    sp = u.get("span") or {}
+    f = C.norm(sp.get("file", ""))
+    if not f or not f.startswith(scan.root + os.sep):
+        return None, "NOT-COVERED(outside scanned tree)"
+    if f in scan.excluded:
+        return None, "NOT-COVERED(excluded, disclosed: %s)" % scan.excluded[f]
+    rows = scan.fn_rows.get(f) or []
+    line, col = sp.get("line"), sp.get("col")
+    for (l, c, q) in rows:
+        if l == line and c == col:
+            return q, None
+    idl = (u.get("ident") or {}).get("line")
+    same = [q for (l, c, q) in rows if l in (line, idl)]
+    if len(set(same)) == 1:
+        return same[0], None
+    if u.get("exp"):
+        return None, "ABSENT(macro-generated unit)"
+    if not rows:
+        return None, "ABSENT(file has no scanned unit)"
+    return None, "ABSENT(no scanner unit at this definition)"
+
+
+def t_cause(row, osite, site_rows, osites_by_key):
+    """Split a T site by WHY the receiver was untyped, from rustc's provenance of the receiver value."""
+    steps = (osite or {}).get("recv_origin") or []
+    if not steps:
+        return "T:no-provenance"
+    upstream = []
+    for s in steps:
+        if s.get("k") in ("call", "mcall") and s.get("key"):
+            r = site_rows.get(key3(s["key"]))
+            if r is not None:
+                upstream.append((s["k"], r.get("verdict"), r.get("class")))
+            else:
+                o = osites_by_key.get(key3(s["key"])) or {}
+                st = (o.get("resolved") or {}).get("status")
+                upstream.append((s["k"], "AGREE(ctor/const)" if st == "not-fn" else "NO-ROW", None))
+    if any(v and not v.startswith("AGREE") and c == "N/M" for (_, v, c) in upstream):
+        return "T<-N (a name upstream did not resolve)"
+    for s in steps:
+        if s.get("k") == "param":
+            if s.get("closure") and not s.get("annotated"):
+                return "T:typer(unannotated closure parameter)"
+            if s.get("annotated") and not s.get("closure"):
+                return "T:typer?(annotated fn parameter%s)" % (", destructured" if s.get("destructured") else "")
+            return "T:typer(parameter)"
+    if any(v and not v.startswith("AGREE") and c == "T" for (_, v, c) in upstream):
+        return "T<-T (an untyped value upstream)"
+    if any(v == "AGREE(ctor/const)" for (_, v, c) in upstream):
+        return "T:typer(value built by a constructor)"
+    if any(v and v.startswith("AGREE") for (_, v, c) in upstream):
+        return "T:typer(return type of a resolved call not followed)"
+    if any(v and not v.startswith("AGREE") for (_, v, c) in upstream):
+        return "T<-%s upstream" % next(c or v for (_, v, c) in upstream if v and not v.startswith("AGREE"))
+    return "T:typer(%s)" % ",".join(s.get("k", "?") for s in steps[:3])
+
+
+def run(oracle_dir, sidecar_dir, report, root=None, pub_report=None, label=""):
+    crates, rows, excluded = C.compare(oracle_dir, sidecar_dir, root, None, report)
+    _, osites = C.load_oracle(oracle_dir)
+    cfiles, units, contrib, post = load_census(oracle_dir)
+    if not cfiles:
+        raise SystemExit("census: NOT A MEASUREMENT -- no *.census in %s (old oracle, or the crate did not build)" % oracle_dir)
+    docs = C.load_sidecar(sidecar_dir)
+    root = C.norm(root) if root else None
+    docs = [d for d in docs if not root or C.norm(d["root"]).startswith(root)]
+    if len(docs) != 1:
+        raise SystemExit("census: expected one sidecar doc under the root, found %d" % len(docs))
+    scan = C.Scan(docs[0])
+    if not scan.has_excluded_record:
+        raise SystemExit("census: the sidecar carries no `excluded` record (pre-R1768 binary): NOT A MEASUREMENT")
+    rep = Report(report)
+    prep = Report(pub_report) if pub_report else None
+    site_rows = {}
+    for r in rows:
+        if r["side"] == "oracle" and r.get("file"):
+            site_rows.setdefault((C.norm(r["file"]), r["line"], r["col"]), r)
+    osite_by_key = {}
+    for o in osites:
+        if o.get("key") and not o.get("exp"):
+            osite_by_key.setdefault(key3(o["key"]), o)
+
+    def lint_eff(d):
+        u = units.get(d)
+        return set(u["eff"]) if u else set()
+
+    qual_of, why_absent = {}, {}
+    for d, u in units.items():
+        if u["dk"] not in ("Fn", "AssocFn"):
+            continue
+        q, why = map_unit(u, scan)
+        qual_of[d] = q
+        if why:
+            why_absent[d] = why
+
+    memo = {}
+
+    def causes(d, e, depth=0, seen=None):
+        """Root causes of the scanner lacking e at lint unit d (which the lint charges)."""
+        seen = seen or set()
+        if (d, e) in memo:
+            return memo[(d, e)]
+        if (d, e) in seen or depth > 40:
+            return [{"cls": "CYCLE"}]
+        seen = seen | {(d, e)}
+        out = []
+        q = qual_of.get(d)
+        for c in contrib.get(d, []):
+            k = key3(c["key"])
+            r = site_rows.get(k)
+            loc = "%s:%s:%s" % (os.path.relpath(k[0], scan.root), k[1], k[2])
+            if e in c.get("eff", []) or e in c.get("cross", []):
+                if c.get("nosite") or r is None:
+                    out.append({"cls": "LINT-MECHANISM(leaf, %s)" % c.get("expr"), "site": loc, "unit": d})
+                elif r["verdict"].startswith("AGREE"):
+                    out.append({"cls": "LEAF-REACHED-NOT-CHARGED", "site": loc, "unit": d, "truth": r.get("truth")})
+                else:
+                    out.append(site_cause(r, loc, d))
+            for g in c.get("edges", []):
+                if e not in lint_eff(g):
+                    continue
+                gq = qual_of.get(g)
+                has_edge = q is not None and gq is not None and (gq == q or gq in rep.cg.get(q, set()))
+                if has_edge:
+                    ge = rep.eff(gq) or set()
+                    if e in ge:
+                        out.append({"cls": "PROPAGATION(scanner edge present, callee charged, caller not)", "site": loc, "unit": d})
+                    else:
+                        out.extend(causes(g, e, depth + 1, seen))
+                    continue
+                if gq is None and g in why_absent:
+                    out.append({"cls": "CALLEE-" + why_absent[g], "site": loc, "unit": d, "callee": units[g]["path"]})
+                    continue
+                if c.get("nosite") or r is None:
+                    out.append({"cls": "LINT-MECHANISM(edge, %s)" % c.get("expr"), "site": loc, "unit": d, "callee": units.get(g, {}).get("path")})
+                elif r["verdict"].startswith("AGREE"):
+                    cp = units.get(g, {}).get("path")
+                    if r.get("truth") and cp and C.strip_generics(r["truth"]) != C.strip_generics(cp):
+                        # The site resolved to a GENERIC callee; the lint's edge is to the impl the caller's type argument
+                        # selects inside it (monomorphisation), which candor-scan did not form.
+                        out.append({"cls": "D(generic callee: the caller's type argument dispatches inside it)", "site": loc,
+                                    "unit": d, "callee": cp, "truth": r.get("truth")})
+                    else:
+                        # The site agrees (it named this target) but the final graph has no edge: post-site loss.
+                        out.append({"cls": "SITE-AGREE-EDGE-MISSING", "site": loc, "unit": d, "callee": cp})
+                else:
+                    out.append(site_cause(r, loc, d, units.get(g, {}).get("path")))
+                # The callee may ALSO lack e on the scanner: a second loss behind the first.
+                if gq is not None and e not in (rep.eff(gq) or set()):
+                    for x in causes(g, e, depth + 1, seen):
+                        out.append(dict(x, behind=True))
+        for pe in post.get(d, []):
+            g = pe["target"]
+            if e not in lint_eff(g):
+                continue
+            gq = qual_of.get(g)
+            if q is not None and gq is not None and (gq == q or gq in rep.cg.get(q, set())):
+                if e not in (rep.eff(gq) or set()):
+                    out.extend(causes(g, e, depth + 1, seen))
+                continue
+            out.append({"cls": "LINT-MECHANISM(post-edge, %s)" % pe["ekind"], "unit": d, "callee": units.get(g, {}).get("path")})
+        if not out:
+            out.append({"cls": "UNATTRIBUTED", "unit": d})
+        # One root per (class, site, callee): the lint records a call and its callee path as two expressions.
+        seen_r, uniq = set(), []
+        for x in out:
+            k = (x.get("cls"), x.get("site"), x.get("callee"), x.get("unit"), x.get("behind"))
+            if k not in seen_r:
+                seen_r.add(k)
+                uniq.append(x)
+        out = uniq
+        memo[(d, e)] = out
+        return out
+
+    def site_cause(r, loc, d, callee=None):
+        cls = r.get("class") or r["verdict"]
+        x = {"cls": cls, "verdict": r["verdict"], "site": loc, "unit": d, "target_kind": r.get("target_kind"),
+             "truth": r.get("truth"), "member": r.get("member"), "form": r.get("form")}
+        if callee:
+            x["callee"] = callee
+        if cls == "T":
+            x["tcause"] = t_cause(r, osite_by_key.get((C.norm(r["file"]), r["line"], r["col"])), site_rows, osite_by_key)
+        if r["verdict"] == "NOT-COVERED":
+            x["cls"] = "NOT-COVERED(%s)" % (r.get("why") or "")
+        return x
+
+    flips = []
+    pub_flips = []
+    population = collections.Counter()
+    for d, u in sorted(units.items()):
+        if u["dk"] not in ("Fn", "AssocFn"):
+            continue
+        le = {x for x in u["eff"] if x != UNKNOWN}
+        q = qual_of.get(d)
+        population["lint units"] += 1
+        if le:
+            population["lint units with a concrete effect"] += 1
+        if q is None:
+            why = why_absent.get(d, "ABSENT")
+            population["unmapped: " + why] += 1
+            if not le:
+                continue
+            if why.startswith("NOT-COVERED"):
+                population["NOT-COVERED units carrying a concrete effect (not flips)"] += 1
+                continue
+            for e in sorted(le):
+                flips.append({"unit": d, "path": u["path"], "qual": None, "effect": e, "unit_state": why,
+                              "scan_has_unknown": False, "pub": None, "roots": [{"cls": why}]})
+            continue
+        se = rep.eff(q)
+        if se is None:
+            population["mapped, but no functions[] row (pure, or silent)"] += 1
+            se = set()
+        else:
+            population["mapped units"] += 1
+        miss = sorted(le - se)
+        if prep is not None:
+            pe = prep.eff(q) or set()
+            for e in sorted(le - pe):
+                pub_flips.append({"unit": d, "path": u["path"], "qual": q, "effect": e, "pub_has_unknown": UNKNOWN in pe,
+                                  "head_missing": e in miss})
+        for e in miss:
+            pub = None
+            if prep is not None:
+                pe = prep.eff(q)
+                pub = {"missing": e not in (pe or set()), "unknown": UNKNOWN in (pe or set())}
+            flips.append({"unit": d, "path": u["path"], "qual": q, "effect": e, "unit_state": "mapped",
+                          "scan_has_unknown": UNKNOWN in se, "pub": pub, "roots": causes(d, e)})
+    # Reverse: units where candor-scan charges a concrete effect the lint does not (a fabrication candidate, or a lint
+    # under-report -- the census cannot tell which; listed for the over-charge control, not counted as flips).
+    extra = []
+    for d, q in qual_of.items():
+        if q is None:
+            continue
+        se = {x for x in (rep.eff(q) or set()) if x != UNKNOWN}
+        le = {x for x in units[d]["eff"] if x != UNKNOWN}
+        if se - le:
+            extra.append({"unit": d, "qual": q, "scan_only": sorted(se - le)})
+    return {"label": label, "population": population, "flips": flips, "pub_flips": pub_flips, "scan_only": extra, "excluded": excluded,
+            "census_files": cfiles, "site_rows": len(rows)}
+
+
+def root_sig(f):
+    roots = [r for r in f["roots"] if not r.get("behind")]
+    clss = sorted({(r["cls"] + ("[" + r["tcause"] + "]" if r.get("tcause") else "")) for r in roots})
+    return " + ".join(clss)
+
+
+def summarize(res):
+    out = ["== census %s ==" % res["label"]]
+    for k, n in sorted(res["population"].items()):
+        out.append("  %-60s %d" % (k, n))
+    fl = res["flips"]
+    out.append("gate flips (unit, effect): %d   of which deny-E-Unknown also passes: %d" % (
+        len(fl), sum(1 for f in fl if not f["scan_has_unknown"])))
+    pf = res.get("pub_flips") or []
+    out.append("published-arm gate flips (mapped units): %d   (also flipped at HEAD: %d; fixed at HEAD: %d)" % (
+        len(pf), sum(1 for f in pf if f["head_missing"]), sum(1 for f in pf if not f["head_missing"])))
+    out.append("HEAD flips on mapped units not flipped on the published arm (HEAD-only): %d" % sum(
+        1 for f in fl if f.get("pub") and not f["pub"]["missing"]))
+    by = collections.Counter(root_sig(f) for f in fl)
+    for k, n in by.most_common():
+        out.append("  %4d  %s" % (n, k))
+    return "\n".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--oracle", required=True)
+    ap.add_argument("--sidecar", required=True)
+    ap.add_argument("--report", required=True)
+    ap.add_argument("--pub-report")
+    ap.add_argument("--root")
+    ap.add_argument("--label", default="")
+    ap.add_argument("--json")
+    a = ap.parse_args()
+    res = run(a.oracle, a.sidecar, a.report, a.root, a.pub_report, a.label)
+    print(summarize(res))
+    if a.json:
+        with open(a.json, "w") as fh:
+            json.dump(res, fh, indent=1, default=list)
+
+
+if __name__ == "__main__":
+    main()

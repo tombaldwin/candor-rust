@@ -4196,57 +4196,9 @@ impl Candor {
     }
 }
 
-impl<'tcx> LateLintPass<'tcx> for Candor {
-    fn check_crate(&mut self, cx: &LateContext<'tcx>) {
-        // Cross-crate resolution: load THIS project's other crates' reports so calls into them
-        // resolve transitively. dylint lints dependencies before dependents, so a dependency
-        // crate's report is on disk when we get here. Load from CANDOR_JSON (snapshot/audit) OR
-        // CANDOR_BASELINE (the guard) — so the guard computes the SAME cross-inclusive effect set
-        // the baseline was snapshotted with, instead of a within-crate-only set (which would make
-        // the AS-EFF-005 diff compare two different effect models).
-        // CANDOR_JSON (snapshot/audit) loads LIVE sibling reports — version-trust applies. CANDOR_BASELINE
-        // (the guard) loads the baseline's OWN snapshot of the siblings — trust them as-is, so the engine
-        // moving ahead of the baseline doesn't spuriously downgrade them to Unknown (see load_cross_reports).
-        // CANDOR_REPORTS is a READ-ONLY cross-resolution prefix for ENFORCEMENT modes (policy/strict),
-        // which write no report of their own: snapshot every workspace crate once, then enforce with the
-        // siblings loaded, so a policy boundary (e.g. a host allowlist) sees effects/hosts that physically
-        // live in another crate. Live trust applies, exactly like CANDOR_JSON.
-        let (prefix, trust_siblings) = match candor_report::env::operator("CANDOR_JSON") {
-            Ok(p) => (Some(p), false),
-            Err(_) => match candor_report::env::operator("CANDOR_BASELINE") {
-                Ok(p) => (Some(p), true),
-                Err(_) => (candor_report::env::operator("CANDOR_REPORTS").ok(), false),
-            },
-        };
-        if let Some(prefix) = prefix {
-            let me = unit_file_key(cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str());
-            let me_kind = cx
-                .tcx
-                .crate_types()
-                .iter()
-                .map(|t| format!("{t:?}"))
-                .collect::<Vec<_>>()
-                .join("-");
-            let cd = load_cross_reports(&prefix, &me, &me_kind, trust_siblings);
-            self.cross = cd.effects;
-            self.cross_hosts = cd.hosts;
-            self.cross_cmds = cd.cmds;
-            self.cross_paths = cd.paths;
-            self.cross_tables = cd.tables;
-            // Layering (AS-EFF-009): load the `forbid`-target scopes each sibling function reaches, from
-            // the `layerreach` sidecars written earlier in this enforce pass (dependency-first order).
-            if !self.layer_rules.is_empty() {
-                self.cross_layer_reach = load_layer_reach(&prefix);
-            }
-            self.reports_prefix = Some(prefix);
-        }
-    }
-
-    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        // STEP 0b oracle dump — read-only, and absent unless `CANDOR_ORACLE_DUMP` is set.
-        if let Some(o) = self.oracle.as_mut() {
-            o.record(cx, expr);
-        }
+impl Candor {
+    /// The lint's per-expression analysis (`LateLintPass::check_expr` is the entry; it wraps this for the census dump).
+    fn check_expr_body<'tcx>(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         // Named-fn-as-value call edge — see edge_fn_value_reference.
         self.edge_fn_value_reference(cx, expr);
 
@@ -4559,21 +4511,113 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         };
         self.record_resolved_call(cx, expr, caller, def_id, trait_did, body);
     }
+}
+
+impl<'tcx> LateLintPass<'tcx> for Candor {
+    fn check_crate(&mut self, cx: &LateContext<'tcx>) {
+        // Cross-crate resolution: load THIS project's other crates' reports so calls into them
+        // resolve transitively. dylint lints dependencies before dependents, so a dependency
+        // crate's report is on disk when we get here. Load from CANDOR_JSON (snapshot/audit) OR
+        // CANDOR_BASELINE (the guard) — so the guard computes the SAME cross-inclusive effect set
+        // the baseline was snapshotted with, instead of a within-crate-only set (which would make
+        // the AS-EFF-005 diff compare two different effect models).
+        // CANDOR_JSON (snapshot/audit) loads LIVE sibling reports — version-trust applies. CANDOR_BASELINE
+        // (the guard) loads the baseline's OWN snapshot of the siblings — trust them as-is, so the engine
+        // moving ahead of the baseline doesn't spuriously downgrade them to Unknown (see load_cross_reports).
+        // CANDOR_REPORTS is a READ-ONLY cross-resolution prefix for ENFORCEMENT modes (policy/strict),
+        // which write no report of their own: snapshot every workspace crate once, then enforce with the
+        // siblings loaded, so a policy boundary (e.g. a host allowlist) sees effects/hosts that physically
+        // live in another crate. Live trust applies, exactly like CANDOR_JSON.
+        let (prefix, trust_siblings) = match candor_report::env::operator("CANDOR_JSON") {
+            Ok(p) => (Some(p), false),
+            Err(_) => match candor_report::env::operator("CANDOR_BASELINE") {
+                Ok(p) => (Some(p), true),
+                Err(_) => (candor_report::env::operator("CANDOR_REPORTS").ok(), false),
+            },
+        };
+        if let Some(prefix) = prefix {
+            let me = unit_file_key(cx.tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE).as_str());
+            let me_kind = cx
+                .tcx
+                .crate_types()
+                .iter()
+                .map(|t| format!("{t:?}"))
+                .collect::<Vec<_>>()
+                .join("-");
+            let cd = load_cross_reports(&prefix, &me, &me_kind, trust_siblings);
+            self.cross = cd.effects;
+            self.cross_hosts = cd.hosts;
+            self.cross_cmds = cd.cmds;
+            self.cross_paths = cd.paths;
+            self.cross_tables = cd.tables;
+            // Layering (AS-EFF-009): load the `forbid`-target scopes each sibling function reaches, from
+            // the `layerreach` sidecars written earlier in this enforce pass (dependency-first order).
+            if !self.layer_rules.is_empty() {
+                self.cross_layer_reach = load_layer_reach(&prefix);
+            }
+            self.reports_prefix = Some(prefix);
+        }
+    }
+
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
+        // STEP 0b oracle dump — read-only, and absent unless `CANDOR_ORACLE_DUMP` is set.
+        let Some(o) = self.oracle.as_mut() else {
+            self.check_expr_body(cx, expr);
+            return;
+        };
+        o.record(cx, expr);
+        // CENSUS (unit-level): what THIS expression adds to its function's direct effects and local call edges. The
+        // function's own entries are taken out first and their union put back after, so nothing the body reads changes
+        // (it never reads these maps for the function it is filling) and the report is the same with the dump off.
+        let caller = enclosing_named_fn(cx.tcx, expr.hir_id);
+        let stash = caller.map(|c| (self.direct.remove(&c), self.calls.remove(&c), self.via_cross.remove(&c)));
+        self.check_expr_body(cx, expr);
+        if let (Some(c), Some((d0, c0, x0))) = (caller, stash) {
+            let d1 = self.direct.remove(&c);
+            let c1 = self.calls.remove(&c);
+            let x1 = self.via_cross.remove(&c);
+            if let Some(o) = self.oracle.as_mut() {
+                o.note_expr(cx, expr, c, d1.as_ref(), c1.as_ref(), x1.as_ref());
+            }
+            fn put<K: std::hash::Hash + Eq, S: Extend<<S as IntoIterator>::Item> + IntoIterator>(
+                m: &mut HashMap<K, S>,
+                k: K,
+                a: Option<S>,
+                b: Option<S>,
+            ) {
+                match (a, b) {
+                    (Some(mut a), Some(b)) => {
+                        a.extend(b);
+                        m.insert(k, a);
+                    }
+                    (Some(a), None) | (None, Some(a)) => {
+                        m.insert(k, a);
+                    }
+                    (None, None) => {}
+                }
+            }
+            put(&mut self.direct, c, d0, d1);
+            put(&mut self.calls, c, c0, c1);
+            put(&mut self.via_cross, c, x0, x1);
+        }
+    }
 
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
-        if let Some(o) = self.oracle.as_mut() {
-            o.flush(cx);
-        }
         // Bet 4 spike (CANDOR_MIR=1): run the experimental MIR-based extractor INSTEAD of the HIR
         // analysis and return. Non-production — it exists to gather evidence for a possible core rewrite.
         if candor_report::env::switch("CANDOR_MIR") {
+            if let Some(o) = self.oracle.as_mut() {
+                o.flush(cx);
+            }
             mir_spike::run(cx.tcx);
             // This route writes NO report, so the switch would leave no record at all: the sentinel is the only thing a gate can read.
             self.record_switches();
             return;
         }
         // Closure-flow resolution (receiving side), per call site — see resolve_callback_sites.
+        let census_calls0 = self.oracle.as_ref().map(|_| self.calls.clone());
         let hof_param_unknown = self.resolve_callback_sites(cx);
+        let census_calls1 = self.oracle.as_ref().map(|_| self.calls.clone());
 
         // Implicit-drop edges (narrow, production use of MIR): a value going out of scope runs its
         // `Drop::drop`, which HIR has no node for — so an effectful guard (I/O on drop) was silently
@@ -4581,6 +4625,10 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         // so those effects propagate. (See eval/bet4/FINDINGS.md — the Bet 4 spike surfaced this hole.)
         for (caller, drop_impl) in mir_spike::drop_edges(cx.tcx) {
             self.calls.entry(caller).or_default().insert(drop_impl);
+        }
+        if let (Some(o), Some(c0), Some(c1)) = (self.oracle.as_mut(), census_calls0, census_calls1) {
+            o.note_post_edges(cx, "callback", &c0, &c1);
+            o.note_post_edges(cx, "drop", &c1, &self.calls);
         }
 
         // effects[f] = direct[f] ∪ ⋃ { effects[g] : g ∈ calls[f] }, to a fixpoint.
@@ -4650,6 +4698,11 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
         let pathsacc = propagate(self.fs_paths_direct.clone(), &self.calls);
         let tablesacc = propagate(self.db_tables_direct.clone(), &self.calls);
 
+        // STEP 0b / census — every analysed unit's final effect set beside the site dump, then the dump is written.
+        if let Some(o) = self.oracle.as_mut() {
+            o.units(cx, &eff, &self.direct);
+            o.flush(cx);
+        }
         // CANDOR_EXPLAIN=<query>: a dedicated query mode — print and return without the normal
         // report/diagnostics. See run_explain.
         if let Some(query) = self.explain.clone() {

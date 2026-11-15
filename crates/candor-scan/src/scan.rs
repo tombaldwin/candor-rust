@@ -8804,7 +8804,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
-    crate::sidecar::write(dir, &fns, std::mem::take(&mut sc_records)); // STEP 0b — a no-op unless the sidecar is on
+    crate::sidecar::write(dir, &fns, std::mem::take(&mut sc_records), &excluded); // STEP 0b — a no-op unless the sidecar is on
 
     // `all` DELIBERATELY KEEPS ONE ENTRY PER `FnInfo`, DUPLICATES INCLUDED — see the doc note on
     // `blind_direct`'s population loop above for why a genuine per-cfg-branch keying fix belongs there,

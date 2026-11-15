@@ -387,7 +387,9 @@ pub(crate) fn call_json(c: &Call) -> serde_json::Value {
 }
 
 /// Write the sidecar for one scanned crate.
-pub(crate) fn write(scan_dir: &str, fns: &[crate::model::FnInfo], records: Vec<serde_json::Value>) {
+/// `excluded` is the file walk's own record of every file it left out and why (`scan_one`), so the comparator can read a
+/// site in a DISCLOSED exclusion as NOT-COVERED rather than SILENT (SOUNDNESS R1768). The report carries only the classes.
+pub(crate) fn write(scan_dir: &str, fns: &[crate::model::FnInfo], records: Vec<serde_json::Value>, excluded: &[(String, &'static str)]) {
     let Some(d) = dir() else { return };
     let root = std::fs::canonicalize(scan_dir).map(|p| p.display().to_string()).unwrap_or_else(|_| scan_dir.to_string());
     let abs = |rel: &str| -> String {
@@ -418,7 +420,9 @@ pub(crate) fn write(scan_dir: &str, fns: &[crate::model::FnInfo], records: Vec<s
             r["file"] = serde_json::Value::String(af);
         }
     }
-    let doc = serde_json::json!({ "root": root, "fns": fn_rows, "notes": note_rows, "calls": recs });
+    let excl: Vec<serde_json::Value> =
+        excluded.iter().map(|(rel, class)| serde_json::json!({ "rel": rel, "file": abs(rel), "class": class })).collect();
+    let doc = serde_json::json!({ "root": root, "fns": fn_rows, "notes": note_rows, "calls": recs, "excluded": excl });
     let _ = std::fs::create_dir_all(d);
     let name: String = root.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     let _ = std::fs::write(format!("{d}/{name}.json"), serde_json::to_string(&doc).unwrap_or_default());
