@@ -11,6 +11,26 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A member called on a GENERIC receiver now follows the bound's `Deref` target, conversion argument and projection**
+  (SOUNDNESS R1657 bound projection, R1793, R1795, R1796; silent under-reports, pre-existing on 0.42.0). A bound was stored as
+  its trait leaf, so `self.session.read_tls(..)` under `C: DerefMut + Deref<Target = ConnectionCommon<..>>` (tokio-rustls,
+  futures-rustls), `p.as_ref().metadata()` / `let p = p.as_ref(); p.exists()` under `P: AsRef<Path>` (walkdir, ignore,
+  lscolors, fs_extra), a parameter typed `<C as Has>::A`, a bare member under `where C::Target: Tr`, and `self.m()` in
+  `impl<T: Deref<Target = X>> Tr for T` all read ABSENT. The receiver now goes through Rust's probe over the bound (its own
+  members first, then the written `Target`, recursively; a conversion's written argument or associated type substituted from
+  std's declaration, `std_bounds.tsv` `R` rows; a projection's binding, `where` bound or declared bound). A Target or argument
+  that is itself a generic dispatches on ITS bounds with its key, never as a type of that name. Where an earlier probe step's
+  member list is not known (a dependency bound, a local blanket impl that may cover the generic) the answer is the union with
+  that candidate, never the probe-order pick. Executed fixtures; `deny Fs`/`deny Net <unit>` 0 → 1. Corpus A/B main → branch
+  (302 crates): 115 rows newly concrete, 25 newly `Unknown`, 0 concrete effects lost, 6 `Unknown` lost (4 resolved to `Fs`,
+  2 resolved to bodies read pure or reaching `memchr`). `CANDOR_R1657BP_OFF=1` restores the old reading.
+- **A supertrait member's `dispatchesOn` key now names the trait that DECLARES it** (SOUNDNESS R1794; a join loss behind a
+  surviving disclosure). `t.s_go()` under `T: SubS` with `s_go` declared by supertrait `BaseS` published `crate#SubS::s_go`,
+  which no consumer's implementor (published under `BaseS`) joins: a chained consumer whose `s_go` writes a file read
+  `deny Fs` 0 (executed). Keys are minted on the declaring trait; a declaring trait whose leaf two local traits share keeps
+  the old key. Corpus: 1,681 keys rewritten across 25 crates, every one replaced by the declaring trait's key or by the union
+  entry's own key; no effect or `Unknown` moved. `CANDOR_R1794_OFF=1` restores the old key. Scan cache rev193 → rev194.
+
 - ⚠ **`Fs` on the items of `env::split_paths(..)` / `Path::ancestors()`, and a written closure-parameter annotation, are now charged**
   (SOUNDNESS R1782; silent under-report, pre-existing on 0.42.0). `env::split_paths(v).find_map(|p| p.join(..).exists())`
   read `['Env']` (cc `Build::find_working_gnu_prefix`): the element resolver had no answer for a std iterator SOURCE, so every
