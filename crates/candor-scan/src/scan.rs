@@ -7395,13 +7395,36 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // `T::m` exactly as it resolves `r.m()` (an inherent, then a trait in scope, through `T`'s impls), so the same
                 // walk answers it. Confined to a classified call whose owner the producer publishes as a type, so a module
                 // path never walks; the unclassified path call is unchanged.
-                let r1807_refused = r1807_union && key.is_none() && r1807_formed_key.is_none();
-                let r1807_path_walk = r1807_union && !c.method && !c.is_macro && r1807_formed_key.is_none()
-                    && rel.rsplit_once("::").is_some_and(|(tp, _)| {
+                //
+                // SOUNDNESS R1814 — …and the UNCLASSIFIED path call through a type, which never walked at all. `d::Lone::
+                // tally_zz(lone("q"), p)`, `tally_zz` a provided method of a trait `d::Lone` implements whose body writes a file,
+                // asked only its own key (`Lone::tally_zz`), which no producer unit carries — a trait default is keyed under
+                // the TRAIT — and the crate is covered, so the miss read as purity: ABSENT from `functions[]` chained, `deny Fs`
+                // and `deny Fs Unknown` 0 over an executed write, on 0.42.0 and 02d58c02 alike, on every path spelling (module
+                // path, imported type, renamed import, `<T>::m`, a turbofish, an associated fn with no receiver, a supertrait's
+                // default), while the method spelling `r.tally_zz(p)` walked and read `[Env, Fs]` (EXECUTED rustagent-r1814
+                // fx/z1 `u_*`). A path call runs the same lookup a method call does minus autoref and autoderef (an inherent
+                // associated item, else a trait IN SCOPE that `T` implements), so it gets the same walk and the same in-scope
+                // disclosure. The owner segment must be a type-shaped ident and the member must not be (an enum variant or an
+                // associated const is not a body); an owner the manifest does not key (a renamed re-export, R1816) walks from an
+                // unkeyed node, which is a structural miss. `CANDOR_R1814_OFF=1`.
+                let r1814_off = candor_report::env::switch("CANDOR_R1814_OFF");
+                let r1816_off = candor_report::env::switch("CANDOR_R1816_OFF");
+                let path_owner = (!c.method && !c.is_macro && r1807_formed_key.is_none())
+                    .then(|| rel.rsplit_once("::"))
+                    .flatten()
+                    .filter(|(tp, m)| {
                         tp.split("::").last().is_some_and(crate::lang::is_type_ident)
-                            && deps_idx.surface.type_key(cr_real, tp).is_some()
+                            && m.chars().next().is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
                     });
-                if hit.is_none() && ((c.method && c.typed) || r1807_path_walk) && dep_default_path.is_none()
+                let r1807_refused = r1807_union && key.is_none() && r1807_formed_key.is_none();
+                // SOUNDNESS R1816 — a classified path call whose owner the manifest does not key (`re2::CKit` for `pub use
+                // crate::k::Kit as CKit`) walks too, from the unkeyed node, so the structural miss below can disclose it.
+                let r1807_path_walk = r1807_union && path_owner.is_some_and(|(tp, _)| {
+                    !r1816_off || deps_idx.surface.type_key(cr_real, tp).is_some()
+                });
+                let r1814_path_walk = !r1814_off && classified.is_none() && path_owner.is_some();
+                if hit.is_none() && ((c.method && c.typed) || r1807_path_walk || r1814_path_walk) && dep_default_path.is_none()
                     && (!r1807_union || key.is_some() || r1807_refused)
                 {
                     if let Some((tpath, member)) = rel.rsplit_once("::") {
@@ -7409,7 +7432,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         let start = ts.type_key(cr_real, tpath).unwrap_or_else(|| format!("{cr_real}#{tpath}"));
                         let no_tail = r1807_refused.then(|| format!("{start}::{member}"));
                         let (rows, w) = crate::typesurf::join_through_exact(deps_idx, &start, member, false, no_tail.as_deref());
-                        let in_scope = if w.hits.is_empty() && w.deref_open {
+                        // A PATH call never autoderefs (`T::m` is looked up on `T` alone), so an open `Deref` chain says nothing
+                        // about it; what can still supply the body is a trait in scope (R1814).
+                        let is_path = !c.method && path_owner.is_some();
+                        let in_scope = if w.hits.is_empty() && w.deref_open && !is_path {
                             Some("<deref chain open>".to_string())
                         } else if w.hits.is_empty() {
                             let fu = f.loc.split(':').next().and_then(|r| file_uses.get(r)).copied().unwrap_or(&[]);
@@ -7437,7 +7463,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 unknown_via_dep: &mut unknown_via_dep,
                             });
                         }
-                        if in_scope.is_some() && !r1807_union {
+                        // SOUNDNESS R1816 — for a CLASSIFIED call the miss hedge stays off where every node the walk reached
+                        // was keyed and closed (the classifier answered, and the producer's closed manifest says nothing
+                        // else), but NOT where the walk was STRUCTURAL: a node with no `types` key or a kind-only one is a
+                        // MISS (SPEC §2 ⟨0.40⟩, "every structural miss on the way still ADDS `Unknown`"). `pub use
+                        // crate::k::Kit as CKit` publishes no key for `re2::CKit`, so `r.fetch_all(p)` on a `CKit` whose
+                        // `fetch_all` is `Fetch`'s provided body (it writes a file) read the curated `[Db]` alone, `deny Fs
+                        // Unknown` 0 over an executed write, on 0.42.0 and 02d58c02 (EXECUTED fx/z1 `r_*`).
+                        if r843_probe && in_scope.is_some() && r1807_union {
+                            eprintln!("R1816HEDGE\t{}\t{start}::{member}\tstructural={}\tpath={is_path}\tfires={}",
+                                f.qual, w.structural, w.structural && !r1816_off);
+                        }
+                        if r843_probe && r1814_path_walk {
+                            eprintln!("R1814WALK\t{}\t{start}::{member}\thits={}\tstructural={}\tinscope={}",
+                                f.qual, w.hits.len(), w.structural, in_scope.as_deref().unwrap_or("-"));
+                        }
+                        if in_scope.is_some() && (!r1807_union || (w.structural && !r1816_off)) {
                             let leaf = tpath.rsplit("::").next().unwrap_or(tpath);
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{leaf}.{member}"));
