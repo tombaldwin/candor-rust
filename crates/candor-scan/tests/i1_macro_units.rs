@@ -848,3 +848,70 @@ fn i1s2_a_hidden_use_or_module_twin_keeps_a_hedge() {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to the stub alone: {off:?}");
     }
 }
+
+/// Fable's stage-2 re-check 1: the twin cover was keyed on the NAMES the hidden text writes, and missed every arm that binds a
+/// name it does not write: a glob arm (visible or hidden), a name handed to a nested macro, and a hidden fn SHADOWING a
+/// complete glob pair (an item beats a glob import). Executed (fixture `fxn` and this lane's `globshadow_e`): each read
+/// `deny Unknown` 1 on 0.42.0 and main and 0 on the name-keyed cover. Must NOT hold: once-defined pairs with no hidden text
+/// in their module stay charged, named and glob.
+#[test]
+fn i1s2_glob_and_nested_name_twins_keep_a_hedge() {
+    let d = tmpdir("s2twg");
+    write_crate(
+        &d,
+        "s2twg",
+        "[features]\nx = []\n",
+        "#[macro_use]\nmod macros;\npub mod mc;\npub mod md;\npub mod mk;\npub mod mh;\npub mod mq;\npub mod mctl;\npub mod mg2;\n\
+         pub fn glob_e() { mc::leaf_g() }\npub fn globuse_e() { md::leaf_g2() }\npub fn hidglob_e() { mk::leaf_h() }\n\
+         pub fn deepname_e() { mh::leaf_dn() }\npub fn globshadow_e() { mq::leaf_q() }\n\
+         pub fn usectl_x() { mctl::leaf_ctl() }\npub fn globctl2_x() { mg2::leaf_gc2() }\n",
+    );
+    write_file(
+        &d,
+        "src/macros.rs",
+        "#[cfg(feature = \"x\")]\nmacro_rules! cfg_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         #[cfg(not(feature = \"x\"))]\nmacro_rules! cfg_unix { ($($it:item)*) => { $( #[cfg(unix)] $it )* } }\n\
+         macro_rules! cfg_not_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n\
+         macro_rules! on_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         macro_rules! off_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n\
+         macro_rules! mk_w { ($n:ident) => { pub fn $n() { EFF } } }\nmacro_rules! mk_s { ($n:ident) => { pub fn $n() {} } }\n",
+    );
+    write_file(&d, "src/mc.rs", "pub mod stubg { pub fn leaf_g() {} }\ncfg_unix! { pub fn leaf_g() { EFF } }\ncfg_not_unix! { pub use self::stubg::*; }\n");
+    write_file(
+        &d,
+        "src/md.rs",
+        "pub mod realg2 { pub fn leaf_g2() { EFF } }\npub mod stubg2 { pub fn leaf_g2() {} }\n\
+         cfg_unix! { pub use self::realg2::*; }\ncfg_not_unix! { pub use self::stubg2::*; }\n",
+    );
+    write_file(&d, "src/mk.rs", "pub mod realh { pub fn leaf_h() { EFF } }\ncfg_unix! { pub use self::realh::*; }\ncfg_not_unix! { pub fn leaf_h() {} }\n");
+    write_file(&d, "src/mh.rs", "cfg_unix! { mk_w!(leaf_dn); }\ncfg_not_unix! { mk_s!(leaf_dn); }\n");
+    write_file(
+        &d,
+        "src/mq.rs",
+        "pub mod realq { pub fn leaf_q() {} }\npub mod stubq { pub fn leaf_q() {} }\n\
+         on_unix! { pub use self::realq::*; }\noff_unix! { pub use self::stubq::*; }\ncfg_unix! { pub fn leaf_q() { EFF } }\n",
+    );
+    write_file(
+        &d,
+        "src/mctl.rs",
+        "pub mod real { pub fn leaf_ctl() { EFF } }\npub mod stub { pub fn leaf_ctl() {} }\n\
+         on_unix! { pub use self::real::leaf_ctl; }\noff_unix! { pub use self::stub::leaf_ctl; }\n",
+    );
+    write_file(
+        &d,
+        "src/mg2.rs",
+        "pub mod realgc2 { pub fn leaf_gc2() { EFF } }\npub mod stubgc2 { pub fn leaf_gc2() {} }\n\
+         on_unix! { pub use self::realgc2::*; }\noff_unix! { pub use self::stubgc2::*; }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["glob_e", "globuse_e", "hidglob_e", "deepname_e", "globshadow_e"] {
+        assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden arm: {rows:?}");
+    }
+    for f in ["usectl_x", "globctl2_x"] {
+        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: a once-defined pair with no hidden text is charged: {rows:?}");
+    }
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
+    for f in ["glob_e", "globuse_e", "hidglob_e", "deepname_e", "globshadow_e"] {
+        assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to one arm: {off:?}");
+    }
+}
