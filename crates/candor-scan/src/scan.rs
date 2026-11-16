@@ -1099,16 +1099,22 @@ fn r1578_type(
 /// answers from the dependency's report and `continue`s past the classifier, and a report whose row for that member is only
 /// `Unknown` (`dispatchesOn: Executor::fetch_all`, no platform leaf — `Db` is curated, nothing in the dependency performs it
 /// by name) replaced a determined `Db` with a hedge: `(E, {})` and `({}, {r})` are incomparable, so `deny Db` went 1 to 0.
-/// SPEC §2 "a dependency scan replaces a curated entry" is about a report that KNOWS something; a row that still carries
-/// `Unknown` has not resolved the member and cannot vouch that `E` is absent from it.
+/// A row that still carries `Unknown` has not resolved the member and cannot vouch that `E` is absent from it.
 ///
 /// So where the join the `<untyped>` route is about to take (`returns`, then `by_key`) carries `Unknown`, the typed call the
 /// unchained arm forms is formed here too, spelled as `r1578_type` spells it, and goes down the ordinary path BESIDE the join:
 /// the join's effects, `Unknown` and reason all stay, and the classifier answers for the member. A row with NO `Unknown`
-/// (concrete effects, or pure) is a complete answer and keeps replacing the curated entry, exactly as today; a row with
+/// (concrete effects, or pure) is left exactly as the `<untyped>` route answers it today (the row wins and no curated charge is
+/// added). That is this route's pre-existing precedence, not doctrine: the TYPED route does the opposite for the same row (a
+/// classified typed call into a chained crate never joins the row, so the curated entry wins there), an open mismatch this
+/// change neither creates nor closes. A row with
 /// concrete effects AND `Unknown` keeps its concrete effects (the join is unchanged) and gains the curated charge beside
 /// them; a local nominal type of the same leaf refuses (the typed route must not take it), and so does an unresolvable
 /// type. ADDS a classifier charge only; never removes one. `CANDOR_R1787_OFF=1` disables it.
+///
+/// TOGGLE (SPEC.md:5407): the "carries `Unknown`" condition is toggle-shaped; if sqlx_core's `Executor` dispatch ever resolves,
+/// its rows lose `Unknown` and consumers' curated `Db` vanishes silently (population today is zero: 56 of 56 `Db`-verb rows in its
+/// real report carry `Unknown`).
 fn r1787_chain_typed(
     c: &Call,
     deps: &std::collections::HashSet<String>,

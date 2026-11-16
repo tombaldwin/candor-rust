@@ -6,8 +6,9 @@
 //! The dependency here is a stub named `sqlx_core` (the classifier calibrates that crate by NAME), whose `RawSql*` types have
 //! three shapes of `fetch_all`:
 //!   * `RawSql`  — only a dispatch on a trait nothing in the dependency implements: `Unknown`, nothing concrete. The case.
-//!   * `RawSql2` — a concrete effect (`Fs`), no `Unknown`: a COMPLETE answer, which keeps replacing the curated entry. Must
-//!     stay `Fs` with NO `Db` added (SPEC §2: a dependency scan replaces a curated entry).
+//!   * `RawSql2` — a concrete effect (`Fs`), no `Unknown`: no `Unknown`. A PIN of today's untyped-route answer, UNCHANGED by
+//!     R1787: the row wins and no `Db` is added. (The typed route answers the same row the other way, curated wins; an open
+//!     mismatch this test does not endorse.)
 //!   * `RawSql3` — a concrete effect AND a dispatch: keeps its `Fs` and gains the curated `Db` beside it.
 //!
 //! Every effectful case loses its `Db` with `CANDOR_R1787_OFF=1` (the proof the fixture reaches the change); each has a pure twin
@@ -156,10 +157,10 @@ fn a_chained_unknown_only_row_does_not_withdraw_the_curated_charge() {
 }
 
 #[test]
-fn a_chained_row_with_concrete_effects_and_no_unknown_keeps_replacing_the_curated_entry() {
+fn a_chained_row_with_concrete_effects_and_no_unknown_is_unchanged_by_r1787() {
     let (_root, app, reps) = world("complete");
     assert_eq!(deny(&app, "Fs", "f_complete_zq", Some(&reps), &[]), 1, "the chained row's own Fs wins");
-    assert_eq!(deny(&app, "Db", "f_complete_zq", Some(&reps), &[]), 0, "a complete answer replaces the curated entry (SPEC §2): no Db is added");
+    assert_eq!(deny(&app, "Db", "f_complete_zq", Some(&reps), &[]), 0, "unchanged by R1787: the untyped route lets this row win and adds no Db (the typed route answers the same row the other way)");
     let off = infers(&app, "f_complete_zq", Some(&reps), &[("CANDOR_R1787_OFF", "1")]);
     assert!(has(&off, "Fs") && !has(&off, "Db"), "and that is today's answer, byte for byte: {off:?}");
     assert_eq!(off, infers(&app, "f_complete_zq", Some(&reps), &[]), "the switch moves nothing here");
