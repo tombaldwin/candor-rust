@@ -13,24 +13,27 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 - ⚠ **The hidden-twin cover now reads unexpanded macro text as a SUPERSET of what it can bind** (SOUNDNESS R1541 / R1831, I1
   stage 2b; closes silent under-reports pre-existing on 0.42.0). A cfg-gated item a crate's own macro produces, beside a
-  twin left as unexpanded text, is hedged where that text may define its name. Three readings of such text were narrower
-  than the text: another crate's macro was read as the identifiers it is passed (it can emit any name, so it is now opaque,
-  except `cfg_if::cfg_if!`, which only re-arranges its input);
-  and text whose expansion could not finish (no arm matched, an arm's expansion did not parse, or the depth or step limit)
-  was read as its own identifiers plus the names its bodies declare (it is now read as every identifier of the invocation
-  and of the bodies of every local macro reachable from it, opaque where that reaches a macro with no readable body).
-  Executed probes, each `deny Unknown` 0 on 0.42.0 and main and 1 now: the name written only in a nested macro's body
-  (no arm matched; the depth limit), and only in a dependency macro's body (its input parsing as items, or not). Also a
-  produced gated `type` alias and a produced gated impl of a hand-written type are now arms. Cost: on 181 crates 1,076 rows
-  newly carry `Unknown` only (1.13%; syn 691, futures-util 101, serde_json 90, reqwest 57, rustix 115), 0 removed, 0
-  concrete lost, 1 `invisible` element lost (reqwest `get`, which keeps its `Unknown`: a produced `use` arm put back as
-  unexpanded text);
-  `CANDOR_I1S2B_FOREIGN_LOOSE=1` restores the narrower foreign reading (717 of those rows remain). The cross-file
-  `#[cfg]` lift stays behind `CANDOR_I1S2_XCFG_ON=1`: with it on, no executed probe reads lower than on main, palette's
-  163 and mio's 17 absent effectful units go to 0 and tokio gains 283 `Log` rows, but 1,925 rows newly carry `Unknown`
-  only (1.98%), 3 mio rows lose `Log` (R1812) and 186 rows lose a hedge that would each need accounting. A
-  trivially-superset cover (`CANDOR_I1S2B_TRIVIAL=1`: every produced gated item beside any unexpanded text carries the
-  refusal) is measured, not the default. Cache rev 211.
+  twin left as unexpanded text, is hedged where that text may define its name. The readings of such text were narrower than
+  the text, and each now states its superset argument where it is read:
+  - another crate's macro was read as the identifiers it is passed; it can emit any name, so it is now opaque. The one
+    exception is `cfg_if::cfg_if!` (not when this file binds the name `cfg_if` to something else by `use … as`): it only
+    re-arranges its input, and rustc then expands what it emitted, so its input is read as a macro body is read below;
+  - text whose expansion could not finish (no arm matched, an arm's expansion did not parse, or the depth or step limit) was
+    read as its own identifiers plus the names its bodies declare. It is now read as every identifier of the invocation and
+    of every body of every local macro reachable from it by `name!` (all bodies of the name the crate holds, not the one in
+    textual scope), opaque where that reaches another crate's macro, a body it cannot read, a token-paster, a macro named by
+    a metavariable (`$m!`), or the reading's bound.
+  Executed probes, each `deny Unknown` 0 on 0.42.0 and main and 1 now: the twin's name written only in a nested macro's body
+  (no arm matched; the depth limit), only in a dependency macro's body (its input parsing as items, or not), only in a
+  macro a `cfg_if!` branch invokes (local or a dependency's), in a `$m!`-invoked macro, and in the other module's definition
+  of a path-invoked macro whose namesake here is pure. Also a produced gated `type` alias and a produced gated impl of a
+  hand-written type are now arms. Cost: on 181 crates 1,096 rows newly carry `Unknown` only (1.15%; syn 691, rustix 115,
+  futures-util 101, serde_json 90, reqwest 57, chacha20 20), 0 removed, 0 concrete lost, 1 `invisible` element lost
+  (reqwest `get`, which keeps its `Unknown` and its reasons: its only edge went into the `wasm32` arm, through a produced
+  `use` now put back as unexpanded text); `CANDOR_I1S2B_FOREIGN_LOOSE=1` restores the narrower foreign reading. The
+  cross-file `#[cfg]` lift stays behind `CANDOR_I1S2_XCFG_ON=1`; it was measured, not shipped (see I1 stage 2b's report).
+  A trivially-superset cover (`CANDOR_I1S2B_TRIVIAL=1`: every produced gated item beside any unexpanded text carries the
+  refusal) is measured, not the default. Cache rev 212.
 
 - ⚠ **With `--deps`, an unclassified PATH call through a dependency type now walks that type as its method spelling does,
   and discloses where its method spelling does** (SOUNDNESS R1814; a silent under-report, pre-existing on 0.42.0).

@@ -1483,3 +1483,73 @@ fn i1s2b_every_fallback_arm_reads_a_superset() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// UPDATE A1 (Fable's 2b review, fixture `fxc`, executed): three lookups the fallback arms made narrower than the text.
+/// (ci) a `cfg_if!` branch holding a nested LOCAL invocation: the exception read only cfg_if's input. (mv) the closure read a
+/// `$m!{}` as the local macro named `m`. (ps) the closure read a path-invoked macro as its textual-scope namesake. Each read
+/// `deny Unknown` 0 on 0.42.0, main and the first 2b cut. Must NOT hold: a nested macro naming an unrelated item beside a
+/// once-defined pair (`cix`), and a noexpand body holding `a != b` (`ne`: `!=` is not an invocation).
+#[test]
+fn i1s2b_closure_lookups_are_supersets() {
+    let d = tmpdir("s2ba1");
+    let vis = |s: &str| format!("macro_rules! vis_{s} {{ ($($i:item)*) => {{ $( #[cfg(not(unix))] $i )* }} }}\n");
+    let on = |s: &str| format!("macro_rules! on_{s} {{ ($($i:item)*) => {{ $( #[cfg(unix)] $i )* }} }}\n");
+    write_crate(
+        &d,
+        "s2ba1",
+        "",
+        "pub mod ci;\npub mod mv;\npub mod ps_other;\npub mod ps;\npub mod cix;\npub mod ne;\n\
+         pub fn ci_e() { crate::ci::leaf_ci() }\npub fn mv_e() { crate::mv::leaf_mv() }\npub fn ps_e() { crate::ps::leaf_ps() }\n\
+         pub fn cix_x() { crate::cix::leaf_cix() }\npub fn ne_x() { crate::ne::leaf_ne() }\n",
+    );
+    write_file(
+        &d,
+        "src/ci.rs",
+        &(vis("ci")
+            + "macro_rules! mint_ci { () => { pub fn leaf_ci() { EFF } } }\n\
+               cfg_if::cfg_if! { if #[cfg(unix)] { mint_ci!{} } else { } }\nvis_ci! { pub fn leaf_ci() {} }\n"),
+    );
+    write_file(
+        &d,
+        "src/mv.rs",
+        &(vis("mv")
+            + "macro_rules! m { () => { pub fn unrelated_mv() {} } }\n\
+               macro_rules! real_mv { () => { #[cfg(unix)] pub fn leaf_mv() { EFF } } }\n\
+               macro_rules! call_mv { ($m:ident go<$l:tt>) => { $m!{} } }\ncall_mv!{ real_mv go<'de> }\nvis_mv! { pub fn leaf_mv() {} }\n"),
+    );
+    write_file(
+        &d,
+        "src/ps_other.rs",
+        "macro_rules! inner_ps { () => { #[cfg(unix)] pub fn leaf_ps() { EFF } } }\npub(crate) use inner_ps;\n",
+    );
+    write_file(
+        &d,
+        "src/ps.rs",
+        &(vis("ps")
+            + "macro_rules! inner_ps { () => { pub fn unrelated_ps() {} } }\n\
+               macro_rules! outer_ps { (go<$l:tt>) => { crate::ps_other::inner_ps!{} } }\nouter_ps!{ go<'de> }\nvis_ps! { pub fn leaf_ps() {} }\n"),
+    );
+    write_file(
+        &d,
+        "src/cix.rs",
+        &(vis("cix")
+            + &on("cix")
+            + "macro_rules! other_cix { () => { pub fn unrelated_cix() {} } }\n\
+               cfg_if::cfg_if! { if #[cfg(unix)] { other_cix!{} } }\non_cix! { pub fn leaf_cix() { EFF } }\nvis_cix! { pub fn leaf_cix() {} }\n"),
+    );
+    write_file(
+        &d,
+        "src/ne.rs",
+        &(vis("ne")
+            + &on("ne")
+            + "macro_rules! outer_ne { (go<$l:tt>) => { pub fn unrelated_ne(a: u8, b: u8) -> bool { a != b } } }\n\
+               outer_ne!{ go<'de> }\non_ne! { pub fn leaf_ne() { EFF } }\nvis_ne! { pub fn leaf_ne() {} }\n"),
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["ci_e", "mv_e", "ps_e"] {
+        assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f}: the twin's body must be read: {rows:?}");
+    }
+    for f in ["cix_x", "ne_x"] {
+        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: must not hold: {rows:?}");
+    }
+}

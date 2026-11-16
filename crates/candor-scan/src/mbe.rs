@@ -727,6 +727,8 @@ struct Ctx<'x> {
     partial: std::collections::HashSet<String>,
     /// I1 stage 2 — EVERY `macro_rules!` body this file writes, by name, cfg twins included (`read_hidden`).
     bodies: HashMap<String, Vec<TokenStream>>,
+    /// I1 stage 2b — this file binds the name `cfg_if` to something by `use … as cfg_if` (then the `cfg_if!` exception is off).
+    cfg_if_renamed: bool,
     /// I1 stage 2d — the `macro_rules!` bodies in TEXTUAL scope at the module being spliced, cfg twins included, saved and
     /// restored around a child module exactly as `scope` is. `read_hidden` reads a name's bodies from here when it has any,
     /// so a sibling module's same-named macro is not bound to an invocation that cannot reach it (Fable re-check 2c-2 RC4.3,
@@ -868,13 +870,19 @@ impl Ctx<'_> {
                 // the reading stays (it feeds the qualified keys) and the text is OPAQUE. `CANDOR_I1S2B_FOREIGN_LOOSE=1` restores
                 // the narrower reading, for measurement.
                 //
-                // One exception with its own argument: `cfg_if::cfg_if!` (the `cfg-if` crate's) only RE-ARRANGES its input,
-                // emitting each branch's items with a `#[cfg]` added and no token of its own but `cfg`, `not`, `any`, `all`:
-                // every name it can bind is an identifier of its input, which the "foreign" reading above already holds.
+                // One exception with its own argument: `cfg_if::cfg_if!` (the `cfg-if` crate's, read in 1.0.x and 0.1.x) only
+                // RE-ARRANGES its input, emitting each branch's tokens with a `#[cfg]` added and no identifier of its own but
+                // `cfg`, `not`, `any`, `all`. rustc then expands what it emitted, so a branch holding a nested invocation binds
+                // whatever THAT macro emits (Fable 2b review `ci_e`, `ci2_e`): its input is read as the closure reads a body
+                // (`loose_closure`: follow a local `name!`, opaque on a dependency's or a `$m!`). The exception does not apply
+                // where this file binds the name `cfg_if` to something else by `use … as cfg_if` (`ci3_e`): that is opaque.
                 let cfg_if = name == "cfg_if"
+                    && !self.cfg_if_renamed
                     && (mac.path.segments.len() == 1
                         || mac.path.segments.first().is_some_and(|s| s.ident == "cfg_if"));
-                if !cfg_if && !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
+                if cfg_if {
+                    self.loose_closure(&name, &mac.tokens, h);
+                } else if !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
                     h.opaque = true;
                 }
                 return;
@@ -888,7 +896,7 @@ impl Ctx<'_> {
         };
         if depth >= HIDDEN_DEPTH || h.steps >= HIDDEN_STEP_BUDGET {
             // FALLBACK ARM "limit". SUPERSET ARGUMENT: see `loose_closure` (every identifier rustc's expansion could emit).
-            self.loose_closure(&name, &mac.tokens, &table, h);
+            self.loose_closure(&name, &mac.tokens, h);
             h.note("limit", &name);
             return;
         }
@@ -933,7 +941,7 @@ impl Ctx<'_> {
             // FALLBACK ARM "noexpand" (no arm matched, or an arm's expansion did not parse). SUPERSET ARGUMENT: see
             // `loose_closure`. Before, it read the invocation's identifiers and the names its bodies DECLARE, which missed a
             // name written as a nested invocation's argument or a `use` leaf (Fable RC3-3 `noexpnest2_e`, RC3-4 `noexpuse_e`).
-            self.loose_closure(&name, &mac.tokens, &table, h);
+            self.loose_closure(&name, &mac.tokens, h);
             h.note("noexpand", &name);
         }
     }
@@ -945,16 +953,27 @@ impl Ctx<'_> {
     /// (`name!`) anywhere in that set, transitively; that union is read here. Where the set names a macro with no body this
     /// scan holds (another crate's, or an unreadable local one) or a token-pasting macro, the expansion can contain any name,
     /// so the text is opaque. Toolchain macros other than `include!`/`concat_idents!` emit no new identifiers.
-    fn loose_closure(&self, name: &str, tokens: &TokenStream, table: &BodyTable<'_>, h: &mut Hidden) {
+    ///
+    /// Two lookups make this a superset (Fable 2b review): a name reached here reads the UNION of every same-named body the
+    /// crate holds, not the textual-scope one, since a path invocation (`crate::m::inner!{}`) can name another module's
+    /// definition (`ps_e`); and a `$m!` whose name is a metavariable is opaque, since the macro is not knowable from the body
+    /// (`mv_e`). `a != b` is not an invocation (`!` joint with `=`). Past the step bound the reading is opaque, never short.
+    fn loose_closure(&self, name: &str, tokens: &TokenStream, h: &mut Hidden) {
+        /// Pushes every `name!` the tokens invoke; `$m!` pushes `$` (a metavariable-named macro).
         fn invoked(ts: &TokenStream, out: &mut Vec<String>) {
             let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
             for (i, tt) in toks.iter().enumerate() {
                 match tt {
                     TokenTree::Group(g) => invoked(&g.stream(), out),
                     TokenTree::Ident(id) => {
-                        if matches!(toks.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
+                        let bang = matches!(toks.get(i + 1),
+                            Some(TokenTree::Punct(p)) if p.as_char() == '!' && p.spacing() == proc_macro2::Spacing::Alone);
+                        if bang {
                             let n = id.to_string();
-                            if n != "macro_rules" {
+                            let meta = i > 0 && matches!(toks.get(i - 1), Some(TokenTree::Punct(p)) if p.as_char() == '$');
+                            if meta {
+                                out.push("$".to_string());
+                            } else if n != "macro_rules" {
                                 out.push(n);
                             }
                         }
@@ -968,14 +987,18 @@ impl Ctx<'_> {
         invoked(tokens, &mut todo);
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(n) = todo.pop() {
-            if !seen.insert(n.clone()) || seen.len() > 4096 {
+            if !seen.insert(n.clone()) {
                 continue;
             }
-            if n == "concat_idents" || n == "paste" || n == "include" {
+            if seen.len() > 4096 {
+                h.opaque = true; // the bound fails CLOSED: past it the reading is "anything", never a short list
+                break;
+            }
+            if n == "$" || n == "concat_idents" || n == "paste" || n == "include" {
                 h.opaque = true;
                 continue;
             }
-            match table.get(&n) {
+            match self.closure_bodies(&n) {
                 Some(Some(bs)) => {
                     for b in &bs {
                         all_idents(b, &mut h.loose);
@@ -992,6 +1015,46 @@ impl Ctx<'_> {
                 }
             }
         }
+    }
+
+    /// I1 stage 2b — every body of `n` the crate holds: this file's (all modules, cfg twins included) and the crate-wide set,
+    /// unioned. `None`: no local macro of the name; `Some(None)`: local, but no body readable.
+    fn closure_bodies(&self, n: &str) -> Option<Option<Vec<TokenStream>>> {
+        let mut v: Vec<TokenStream> = self.bodies.get(n).cloned().unwrap_or_default();
+        let mut known = !v.is_empty();
+        let mut unreadable = false;
+        match self.xdefs.get(&format!("{ALL_BODIES_KEY}{n}")) {
+            Some(Some(all)) => {
+                known = true;
+                for b in all.split('\u{0}') {
+                    match b.parse::<TokenStream>() {
+                        Ok(ts) => v.push(ts),
+                        Err(_) => unreadable = true,
+                    }
+                }
+            }
+            _ => match self.xdefs.get(n) {
+                Some(Some(t)) => {
+                    known = true;
+                    match t.parse::<TokenStream>() {
+                        Ok(ts) => v.push(ts),
+                        Err(_) => unreadable = true,
+                    }
+                }
+                Some(None) => {
+                    known = true;
+                    unreadable |= v.is_empty();
+                }
+                None => {}
+            },
+        }
+        if !known {
+            return None;
+        }
+        if unreadable {
+            return Some(None);
+        }
+        Some(Some(v))
     }
 
     fn read_hidden_item(&self, it: &syn::Item, out: &[syn::Item], h: &mut Hidden, depth: usize) {
@@ -1721,9 +1784,9 @@ fn cover_arm(it: &mut syn::Item) {
 /// An impl block that still holds an unexpanded impl-item invocation is the same at member level: its cfg-gated methods are
 /// marked.
 /// What one module's hidden text may define (`Ctx::read_hidden`): `keys` read by `syn` from its expansions (`item_keys`), and
-/// from the items another crate's macro is passed; `loose`, the fallback where expansion could not finish — the identifiers
-/// the invocation passes plus the names its bodies DECLARE (not every identifier of the bodies), or for another crate's macro
-/// the names its items declare and the identifiers of their attributes; or `opaque`.
+/// from the items another crate's macro is passed; `loose`, the fallback where expansion could not finish — every identifier
+/// of the invocation and of every body reachable from it (`loose_closure`); or `opaque` (another crate's macro, a `$m!`, a
+/// token-paster, an unreadable body, or the closure's bound). Each fallback arm states its superset argument where it is.
 #[derive(Default)]
 struct Hidden {
     opaque: bool,
@@ -3400,7 +3463,23 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
         }
     }
     all_bodies(items, &mut bodies);
-    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default(), bodies, scope_bodies: HashMap::new() };
+    fn renames_to_cfg_if(items: &[syn::Item]) -> bool {
+        fn t(u: &syn::UseTree) -> bool {
+            match u {
+                syn::UseTree::Path(p) => t(&p.tree),
+                syn::UseTree::Rename(r) => r.rename == "cfg_if" && r.ident != "cfg_if",
+                syn::UseTree::Group(g) => g.items.iter().any(t),
+                _ => false,
+            }
+        }
+        items.iter().any(|it| match it {
+            syn::Item::Use(u) => t(&u.tree),
+            syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| renames_to_cfg_if(inner)),
+            _ => false,
+        })
+    }
+    let cfg_if_renamed = renames_to_cfg_if(items);
+    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default(), bodies, cfg_if_renamed, scope_bodies: HashMap::new() };
     cx.splice(items, 0);
 }
 
