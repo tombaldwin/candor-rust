@@ -1113,8 +1113,22 @@ fn r1578_type(
 /// type. ADDS a classifier charge only; never removes one. `CANDOR_R1787_OFF=1` disables it.
 ///
 /// TOGGLE (SPEC.md:5407): the "carries `Unknown`" condition is toggle-shaped; if sqlx_core's `Executor` dispatch ever resolves,
-/// its rows lose `Unknown` and consumers' curated `Db` vanishes silently (population today is zero: 56 of 56 `Db`-verb rows in its
-/// real report carry `Unknown`).
+/// its rows lose `Unknown` and consumers' curated `Db` would vanish silently. SOUNDNESS R1807 closes that toggle (below).
+///
+/// SOUNDNESS R1807 — …AND A ROW WITHOUT `Unknown` DOES NOT WITHDRAW IT EITHER. The "row wins" precedence above was this route's
+/// copy of a pick between two sources, and R1807 retires every copy for one rule: a call into a chained, covered dependency
+/// that the curated table answers carries the UNION of the curated charge and the row (see the typed join in `scan_one`). So the
+/// typed call is formed whenever the receiver's declared type is known (`typesurf::receiver_targets`: `returns`,
+/// `returnsProtocol`, `holds`, a unit-struct value path) and the typed path CLASSIFIES, whatever the row says and whether or not
+/// there is one. The formed call carries the full key it was formed from (`<type>::<method>`, `Some` only where the index has
+/// it) and the typed join asks exactly that key, so the row is the one this route joined, never a same-tail sibling's; the
+/// typed join adds the §4 ⟨0.39⟩ obligation-3 `dispatchesOn` follow-on this route's own join never ran. The route's own join,
+/// walk and disclosure are untouched. Precision cost, named: a complete row over a member with a platform leaf (`reqwest::get`
+/// → `Net`, the row reading no socket) now also carries the curated charge — over-approximation, never silence.
+/// `CANDOR_R1807_OFF=1` restores the R1787-only answer.
+///
+/// Returns each formed call with `Some(key)` (the full key the typed join must ask, or `None`: ask nothing).
+#[allow(clippy::type_complexity)]
 fn r1787_chain_typed(
     c: &Call,
     deps: &std::collections::HashSet<String>,
@@ -1123,37 +1137,111 @@ fn r1787_chain_typed(
     dir: &str,
     sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
     returns: &ReturnIndex,
-) -> Option<Call> {
-    if candor_report::env::switch("CANDOR_R1787_OFF") {
-        return None;
+) -> Vec<(Call, Option<String>)> {
+    let r1787_on = !candor_report::env::switch("CANDOR_R1787_OFF");
+    let r1807_on = !r1807_off();
+    let mut out: Vec<(Call, Option<String>)> = Vec::new();
+    if !r1787_on && !r1807_on {
+        return out;
     }
-    let (cr, rest) = c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::"))?;
+    let Some((cr, rest)) = c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::")) else { return out };
     let cr_real: &str = renames.get(cr).map(String::as_str).unwrap_or(cr);
-    if cr.contains("::") || !deps.contains(cr) || !deps_idx.crates.contains(cr_real) || rest.contains('<') {
-        return None;
+    if cr.contains("::") || !deps.contains(cr) || !deps_idx.crates.contains(cr_real) {
+        return out;
     }
-    let (callee, method) = rest.rsplit_once("::")?;
-    // the route's own lookup, verbatim: `returns` for the factory, then `by_key` for the member on the type it names
-    let ty_full = deps_idx.returns.get(&format!("{cr_real}#{callee}"))?;
-    let de = deps_idx.by_key.get(&format!("{ty_full}::{method}"))?;
-    if !de.effects.contains("Unknown") {
-        return None;
+    let Some((callee, method)) = rest.rsplit_once("::") else { return out };
+    // R1787's own lookup, verbatim: `returns` for the factory (no generic callee), then `by_key` for the member on that type
+    let r1787_ty: Option<&String> = (!rest.contains('<'))
+        .then(|| deps_idx.returns.get(&format!("{cr_real}#{callee}")))
+        .flatten();
+    // R1807: every declared type the route's own walk would start from
+    let mut targets: Vec<String> = r1787_ty.cloned().into_iter().collect();
+    if r1807_on {
+        if let Some((ts, _)) = crate::typesurf::receiver_targets(deps_idx, cr_real, callee) {
+            for t in ts {
+                if !targets.contains(&t) {
+                    targets.push(t);
+                }
+            }
+        }
     }
-    let ty = ty_full.strip_prefix(&format!("{cr_real}#"))?.to_string();
-    if ty.contains('<') {
-        return None;
+    for ty_full in targets {
+        let exact = format!("{ty_full}::{method}");
+        let row = deps_idx.by_key.get(&exact);
+        let r1787 = r1787_on && r1787_ty == Some(&ty_full) && row.is_some_and(|de| de.effects.contains("Unknown"));
+        let Some(ty) = ty_full.strip_prefix(&format!("{cr_real}#")).map(str::to_string) else { continue };
+        if ty.contains('<') {
+            continue;
+        }
+        let leaf = ty.rsplit("::").next().unwrap_or(&ty);
+        if returns.contains_key(&crate::model::nominal_key(leaf)) {
+            continue; // a same-leaf LOCAL type: the typed route might take it
+        }
+        let ty = r1619_public(cr, renames, dir, sigs, ty, method);
+        let path = format!("{cr}::{ty}::{method}");
+        // the typed join's own classification of the formed path (`scan_one`: `path_real`, R330's refinement, the builder
+        // entries, the model-SDK surface)
+        let real = format!("{cr_real}{}", &path[cr.len()..]);
+        let classified = r1807_on
+            && (candor_classify::classify(cr_real, &real)
+                .filter(|_| !candor_classify::password_hash_explicit_salt(cr_real, &real, c.argc, true))
+                .or_else(|| scan_builder_entry_effect(cr_real, &real))
+                .is_some()
+                || candor_classify::is_model_sdk_crate(cr_real));
+        if !r1787 && !classified {
+            continue;
+        }
+        if candor_report::env::trace("CANDOR_R1787_INSTR") || candor_report::env::trace("CANDOR_R1807_INSTR") {
+            let row_v: Vec<&str> = row.map(|d| d.effects.iter().copied().collect()).unwrap_or_default();
+            eprintln!("R1787TYPED\t{}\t{path}\tr1787={r1787}\tclassified={classified}\trow={row_v:?}", c.path); // §E1 REACH COUNTER
+        }
+        let key = row.is_some().then_some(exact);
+        if !out.iter().any(|(fc, _)| fc.path == path) {
+            out.push((Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() }, key));
+        }
     }
-    let leaf = ty.rsplit("::").next().unwrap_or(&ty);
-    if returns.contains_key(&crate::model::nominal_key(leaf)) {
-        return None; // a same-leaf LOCAL type: the typed route might take it
+    out
+}
+
+/// SOUNDNESS R1807 — is the one precedence rule off? `CANDOR_R1807_OFF=1` restores the pre-R1807 answers at every site
+/// (a classified call into a chained crate does not read the row), for falsification and A/B only.
+fn r1807_off() -> bool {
+    candor_report::env::switch("CANDOR_R1807_OFF")
+}
+
+/// SOUNDNESS R1807 — THE KEY A CLASSIFIED CALL'S CHAINED JOIN ASKS, `rel` being the written path below the crate. Before R1807
+/// a classified call never asked at all; it now asks, and it asks with the most specific key the spelling can form: the FULL
+/// qual first (`sqlx_core#b::Raw::fetch_all`), then the 2-segment tail every other chained join falls back to (a re-exported
+/// spelling: `sqlx_core::Raw::fetch_all` for `raw_sql::Raw`). The tail is NOT asked where every row under it is provably
+/// ANOTHER type's: the written owner is a type the producer's trusted surface publishes (`types`), and every effectful unit of
+/// that tail in the producer (`DepIndex::members`) is owned by a DIFFERENT published type. Then the tail's row is a sibling's
+/// (`a::Raw::fetch_all` beside `b::Raw::fetch_all`, SPEC §2's own `sync::Client`/`mock::Client` example), the full qual's miss is
+/// the covered report's purity claim for the written member, and joining the tail would charge `b`'s caller with `a`'s `Fs`.
+/// Any other miss keeps the tail (an owner that is not a published definition may be an `impl` written in another module).
+/// `None`: ask nothing. The UNCLASSIFIED join keeps its tail-first key unchanged; this narrows only the population R1807 adds.
+fn r1807_classified_key(deps_idx: &DepIndex, cr_real: &str, rel: &str) -> Option<String> {
+    let exact = format!("{cr_real}#{rel}");
+    if deps_idx.by_key.contains_key(&exact) || !rel.contains("::") {
+        return Some(exact);
     }
-    let ty = r1619_public(cr, renames, dir, sigs, ty, method);
-    let path = format!("{cr}::{ty}::{method}");
-    if candor_report::env::trace("CANDOR_R1787_INSTR") {
-        let only = de.effects.len() == 1; // `Unknown` alone, against `Unknown` beside concrete effects
-        eprintln!("R1787TYPED\t{}\t{path}\tunknown_only={only}", c.path); // §E1 REACH COUNTER
+    let t2 = tail2(rel).map(|t| format!("{cr_real}#{t}"))?;
+    let (owner, leaf) = rel.rsplit_once("::")?;
+    let ts = &deps_idx.surface;
+    if owner.contains("::") && !ts.distrusted.contains(cr_real) && ts.types.contains_key(&format!("{cr_real}#{owner}")) {
+        let owner_leaf = owner.rsplit("::").next().unwrap_or(owner);
+        let mut sibs = deps_idx.members.get(leaf).into_iter().flatten()
+            .filter(|(k, o)| k == cr_real && (o == owner_leaf || o.ends_with(&format!("::{owner_leaf}"))))
+            .peekable();
+        if sibs.peek().is_some()
+            && sibs.all(|(_, o)| o != owner && ts.types.contains_key(&format!("{cr_real}#{o}")))
+        {
+            if candor_report::env::trace("CANDOR_R1807_INSTR") {
+                eprintln!("R1807SIBLING\t{cr_real}#{rel}\t{t2}"); // §E1 — the tail is another published type's row
+            }
+            return None;
+        }
     }
-    Some(Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() })
+    Some(t2)
 }
 
 /// SOUNDNESS R1605 — a BUILDER STEP on a typed `R1605_TRAITS`-crate value. The collector types `post::Entity::find()` (and
@@ -3119,6 +3207,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         .map(|(rel, _, fd)| (rel.as_str(), fd.trait_quals.keys().map(String::as_str).collect()))
         .collect();
     let r1202_off = candor_report::env::switch("CANDOR_R1202_OFF");
+    // R1807 seeded wrong rule 1 ("curated wins" everywhere), an instrument switch: see the `<untyped>` route.
+    let r1807_seed_curated = candor_report::env::switch("CANDOR_R1807_SEED_C3");
     // SOUNDNESS R1202 — each unit's receiver rank (`FnInfo::recv_rank`), for the local-trait-vs-local-inherent contest.
     let r1202_rank: HashMap<String, u8> = fns.iter().filter(|f| f.recv_rank > 0).map(|f| (f.qual.clone(), f.recv_rank)).collect();
     let r1202_probe = candor_report::env::trace("CANDOR_R1202_PROBE");
@@ -4408,12 +4498,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             Option<BTreeSet<String>>,
         ) = Default::default();
         let mut sc_lens = [0usize; 7];
-        // SOUNDNESS R1787 — the typed calls a chained, `Unknown`-only join stands beside (see `r1787_chain_typed`).
-        let r1787_extra: Vec<Call> = f
+        // SOUNDNESS R1787/R1807 — the typed calls the `<untyped>` route's chained join stands beside (see `r1787_chain_typed`),
+        // each with the full key the typed join asks for it.
+        let (r1787_extra, r1807_keys): (Vec<Call>, Vec<Option<String>>) = f
             .calls
             .iter()
-            .filter_map(|c| r1787_chain_typed(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs, &returns))
-            .collect();
+            .flat_map(|c| r1787_chain_typed(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs, &returns))
+            .unzip();
         let mut sc_prev: Option<&Call> = None;
         if sc_on {
             let _ = crate::sidecar::take_dep_hits(); // nothing a previous function looked up belongs to this one
@@ -4470,9 +4561,11 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             };
         }
-        for c in f.calls.iter().chain(r1787_extra.iter()) {
+        for (ci, c) in f.calls.iter().chain(r1787_extra.iter()).enumerate() {
             sc_step!();
             sc_prev = Some(c);
+            // R1807 — a formed call's key (`Some`), or `None` for a written one
+            let r1807_formed_key: Option<&Option<String>> = ci.checked_sub(f.calls.len()).and_then(|i| r1807_keys.get(i));
             // SOUNDNESS R1578 — an UNTYPED receiver whose value an UNCHAINED dependency produced is typed from that
             // dependency's own source signature, and the call then goes down the ordinary typed-external path below
             // (classifier, κ ledger, masking) exactly as `js.m()` over a `js: &Context` parameter does. See `r1578_type`.
@@ -4889,21 +4982,29 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 for alt in c.path.split(crate::decls::ALIAS_ALT_SEP) {
                     let acr = alt.split("::").next().unwrap_or("");
                     let acr_real: &str = dep_renames.get(acr).map(String::as_str).unwrap_or(acr);
-                    if !alt.contains("::") || !deps_idx.crates.contains(acr_real)
-                        || candor_classify::classify(acr_real, alt).is_some()
-                    {
+                    // SOUNDNESS R1807 — a CLASSIFIED arm joins too: its curated charge (taken above) and its chained row are
+                    // UNIONED, as on the single-arm path (`#[cfg(unix)] use dep::RawC as T; #[cfg(windows)] use dep::RawP as T;`
+                    // then `r.fetch_all(p)` read `[Db]` chained over an executed write; fx/m2 `r07_c_cfg`). It asks with the
+                    // single-arm path's classified key (`r1807_classified_key`), and a key that key refuses walks nothing.
+                    let arm_classified = candor_classify::classify(acr_real, alt).is_some();
+                    if !alt.contains("::") || !deps_idx.crates.contains(acr_real) || (arm_classified && r1807_off()) {
                         continue;
                     }
                     let rel = alt.strip_prefix(&format!("{acr}::")).unwrap_or(alt);
-                    let key = if rel.contains("::") {
+                    let key = if arm_classified {
+                        r1807_classified_key(deps_idx, acr_real, rel)
+                    } else if rel.contains("::") {
                         tail2(rel).map(|t2| format!("{acr_real}#{t2}"))
                     } else {
                         Some(format!("{acr_real}#{rel}"))
                     };
+                    if arm_classified && candor_report::env::trace("CANDOR_R1807_INSTR") {
+                        eprintln!("R1807ALIASARM\t{}\t{alt}\tkey={}", f.qual, key.as_deref().unwrap_or("-")); // §E1 REACH COUNTER
+                    }
                     let mut rows: Vec<&crate::deps::DepFn> = Vec::new();
                     if let Some(de) = key.as_ref().and_then(|k| deps_idx.by_key.get(k)) {
                         rows.push(de);
-                    } else if c.method && c.typed {
+                    } else if c.method && c.typed && (key.is_some() || !arm_classified) {
                         if let Some((tpath, member)) = rel.rsplit_once("::") {
                             let start = deps_idx.surface.type_key(acr_real, tpath)
                                 .unwrap_or_else(|| format!("{acr_real}#{tpath}"));
@@ -5275,6 +5376,17 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         candor_classify::classify(cr_real, &tp).is_some()
                             || scan_builder_entry_effect(cr_real, &tp).is_some()
                     });
+                    // SOUNDNESS R1807 — …but the guessed typed call now DOES ask (a classified call's chained row is unioned
+                    // with its curated charge), so the re-typing below runs for it too: `RawB::new(..).step().fetch_all(p)`, whose
+                    // `step` the producer's `returns` types as `RawC`, read `[Db]` (the rule on the guessed `RawB::fetch_all`)
+                    // over `RawC::fetch_all`'s executed write (fx/m2 `r07_b_chain`). What the walk reaches is ADDED. Its MISS
+                    // hedge stays off for a classified call: the classifier answered, and a miss there adds nothing beyond its
+                    // charge, as on the typed join (a read of the join where the classifier answered, not a new hedge).
+                    if typed_classified && candor_report::env::trace("CANDOR_R1807_INSTR") {
+                        eprintln!("R1807CHAINGUESS\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                    }
+                    let miss_hedge = !typed_classified;
+                    let typed_classified = typed_classified && r1807_off();
                     if let Some((_, base, method)) = parsed.filter(|(steps, _, _)| steps.is_empty() && !typed_classified) {
                         // A VALUE PATH read as a unit struct. BACKED when the manifest says `base` is a
                         // type; when `holds` says it is a VALUE, its declared type is joined (the guess
@@ -5298,7 +5410,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if r843_probe {
                             eprintln!("R843UNIT\t{}\t{vkey}\t.{method}\tbacked={backed}", f.qual);
                         }
-                        if !backed {
+                        if !backed && miss_hedge {
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default()
                                 .insert("dispatch:untyped cross-package receiver".to_string());
@@ -5350,7 +5462,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             eprintln!("R843CHAIN\t{}\t{cr_real}#{base}\t{steps}\t.{method}\tanswered={answered}\thit={all_hit}",
                                 f.qual);
                         }
-                        if !all_hit {
+                        if !all_hit && miss_hedge {
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default()
                                 .insert("dispatch:untyped cross-package receiver".to_string());
@@ -5403,6 +5515,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // disclosure lost. That filtering is right for keyed-and-missed and wrong here; the two need
             // different spellings. See DEP-RECEIVER-TYPING-DESIGN.md.
             if let Some(rest) = c.path.strip_prefix(&format!("{cr}::{UNTYPED_RECV_MARKER}::")) {
+                // R1807 SEEDED WRONG RULE 1 (instrument calibration only, never a behaviour): "curated wins" on this route too.
+                // Where the receiver's `returns` type and the method classify, the whole marker (walk, join, disclosure) is
+                // skipped and only the formed typed call stands, which under this seed does not join either. Spelling-invariant,
+                // and a sin: an acceptance instrument MUST flag it. `CANDOR_R1807_SEED_C3=1`.
+                if r1807_seed_curated && deps_idx.crates.contains(cr_real)
+                    && rest.rsplit_once("::").is_some_and(|(callee, method)| {
+                        deps_idx.returns.get(&format!("{cr_real}#{callee}")).is_some_and(|t| {
+                            let tp = format!("{cr_real}::{}::{method}", t.strip_prefix(&format!("{cr_real}#")).unwrap_or(t));
+                            candor_classify::classify(cr_real, &tp).is_some()
+                        })
+                    })
+                {
+                    continue;
+                }
                 // SOUNDNESS R1578 §E1 CENSUS — every untyped-receiver marker that reaches here (an R1578-typed one never
                 // does), with whether its crate is chained and declared: the population the unchained floor would price.
                 if candor_report::env::trace("CANDOR_R1578_CENSUS") {
@@ -6736,16 +6862,74 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     }
                 }
             }
-            if classified.is_none() && (!resolved_local || dep_default_path.is_some() || r1152_union) && !suppress_bare_leaf
+            // SOUNDNESS R1807 — A CHAINED ROW AND A CURATED ENTRY THAT ANSWER ONE CALL ARE UNIONED. This join was gated on
+            // `classified.is_none()`, so a call the curated table answers never read the chained row at all: not its effects,
+            // not its `Unknown`, not its `dispatchesOn` follow-on below, not the R1349/R1715 contributors. `sqlx_core::raw_sql::
+            // RawC::fetch_all(..)` over a dependency whose `fetch_all` writes a file read `[Db]` chained and `deny Fs` exited 0
+            // (EXECUTED rustagent-r1807 fx/m2, 0.42.0 and a1812e43 alike), on every TYPED spelling (path, `let r: T`, a
+            // parameter, a constructor receiver), while the untyped spelling of the same member read the row. Neither source
+            // vouches for the other's absence: a curated entry says the call performs E, not that it performs nothing else, and a
+            // report's silence on an effect with no platform leaf (`Db`) is not evidence. So a classified call now joins too, and
+            // the classifier's own charge below is untouched: the call carries the UNION. Every precedence rule here lets one
+            // source WITHDRAW the other's answer (SPEC.md:5407's toggle); union is monotone in both.
+            //
+            // A classified call asks with the most specific key its spelling forms (`r1807_classified_key`, or the full key the
+            // `<untyped>` route formed it from), so a same-tail sibling type's row is not charged to it. The unclassified join's
+            // key is unchanged.
+            //
+            // What this does NOT move (re-read 2026-11-16 on a1812e43): `dep_join_hit`/`dep_join_unknown` now become true for a
+            // classified call, and their readers are R1202's `hit = !dep_recv || dep_join_hit` (`dep_recv` requires
+            // `classified.is_none()`, so `hit` was already true), `already_handled` (already true through `classified.is_some()`),
+            // and four `CANDOR_R501_INSTR` traces. The κ ledger and the call tally key on `classified` and are unchanged.
+            // `CANDOR_R1807_OFF=1` restores the gate.
+            let r1807_union = classified.is_some() && !r1807_off() && !r1807_seed_curated;
+            if (classified.is_none() || r1807_union) && (!resolved_local || dep_default_path.is_some() || r1152_union) && !suppress_bare_leaf
                 && jpath.contains("::") && (covered_owner || r1349_union_only || !r1715_extra.is_empty())
             {
                 let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
-                let key = if rel.contains("::") {
+                let key = if r1807_union {
+                    match r1807_formed_key {
+                        Some(k) => k.clone(),
+                        None => r1807_classified_key(deps_idx, cr_real, rel),
+                    }
+                } else if rel.contains("::") {
                     tail2(rel).map(|t2| format!("{cr_real}#{t2}"))
                 } else {
                     Some(format!("{cr_real}#{rel}"))
                 };
                 let mut hit = key.as_ref().and_then(|k| deps_idx.by_key.get(k));
+                if r1807_union && candor_report::env::trace("CANDOR_R1807_INSTR") && covered_owner {
+                    // §E1 REACH COUNTER — the population this join now reads, by what the row adds over the curated charge.
+                    let mut cur: BTreeSet<&str> = classified.into_iter().collect();
+                    cur.extend(candor_classify::also_effects(cr_real, &path_real));
+                    if model_sdk {
+                        cur.insert("Llm");
+                        cur.insert("Net");
+                    }
+                    let cat = match hit {
+                        None => "NOROW",
+                        Some(de) if de.effects.iter().any(|e| *e != "Unknown" && !cur.contains(e)) => "ROW_ADDS_CONCRETE",
+                        Some(de) if de.effects.contains("Unknown") => "ROW_ADDS_UNKNOWN",
+                        Some(de) if !de.dispatches_on.is_empty() => "ROW_DISPATCHES",
+                        Some(_) => "ROW_SUBSET",
+                    };
+                    let kind = match (&key, r1807_formed_key.is_some()) {
+                        (_, true) => "formed",
+                        (None, _) => "sibling",
+                        (Some(k), _) if *k == format!("{cr_real}#{rel}") => "full",
+                        (Some(_), _) => "tail2",
+                    };
+                    let rowv: Vec<&str> = hit.map(|d| d.effects.iter().copied().collect()).unwrap_or_default();
+                    // how many effectful producer units share the tail the key asked (C5: a tail UNION is where a sibling's
+                    // effect could arrive)
+                    let contrib = rel.rsplit_once("::").map_or(0, |(o, l)| {
+                        let ol = o.rsplit("::").next().unwrap_or(o);
+                        deps_idx.members.get(l).into_iter().flatten()
+                            .filter(|(k, ow)| k == cr_real && (ow == ol || ow.ends_with(&format!("::{ol}")))).count()
+                    });
+                    eprintln!("R1807TYPED\t{cat}\t{}\t{jpath}\tkey={}\tvia={kind}\tunits={contrib}\tcurated={cur:?}\trow={rowv:?}\tsalt={explicit_salt}",
+                        f.qual, key.as_deref().unwrap_or("-"));
+                }
                 // SOUNDNESS R1637 — A PATH THROUGH A SUBMODULE RE-EXPORT. `rustix::io::write` is defined at
                 // `io::read_write::write` and re-exported by `pub use read_write::*;` in `io`; the producer keys its unit by
                 // leaf, tail2 (`read_write::write`) and qual, so the consumer's `rustix#io::write` matched nothing and a
@@ -6809,6 +6993,20 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 };
                 if r1715_owned.is_some() {
                     hit = r1715_owned.as_ref();
+                }
+                // R1807 SEEDED WRONG RULE 2 (instrument calibration only): "concrete union, hedge dropped" — the classified call
+                // joins the row's effects and follow-on but not its `Unknown` or reasons. An acceptance instrument that passes
+                // this arm cannot see the C3 a restructure of this join can produce. `CANDOR_R1807_SEED_HEDGE=1`.
+                let r1807_seeded: Option<crate::deps::DepFn> = hit
+                    .filter(|_| r1807_union && candor_report::env::switch("CANDOR_R1807_SEED_HEDGE"))
+                    .map(|d| {
+                        let mut d = d.clone();
+                        d.effects.remove("Unknown");
+                        d.unknown_why.clear();
+                        d
+                    });
+                if r1807_seeded.is_some() {
+                    hit = r1807_seeded.as_ref();
                 }
                 if let Some(de) = hit {
                     dep_join_hit = covered_owner; // R1349 — a contributor is not a resolution of the call
@@ -7123,7 +7321,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // A closed, `Deref`-free key with no in-scope trait keeps the purity reading (PART 95
                 // `c8_closed_pure`). Supertype paths that end structurally are NOT a hedge here: a method
                 // a supertrait provides is callable only with that trait in scope, which is row 1.
-                if hit.is_none() && c.method && c.typed && dep_default_path.is_none() {
+                // SOUNDNESS R1807 — for a CLASSIFIED call (now joining, above) the walk runs where its key was formed and
+                // missed, and adds what it reaches; it does not run where `r1807_classified_key` refused the tail as a sibling
+                // type's (the walk's own `present` would re-ask that tail and charge `a::Raw`'s `Fs` to `b::Raw::fetch_all`,
+                // fx/m2 `r07_cb_annot`), and its in-scope-trait MISS hedge stays off: the classifier answered, and a miss there
+                // adds nothing beyond its charge.
+                if hit.is_none() && c.method && c.typed && dep_default_path.is_none() && (!r1807_union || key.is_some()) {
                     if let Some((tpath, member)) = rel.rsplit_once("::") {
                         let ts = &deps_idx.surface;
                         let start = ts.type_key(cr_real, tpath).unwrap_or_else(|| format!("{cr_real}#{tpath}"));
@@ -7156,7 +7359,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                 unknown_via_dep: &mut unknown_via_dep,
                             });
                         }
-                        if in_scope.is_some() {
+                        if in_scope.is_some() && !r1807_union {
                             let leaf = tpath.rsplit("::").next().unwrap_or(tpath);
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{leaf}.{member}"));
