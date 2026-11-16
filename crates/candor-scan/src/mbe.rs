@@ -1216,6 +1216,7 @@ pub(crate) const TOOLCHAIN_BANG_MACROS: &[&str] = &[
 /// Returned as names the MERGE judges, because which names are local `macro_rules!` is a crate-wide fact:
 /// - `::{path}` — certainly not local: a path rooted at another crate, or a bare name this file imports by `use`;
 /// - `{name}` — a bare name, foreign unless the crate defines a `macro_rules!` of that name or it is a toolchain macro.
+///
 /// Toolchain-rooted paths (`std::`/`core::`/`alloc::`) and `crate::`/`self::`/`super::` paths are judged as above.
 /// `#[cfg(test)]` items are skipped: they are not in the build the report describes.
 pub(crate) fn foreign_bang_macros(items: &[syn::Item]) -> Vec<String> {
