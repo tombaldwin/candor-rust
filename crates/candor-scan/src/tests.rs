@@ -28950,6 +28950,17 @@ impl Child { pub fn output(self) -> usize { 1 } }\n";
 // names, so a rule that guessed would fail one polarity or the other.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
+/// SOUNDNESS R1814 (Fable merge review D1) — a pure control reached by a PATH call (`T::m(..)`, an operator's `T::eq`) on a type
+/// whose `types` key is KIND-ONLY (its crate holds a `macro_rules!` the producer cannot rule out) is a structural miss on `T`:
+/// it now discloses as its method spelling always did, with exactly `dispatch:<T>.<m>`. Still never a concrete effect.
+#[cfg(test)]
+fn r1814_pure_or_structural_hedge(v: &serde_json::Value, f: &str, why: &str) -> bool {
+    let Some(r) = v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f) else { return true };
+    let inf: Vec<&str> = r["inferred"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+    let w: Vec<&str> = r["unknownWhy"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+    inf.iter().all(|e| *e == "Unknown") && (inf.is_empty() || w == [why])
+}
+
 #[cfg(test)]
 fn veina_row_effs(v: &serde_json::Value, f: &str) -> Vec<String> {
     v["functions"].as_array().unwrap().iter().find(|r| r["fn"] == f).map(effs).unwrap_or_default()
@@ -32143,9 +32154,30 @@ pub mod g { use cdep::*; pub fn m_byval_glob(a: M, b: M) -> u8 { a % b } }
             assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Fs"), "R1146 chained `{f}` writes (executed):\n{cv:#}\n{dv:#}");
         }
         for f in ctl {
-            assert!(veina_row_effs(&cv, f).is_empty(), "R1146 chained control `{f}` is pure (executed):\n{cv:#}");
+            // `z_pz` (`a == b || a < b` on a derived `Pz` in a crate holding `macro_rules!`): the operator's `Pz::eq` /
+            // `Pz::partial_cmp` path on a kind-only node discloses since R1814 (see the helper); nothing concrete
+            // and `z_q` (`a + b` on a macro-made pure `Add for Q`): the same, `Q::add`
+            let allowed: &[&str] = match *f {
+                "z_pz" => &["dispatch:Pz.eq", "dispatch:Pz.partial_cmp"],
+                "z_q" => &["dispatch:Q.add"],
+                _ => &[],
+            };
+            let ok = veina_row_effs(&cv, f).is_empty()
+                || (!allowed.is_empty() && veina_row_effs(&cv, f) == ["Unknown"]
+                    && cv["functions"].as_array().unwrap().iter().find(|r| r["fn"] == *f).is_some_and(|r| {
+                        r["unknownWhy"].as_array().is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|w| allowed.contains(&w))))
+                    }));
+            assert!(ok, "R1146 chained control `{f}` is pure (executed):\n{cv:#}");
         }
         for f in resid {
+            // `c_h` DECIDED (R1814, Fable merge review D1): `a == b` runs the DERIVED `PartialEq::eq`, which calls the
+            // effectful `Inner::eq` (executed: it writes); the derive is not synthesised beside the inherent `eq`, so it was
+            // silent. `H`'s key is kind-only (the crate holds `macro_rules!`), and the operator's `H::eq` path now discloses
+            // the structural miss: `Unknown`, `dispatch:H.eq`. A disclosure, not yet a charge.
+            if *f == "c_h" {
+                assert_eq!(veina_row_effs(&cv, f), ["Unknown"], "R1146 `c_h` now discloses:\n{cv:#}");
+                continue;
+            }
             assert!(veina_row_effs(&cv, f).is_empty(), "R1146 chained residual `{f}` moved — decide it:\n{cv:#}");
         }
     }
@@ -33616,9 +33648,10 @@ pub fn ce_addin() -> u32 { v061dep::add_in(P(1), P(2)).0 }
     for f in ["ka_macro", "pa_prim"] {
         assert!(has(&cv, f, "Unknown") && has(&uv, f, "Unknown"), "R1182 `{f}` may run a macro-made write and must disclose:\n{cv:#}");
     }
-    for f in ["ca_pureor", "cb_std", "cc_deppure", "pb_primlit"] {
+    for f in ["ca_pureor", "cb_std", "pb_primlit"] {
         assert!(row(&cv, f).iter().flat_map(effs).next().is_none(), "R1182 control `{f}` is pure (executed):\n{cv:#}");
     }
+    assert!(r1814_pure_or_structural_hedge(&cv, "cc_deppure", "dispatch:Dp.bitor_assign"), "R1182 control `cc_deppure` is pure (executed):\n{cv:#}");
     assert!(has(&cv, "hd_macropure", "Fs"), "R1128 residual (Rhs-blind over-charge) moved — decide it:\n{cv:#}");
 }
 
@@ -34047,9 +34080,12 @@ pub fn p2_fixedmac() -> bool { DEP::Thing2::p2_check(Noisy(1)) }
 pub fn p5_blanket(h: &DEP::Hasher5) -> bool { h.p5_update(Noisy(1)) }
 pub fn p7_conv() -> usize { DEP::p7_into(Ls(1)) }
 "##));
-    for f in ["o1_mac", "o2_glob", "o3_pass", "o4_cfgif", "o7_noconv", "o8_inherent"] {
+    for f in ["o1_mac", "o2_glob", "o3_pass", "o4_cfgif", "o7_noconv"] {
         assert!(veina_row_effs(&cv, f).is_empty(), "R1192 control `{f}` is pure (executed), and its callee is read:\n{cv:#}");
     }
+    // the R1165 witness is still narrowed away (no `std-witness`/conversion reason); what remains is R1814's structural-start
+    // hedge on the kind-only `Thing8`, a path call
+    assert!(r1814_pure_or_structural_hedge(&cv, "o8_inherent", "dispatch:Thing8.o8_check"), "R1192 control `o8_inherent`:\n{cv:#}");
     for f in ["p1_metamac", "p2_fixedmac", "p5_blanket", "p7_conv"] {
         assert!(veina_row_effs(&cv, f).iter().any(|e| e == "Unknown"), "R1192 `{f}` writes (executed) and keeps its disclosure:\n{cv:#}");
     }
