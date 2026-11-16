@@ -22,18 +22,24 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `CANDOR_I1S2_XCFG_ON=1` (a result-moving switch, so a gate over such a report exits 2) until its cover is shown complete.
   Within one file a cfg-gated fn whose name the same module's UNEXPANDED macro text may also define carries `macro:another
   cfg arm of this fn is hidden by an unexpanded macro` (the cover is read by expanding the hidden text and parsing it with
-  the reader the visible arm uses). `use ::dep::x::*` names the extern crate even beside a module `dep` (pre-existing for the
+  the reader the visible arm uses). The cover also reaches a cfg-gated TRAIT impl: I1 stage 1 (on main, unreleased) splices
+  macro-made trait impls, and a gated `impl Tr for S` whose twin stayed unexpanded in the same file (the trait itself with
+  its default body, an empty impl inheriting a default, or an impl overriding one) resolved to its own pure member or to the
+  pure default, where 0.42.0 disclosed `macro:` (`deny Unknown` 1 on 0.42.0, 0 on main, executed). Such an impl's members
+  are now marked where the hidden text may hold the trait or an impl of it for the same type, and a member the hidden impl
+  overrides is stood on the visible arm, marked (`CANDOR_I1S2_TRAITARM_OFF=1` drops it). `use ::dep::x::*` names the extern crate even beside a module `dep` (pre-existing for the
   hand-written shape; a spliced `mod rand09;` in time's benchmarks would have cost 129 rows their `invisible:[rand09]`). And
   candor's own marker attributes (`candor_mbe_op`, `candor_mbe_prim_op`, `candor_derive_synth`) no longer read as attribute
-  macros that hold R828's hedge: 7 interface-union rows lose `Unknown`, all over pure bodies. Executed fixtures: 21 probes
-  that read silent (ABSENT or `[]`) over a write on main, 22 on 0.42.0, are now charged or disclosed; no probe in the stage-1
-  and stage-2 fixtures or the four review fixtures reads lower than on main or 0.42.0. Corpus A/B over 181 crates against
+  macros that hold R828's hedge: 7 interface-union rows lose `Unknown`, all over pure bodies. Executed fixtures: 33 probes
+  that read silent (ABSENT or `[]`) over a write on main, 28 on 0.42.0, are now charged or disclosed; no probe in the stage-1
+  and stage-2 fixtures or the review fixtures reads lower than on main or 0.42.0. Corpus A/B over 181 crates against
   main: ADDED 227 / REMOVED 0 / CHANGED 220; 1 row newly concrete (aws-lc-sys `Env`), 163 newly `Unknown` only (0.17%;
   palette 102, aes 33, rkyv 25), 0 concrete lost; 11 rows lose `Unknown` (the 7 union rows, and rand_chacha's 4 derived
   `eq`s, which compare ppv_lite86 vectors and keep `invisible:[ppv_lite86]`); 8 palette rows lose `invisible:[approx]` and the
   keys `approx#{AbsDiffEq,RelativeEq,UlpsEq}::shift_hue` (or `set_hue`, `shift_hue_assign`), members approx does not declare,
-  and keep `Unknown` and their `palette#` key. Oracle: palette's 253 absent effectful units → 163. Cache rev 203. Kill
-  switches `CANDOR_I1S2_MODUSE_OFF`, `CANDOR_I1S2_TWIN_OFF`, `CANDOR_I1S2_LCGLOB_OFF`; opt-in `CANDOR_I1S2_XCFG_ON`.
+  and keep `Unknown` and their `palette#` key. Oracle: palette's 253 absent effectful units → 163. Cache rev 204. Kill
+  switches `CANDOR_I1S2_MODUSE_OFF`, `CANDOR_I1S2_TWIN_OFF`, `CANDOR_I1S2_TRAITARM_OFF`, `CANDOR_I1S2_LCGLOB_OFF`; opt-in
+  `CANDOR_I1S2_XCFG_ON`.
 
 - ⚠ **With `--deps`, a call the curated classifier answers now ALSO carries the chained dependency's row for it, on every
   spelling** (SOUNDNESS R1807; silent under-reports, pre-existing on 0.42.0). A classified call into a chained, covered
