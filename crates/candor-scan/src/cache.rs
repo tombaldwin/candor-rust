@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev198 (rustagent-i1, Fable re-check 3, RC3-2): `i1_foreign_macros` gained the `*glob` entry (a rev197 entry lacks it and
+    // would not see a parent glob's names reach a child through `use super::*`).
     // rev197 (rustagent-i1, Fable re-check 2, RC2-1/RC2-2): `i1_foreign_macros` now carries the unparsed-text reading (argument
     // tokens, local macro bodies, import kinds); a rev196 entry would judge none of it.
     // rev196 (rustagent-i1, Fable re-check RC2): `FileDecls` gained `i1_foreign_macros` (a rev195 entry deserializes it EMPTY
@@ -709,7 +711,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev197/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev198/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

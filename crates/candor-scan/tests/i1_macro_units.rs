@@ -567,3 +567,28 @@ fn i1_rc2_a_present_module_file_holds_nothing() {
     let (rows, _) = scan(&d, None, &[]);
     assert!(eff(&rows, "d").is_empty(), "the module file is read, nothing hidden: {rows:?}");
 }
+
+/// Fable re-check 3, RC3-2 — a dependency glob's names reach a child module through `use super::*`, and a `#[cfg]`-gated
+/// local stub of the same name does not outrank them. Executed in the lane (`stmt2/x_super_glob_stub`): rustc binds the
+/// dependency's `make_go_dep!`, whose impl wrote; 4b52cf1c read `d = []`. The no-stub control held before and still does.
+#[test]
+fn i1_rc3_a_parent_glob_reaches_a_child_beside_a_gated_stub() {
+    for (name, stub) in [("stub", "#[cfg(any())] macro_rules! make_go_dep { ($t:ident) => {}; }\n"), ("nostub", "")] {
+        let d = tmpdir(&format!("rc3-{name}"));
+        write_crate(
+            &d,
+            &format!("rc3_{name}"),
+            "",
+            &format!(
+                "use dmlib::*;\npub trait Go {{ fn go(&self); }}\npub struct Pure; impl Go for Pure {{ fn go(&self) {{}} }}\n\
+                 macro_rules! mk {{ ($t:ident) => {{ impl Go for $t {{ fn go(&self) {{}} }} }} }}\npub struct M; mk!(M);\n\
+                 pub struct Hid;\npub fn d(t: &dyn Go) {{ t.go() }}\n{stub}mod inner;\npub use inner::setup;\n"
+            ),
+        );
+        std::fs::write(d.join("src/inner.rs"), "use super::*;\npub fn setup() { make_go_dep!(Hid); }\n").unwrap();
+        let (rows, _) = scan(&d, None, &[]);
+        assert_eq!(eff(&rows, "d"), vec!["Unknown".to_string()], "{name}: the hedge must stand: {rows:?}");
+        let (off, _) = scan(&d, None, &[("CANDOR_I1_HIDDEN_OFF", "1")]);
+        assert!(eff(&off, "d").is_empty(), "{name}: OFF retires it: {off:?}");
+    }
+}

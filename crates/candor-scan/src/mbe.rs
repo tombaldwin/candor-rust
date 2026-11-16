@@ -1234,6 +1234,7 @@ pub(crate) const TOOLCHAIN_BANG_MACROS: &[&str] = &[
 /// - `{name}` — a bare name: foreign unless local or a toolchain macro (and, under a crate-wide `macro_use`, ungated local);
 /// - `={name}` — an UNGATED `macro_rules!` this file defines, at any depth;
 /// - `*macro_use` — this file holds a non-toolchain `#[macro_use] extern crate`;
+/// - `*glob` — this file holds a non-toolchain glob `use` of a non-local root (its names reach other modules by `use super::*`);
 /// - `%{module}` — (added by `cache::file_decls`) an out-of-line `mod NAME;`, judged at the merge against the files read;
 /// - `@{mac}>{entry}` — an entry read in the BODY of local `macro_rules! mac`, judged only when `mac` is invoked unexpanded
 ///   (directly or through another such body); a bare `{name}` there also marks that local macro unexpanded.
@@ -1252,6 +1253,9 @@ pub(crate) fn foreign_bang_macros(items: &[syn::Item]) -> Vec<String> {
     }
     let glob = imported.contains("*");
     let mut out = std::collections::BTreeSet::new();
+    if glob {
+        out.insert("*glob".to_string()); // judged crate-wide: `use super::*` carries a glob's names down
+    }
     for it in items {
         if let syn::Item::ExternCrate(e) = it {
             if e.attrs.iter().any(|a| a.path().is_ident("macro_use"))
@@ -1471,9 +1475,13 @@ pub(crate) fn judge_unparsed(
     local: &std::collections::HashMap<String, String>,
     unexpanded: &std::collections::BTreeSet<String>,
 ) -> (Option<String>, Vec<String>) {
-    let macro_use = entries.contains("*macro_use");
+    // Fable re-check 3, RC3-2: a dependency glob's rebinding is not confined to its file (`use super::*` carries it down),
+    // so a glob ANYWHERE in the crate, like a `#[macro_use] extern crate`, puts a dependency's macro in reach of every bare
+    // name; and under such an import only an UNGATED local definition outranks it. Executed: `use dmlib2::*;` + a
+    // `#[cfg(any())]` empty stub in `lib.rs`, `use super::*;` + `make_go_dep!(Hid)` in `inner.rs` wrote, 4b52cf1c read `[]`.
+    let rebind = entries.contains("*macro_use") || entries.contains("*glob");
     let ungated: std::collections::HashSet<&str> = entries.iter().filter_map(|e| e.strip_prefix('=')).collect();
-    let is_local = |n: &str| local.contains_key(n) || ungated.contains(n);
+    let is_local = |n: &str| ungated.contains(n) || (!rebind && local.contains_key(n));
     // `None` = not foreign; `Some(Some(n))` = a local macro to follow; `Some(None)` = foreign.
     let judge = |e: &str| -> Result<Option<String>, ()> {
         if e.starts_with('!') || e.starts_with("::") {
@@ -1485,13 +1493,10 @@ pub(crate) fn judge_unparsed(
         if let Some(n) = e.strip_prefix('?') {
             return if ungated.contains(n) { Ok(Some(n.to_string())) } else { Err(()) };
         }
-        if macro_use && !ungated.contains(e) {
-            return Err(());
-        }
         if is_local(e) {
             return Ok(Some(e.to_string()));
         }
-        if TOOLCHAIN_BANG_MACROS.contains(&e) { Ok(None) } else { Err(()) }
+        if !rebind && TOOLCHAIN_BANG_MACROS.contains(&e) { Ok(None) } else { Err(()) }
     };
     let mut bodies: HashMap<&str, Vec<&str>> = HashMap::new();
     for e in entries {
@@ -1501,7 +1506,7 @@ pub(crate) fn judge_unparsed(
     }
     // The file-level entries (invocations and their arguments) are judged as they stand.
     for e in entries {
-        if e.starts_with('@') || e.starts_with('=') || e.starts_with('%') || e == "*macro_use" {
+        if e.starts_with('@') || e.starts_with('=') || e.starts_with('%') || e.starts_with('*') {
             continue;
         }
         if judge(e).is_err() {
