@@ -39,6 +39,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   A trivially-superset cover (`CANDOR_I1S2B_TRIVIAL=1`: every produced gated item beside any unexpanded text carries the
   refusal) is measured, not the default. Cache rev 214.
 
+- ⚠ **A type written through a crate-ROOT local re-export of another item (`pub use crate::ident::Ident;` at the root,
+  `pub use proc_macro2::Ident;` in `ident`) now names that item.** Spelled `crate::Ident`, or bare under a root glob
+  (`use super::*;`), a field, parameter or `let` typed this way named no type: the receiver counted as typed, the method call
+  on it formed nothing, and the row read absent with no `invisible`. Executed: a call that writes a file read `deny Fs` and
+  `deny Unknown` 0 on 0.42.0 and main and now names the dependency. A bare one-segment field type takes the root's binding
+  only when it names a TYPE (a crate-local arm must be a type-namespace declaration, a dependency arm a name longer than one
+  character, and never a std prelude name), so a generic parameter named like a root re-exported fn keeps its reading.
+  Cost on 181 crates, vs main: 14 units lose `Unknown`, each accounted (pgvector 12 resolve an `ambiguous:` tie to a pure
+  inherent `from_sql`, six of them naming `diesel` or `half` on the row; sqlx-postgres `apply`/`revert` resolve to `Db`
+  through `begin`), 0 concrete lost, 0 newly `Unknown`. `CANDOR_ROOT_REEXPORT1_OFF=1` restores the old reading. Cache rev
+  215.
+
 - ⚠ **With `--deps`, an unclassified PATH call through a dependency type now walks that type as its method spelling does,
   and discloses where its method spelling does** (SOUNDNESS R1814; a silent under-report, pre-existing on 0.42.0).
   `dep::d::Lone::tally_zz(x, p)`, where `tally_zz` is the provided body of a trait `Lone` implements and writes a file, asked

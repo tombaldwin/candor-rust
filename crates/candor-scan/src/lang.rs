@@ -3133,7 +3133,42 @@ fn qualified_alias(segs: &[&str], rooted: bool, uses: &HashMap<String, String>) 
             }
         }
     }
+    // A ONE-segment ROOTED name (`crate::Ident`, or a bare `Ident` a root glob re-bound to it) that the crate root
+    // re-exports by a LOCAL named `use` (`pub use crate::ident::Ident;`) is the table's root key `Ident`, which the
+    // table already chased to its end (`ident::Ident -> proc_macro2::Ident`). The loop above starts at two segments
+    // because a one-segment UNROOTED name is the `use` map's own route; a rooted one names the crate root's binding,
+    // which only the table holds. Without this, a field or parameter TYPED through such a chain named no type: the
+    // receiver counted as typed (so the untyped-receiver floor stood down), the formed call named nothing, and no
+    // `invisible` was recorded — a method call that writes a file read absent (EXECUTED, `rustagent-i1s2b/fx/fxre`,
+    // `fxs3`; syn `item::printing::UseName::to_tokens` once the cross-file cfg lift typed its field).
+    if rooted && segs.len() == 1 && !root_reexport1_off() {
+        let prev = NS_WRITTEN_PATH.with(|c| c.replace(true));
+        let hit = reexport_names_cell().read().ok().and_then(|t| t.get(segs[0]).cloned());
+        NS_WRITTEN_PATH.with(|c| c.set(prev));
+        // a whole name: a `REEXPORT_VALUE_ONLY` entry answers it too (`reexport_lookup_at(_, false)`), mark stripped
+        if let Some(full) = hit.map(|v| v.strip_prefix(crate::decls::REEXPORT_VALUE_ONLY).map_or(v.clone(), str::to_string)) {
+            if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+                eprintln!("ROOTREEXP1\t{}\t{}", segs[0], full.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+            }
+            return Some(full);
+        }
+    }
     module_glob_alias(segs, rooted, uses)
+}
+
+/// A type name the std prelude binds in every module (2021 edition), which a crate-root re-export of the same name does
+/// not reach without an import: a bare one of these is never sent to the root's binding.
+pub(crate) fn is_prelude_type_name(n: &str) -> bool {
+    matches!(n, "Option" | "Result" | "String" | "Vec" | "Box" | "Self" | "ToString" | "ToOwned" | "Iterator" | "IntoIterator"
+        | "Clone" | "Copy" | "Send" | "Sync" | "Sized" | "Unpin" | "Drop" | "Fn" | "FnMut" | "FnOnce" | "Default" | "Eq"
+        | "PartialEq" | "Ord" | "PartialOrd" | "AsRef" | "AsMut" | "Into" | "From" | "Extend" | "DoubleEndedIterator"
+        | "ExactSizeIterator" | "TryFrom" | "TryInto" | "FromIterator")
+}
+
+/// The kill switch for the one-segment rooted re-export lookup in `qualified_alias` and `cache::alias_expand_decls`.
+pub(crate) fn root_reexport1_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_ROOT_REEXPORT1_OFF"))
 }
 
 /// SOUNDNESS R1657 stage 2 — THE CRATE-WIDE RE-EXPORT TABLE: a module-qualified name a LOCAL named `use` re-exports

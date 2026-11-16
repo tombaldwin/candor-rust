@@ -1619,6 +1619,8 @@ fn i1s2b_cfg_if_is_opaque_like_any_foreign_macro() {
     // UPDATE A3: no `cfg_if!` exception, so the path form is opaque too: `cx_x` keeps its charge, plus exactly that `Unknown`.
     let cx = eff(&rows, "cx_x");
     assert!(cx.contains(&"Fs".to_string()) && cx.iter().all(|e| e == "Fs" || e == "Unknown"), "cx_x: {rows:?}");
+    // …and that `Unknown` is the opacity's own reason on the leaf, nothing else (Fable STAGE2B nit: pinned as for `cix`).
+    assert_eq!(rows["cx::leaf_cx"].1, vec!["macro:another cfg arm of this fn is hidden by an unexpanded macro".to_string()]);
     // c10: the dependency's `cfg_if` in textual scope through `#[macro_use] extern crate`, a crate of its own
     let d2 = root.join("app2");
     write_crate(

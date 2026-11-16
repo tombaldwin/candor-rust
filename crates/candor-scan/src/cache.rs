@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev215 (rustagent-i1s2b, stage 2b part B): a ONE-segment type or path the crate ROOT re-exports by a local named `use`
+    // resolves through the re-export table (`lang::qualified_alias`, `alias_expand_decls`); a rev214 entry may hold the old,
+    // unresolved reading.
     // rev214 (rustagent-i1s2b, UPDATE A3): `cfg_if!` has no exception (opaque like any foreign macro); a rev213 entry may hold a
     // decl read under the exception (corpus reports are unchanged; the fixtures' are not).
     // rev213 (rustagent-i1s2b, UPDATE A2): the `cfg_if!` exception is keyed on what provably binds the name (crate-wide
@@ -753,7 +756,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev214/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev215/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1993,6 +1996,40 @@ pub(crate) fn alias_expand_decls(
         if p.contains("::") && !dep_head {
             if let Some(e) = try_one(&format!("crate::{p}")).filter(|e| e != p) {
                 return Some(e);
+            }
+        }
+        // A ONE-segment recorded type (`ident: Ident` under `use super::*`, or `crate::Ident` with its head stripped) that
+        // the crate ROOT binds by a local named re-export (`pub use crate::ident::Ident;`): the re-export TABLE's root key,
+        // already chased (`-> proc_macro2::Ident`). A type this module declares itself is recorded anchored
+        // (`crate::<modpath>::Name`) and never reaches here; a bare name that is not the root's can only be a std
+        // prelude name or a GENERIC PARAMETER (`buf: B` under `B: BufRead`, which Pass A records bare like any name). So the
+        // answer must be a TYPE: every arm that is crate-local must name a type-namespace declaration of its module
+        // (`NsIndex::types`) — bstr's root `pub use crate::ext_slice::B` is a FN, and taking it for `buf: B` deleted the
+        // `dispatch:BufRead.read_until` hedge of `ByteLines::next` (first A/B of this change) — and an arm into a dependency
+        // or std is taken only for a name longer than one character, the generic-parameter convention, because a
+        // dependency's namespaces are not visible here. The prelude's type names are refused outright. The TABLE alone
+        // answers — not `expand`'s root GLOB route, which would rewrite every bare name of every module. EXECUTED: a field
+        // typed this way named no type, its method call formed nothing, and the row read absent (`rustagent-i1s2b/fx/fxre`,
+        // `fxs3`; syn `UseName::to_tokens` once the cross-file cfg lift typed its field).
+        if !p.contains("::") && !crate::lang::root_reexport1_off() && !crate::lang::is_prelude_type_name(p) {
+            let hit = crate::lang::reexport_names_cell().read().ok().and_then(|t| t.get(p).cloned());
+            let is_type = |v: &str| {
+                let ns = crate::lang::ns_cell().read();
+                v.split(crate::decls::ALIAS_ALT_SEP).filter(|a| !a.is_empty()).all(|a| match a.strip_prefix("crate::") {
+                    Some(q) => {
+                        let (m, n) = q.rsplit_once("::").unwrap_or(("", q));
+                        ns.as_ref().ok().and_then(|g| g.as_ref().map(|ns| ns.types.get(m).is_some_and(|t| t.contains(n)))).unwrap_or(false)
+                    }
+                    None => p.chars().count() > 1,
+                })
+            };
+            if let Some(v) = hit.map(|v| v.strip_prefix(crate::decls::REEXPORT_VALUE_ONLY).map_or(v.clone(), str::to_string)).filter(|v| is_type(v)) {
+                if multi || !v.contains(crate::decls::ALIAS_ALT_SEP) {
+                    if candor_report::env::trace("CANDOR_R1657S2_INSTR") {
+                        eprintln!("ROOTREEXP1DECL\t{modpath}\t{p}\t{}", v.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+                    }
+                    return Some(v);
+                }
             }
         }
         None
