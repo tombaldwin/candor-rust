@@ -6,12 +6,13 @@
 //! The dependency here is a stub named `sqlx_core` (the classifier calibrates that crate by NAME), whose `RawSql*` types have
 //! three shapes of `fetch_all`:
 //!   * `RawSql`  — only a dispatch on a trait nothing in the dependency implements: `Unknown`, nothing concrete. The case.
-//!   * `RawSql2` — a concrete effect (`Fs`), no `Unknown`: no `Unknown`. A PIN of today's untyped-route answer, UNCHANGED by
-//!     R1787: the row wins and no `Db` is added. (The typed route answers the same row the other way, curated wins; an open
-//!     mismatch this test does not endorse.)
+//!   * `RawSql2` — a concrete effect (`Fs`), no `Unknown`. UNCHANGED by R1787 (the row won and no `Db` was added); SOUNDNESS
+//!     R1807 retired that precedence for the union, so it now keeps its `Fs` AND gains the curated `Db`
+//!     (`tests/r1807_chained_curated_union.rs` holds the rule on every spelling).
 //!   * `RawSql3` — a concrete effect AND a dispatch: keeps its `Fs` and gains the curated `Db` beside it.
 //!
-//! Every effectful case loses its `Db` with `CANDOR_R1787_OFF=1` (the proof the fixture reaches the change); each has a pure twin
+//! Every effectful case loses its `Db` with `CANDOR_R1787_OFF=1` and `CANDOR_R1807_OFF=1` together (R1807 forms the same typed
+//! call for any classified member, so either switch alone leaves the `Db`; the proof the fixture reaches the change); each has a pure twin
 //! with a unique name. Fixture fns end `_zq` because `deny <E> <fn>` matches by PREFIX.
 
 use std::path::{Path, PathBuf};
@@ -41,7 +42,11 @@ fn pkg(root: &Path, name: &str, deps: &[&str], src: &str) -> PathBuf {
     d
 }
 
-const SWITCHES: [&str; 5] = ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1787_OFF", "CANDOR_R1787_INSTR"];
+const SWITCHES: [&str; 7] =
+    ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1787_OFF", "CANDOR_R1787_INSTR", "CANDOR_R1807_OFF", "CANDOR_R1807_INSTR"];
+
+/// Both formers of the typed call off: the pre-R1787 reading.
+const BOTH_OFF: [(&str, &str); 2] = [("CANDOR_R1787_OFF", "1"), ("CANDOR_R1807_OFF", "1")];
 
 fn scan_cmd(dir: &Path, deps: Option<&Path>, env: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(bin());
@@ -145,25 +150,27 @@ fn a_chained_unknown_only_row_does_not_withdraw_the_curated_charge() {
     assert_eq!(deny(&app, "Db", "f_unknown_only_zq", Some(&reps), &[]), 1, "chained: the curated Db stands beside the join's Unknown");
     assert_eq!(deny(&app, "Db Unknown", "f_unknown_only_zq", Some(&reps), &[]), 1, "the Unknown disclosure is kept");
     // the proof the fixture reaches the change: without it the chained arm reads `Unknown` only
-    let off = infers(&app, "f_unknown_only_zq", Some(&reps), &[("CANDOR_R1787_OFF", "1")]);
+    let off = infers(&app, "f_unknown_only_zq", Some(&reps), &BOTH_OFF);
     assert!(!has(&off, "Db") && has(&off, "Unknown"), "calibration: R1787 off loses the Db and keeps the Unknown: {off:?}");
     let on = stderr_of(&app, Some(&reps), &[("CANDOR_R1787_INSTR", "1")]);
-    assert!(on.lines().any(|l| l.starts_with("R1787TYPED\t") && l.contains("unknown_only=true")), "the route must fire:\n{on}");
+    assert!(on.lines().any(|l| l.starts_with("R1787TYPED\t") && l.contains("r1787=true")), "the route must fire:\n{on}");
     // the pure twin stays pure
     // (the twin's receiver is a type with no non-pure member, so it is `Unknown` today by the untyped-receiver floor: the claim
     // is only that no `Db` is fabricated onto it)
     assert_eq!(deny(&app, "Db", "f_twin_zq", Some(&reps), &[]), 0, "the pure twin gains no Db");
-    assert_eq!(infers(&app, "f_twin_zq", Some(&reps), &[]), infers(&app, "f_twin_zq", Some(&reps), &[("CANDOR_R1787_OFF", "1")]), "and the switch moves nothing on it");
+    assert_eq!(infers(&app, "f_twin_zq", Some(&reps), &[]), infers(&app, "f_twin_zq", Some(&reps), &BOTH_OFF), "and the switches move nothing on it");
 }
 
 #[test]
-fn a_chained_row_with_concrete_effects_and_no_unknown_is_unchanged_by_r1787() {
+fn a_chained_row_with_concrete_effects_and_no_unknown_is_unioned_since_r1807() {
     let (_root, app, reps) = world("complete");
-    assert_eq!(deny(&app, "Fs", "f_complete_zq", Some(&reps), &[]), 1, "the chained row's own Fs wins");
-    assert_eq!(deny(&app, "Db", "f_complete_zq", Some(&reps), &[]), 0, "unchanged by R1787: the untyped route lets this row win and adds no Db (the typed route answers the same row the other way)");
-    let off = infers(&app, "f_complete_zq", Some(&reps), &[("CANDOR_R1787_OFF", "1")]);
-    assert!(has(&off, "Fs") && !has(&off, "Db"), "and that is today's answer, byte for byte: {off:?}");
-    assert_eq!(off, infers(&app, "f_complete_zq", Some(&reps), &[]), "the switch moves nothing here");
+    assert_eq!(deny(&app, "Fs", "f_complete_zq", Some(&reps), &[]), 1, "the chained row's own Fs stays");
+    assert_eq!(deny(&app, "Db", "f_complete_zq", Some(&reps), &[]), 1, "R1807: the curated Db is unioned with a complete row too");
+    // R1787 alone never touched this row; the Db is R1807's, and with R1807 off the row wins as it did
+    let r1787_off = infers(&app, "f_complete_zq", Some(&reps), &[("CANDOR_R1787_OFF", "1")]);
+    assert!(has(&r1787_off, "Fs") && has(&r1787_off, "Db"), "R1787's switch alone does not move it: {r1787_off:?}");
+    let off = infers(&app, "f_complete_zq", Some(&reps), &[("CANDOR_R1807_OFF", "1")]);
+    assert!(has(&off, "Fs") && !has(&off, "Db"), "R1807 off: the pre-R1807 row-wins answer: {off:?}");
 }
 
 #[test]
@@ -171,6 +178,6 @@ fn a_chained_row_with_concrete_effects_and_unknown_keeps_them_and_gains_the_cura
     let (_root, app, reps) = world("mixed");
     assert_eq!(deny(&app, "Fs", "f_mixed_zq", Some(&reps), &[]), 1, "the row's concrete effect stays");
     assert_eq!(deny(&app, "Db", "f_mixed_zq", Some(&reps), &[]), 1, "the curated Db stands beside the row's Unknown");
-    let off = infers(&app, "f_mixed_zq", Some(&reps), &[("CANDOR_R1787_OFF", "1")]);
+    let off = infers(&app, "f_mixed_zq", Some(&reps), &BOTH_OFF);
     assert!(has(&off, "Fs") && has(&off, "Unknown") && !has(&off, "Db"), "calibration: off keeps Fs + Unknown and loses the Db: {off:?}");
 }
