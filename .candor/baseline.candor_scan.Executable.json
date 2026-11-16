@@ -18117,6 +18117,35 @@
       ]
     },
     {
+      "fn": "scan::r1787_chain_typed",
+      "loc": "crates/candor-scan/src/scan.rs:1112:1: 1120:18",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "ef9d34897ced9a4972b3a0fd45091582",
+      "calls": [
+        "scan::r1619_public"
+      ],
+      "invisible": [
+        "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml",
+        "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "scan::refuse_gate_json_at_config",
       "loc": "crates/candor-scan/src/scan.rs:444:1: 444:42",
       "inferred": [
