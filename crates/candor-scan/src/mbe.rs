@@ -593,6 +593,33 @@ pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String
     v
 }
 
+/// The macro bodies `MayDefine` may follow: this file's (`Ctx::bodies`) and the crate's (`CrateMacros`, all bodies under
+/// `ALL_BODIES_KEY`). A plain lookup rather than a closure, so the reading makes no indirect call.
+#[derive(Default)]
+struct BodyTable<'a> {
+    bodies: Option<&'a HashMap<String, Vec<TokenStream>>>,
+    xdefs: Option<&'a CrateMacros>,
+}
+
+impl BodyTable<'_> {
+    /// `None`: not a local macro; `Some(None)`: local, but no body readable; `Some(Some(bodies))`.
+    fn get(&self, n: &str) -> Option<Option<Vec<TokenStream>>> {
+        if let Some(bs) = self.bodies.and_then(|b| b.get(n)) {
+            return Some(Some(bs.clone()));
+        }
+        let x = self.xdefs?;
+        // Another file's definitions — ALL of them, cfg twins included, so a twice-defined wrapper is read, not opaque.
+        match x.get(&format!("{ALL_BODIES_KEY}{n}")) {
+            Some(Some(all)) => Some(all.split('\u{0}').map(|b| b.parse::<TokenStream>().ok()).collect()),
+            _ => match x.get(n) {
+                Some(Some(t)) => Some(t.parse::<TokenStream>().ok().map(|ts| vec![ts])),
+                Some(None) => Some(None),
+                None => None,
+            },
+        }
+    }
+}
+
 /// The key prefix of the all-bodies entries in `CrateMacros` (no macro name can begin with a control character).
 pub(crate) const ALL_BODIES_KEY: &str = "\u{1}all:";
 
@@ -761,23 +788,7 @@ impl Ctx<'_> {
     /// I1 stage 2 — what an unexpanded invocation may define (`MayDefine`): its own tokens, and the body of every local
     /// definition its name could bind; a local name whose body this pass cannot read makes it opaque.
     fn may_define(&self, mac: &syn::Macro, out: &mut MayDefine) {
-        let body = |n: &str| -> Option<Option<Vec<TokenStream>>> {
-            if let Some(bs) = self.bodies.get(n) {
-                return Some(Some(bs.clone()));
-            }
-            // Another file's definitions — ALL of them, cfg twins included, so a twice-defined wrapper is read, not opaque.
-            match self.xdefs.get(&format!("{ALL_BODIES_KEY}{n}")) {
-                Some(Some(all)) => {
-                    let bs: Option<Vec<TokenStream>> = all.split('\u{0}').map(|b| b.parse::<TokenStream>().ok()).collect();
-                    Some(bs)
-                }
-                _ => match self.xdefs.get(n) {
-                    Some(Some(t)) => Some(t.parse::<TokenStream>().ok().map(|ts| vec![ts])),
-                    Some(None) => Some(None),
-                    None => None,
-                },
-            }
-        };
+        let body = BodyTable { bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
         // The invocation is read as what it expands to (`MayDefine::nested`); its own tokens too, for the item declarations a
         // passthrough wrapper (`$($i:item)*`) carries, which the expansion also holds.
         out.read(&mac.tokens, &body, 0);
@@ -1378,13 +1389,13 @@ fn all_idents(ts: &TokenStream, out: &mut std::collections::HashSet<String>) {
 
 impl MayDefine {
     /// `body` answers a local macro name with its readable bodies (`None`: not local; `Some(None)`: local, unreadable).
-    fn read(&mut self, ts: &TokenStream, body: &dyn Fn(&str) -> Option<Option<Vec<TokenStream>>>, depth: usize) {
+    fn read(&mut self, ts: &TokenStream, body: &BodyTable<'_>, depth: usize) {
         self.read_in(ts, body, depth, None)
     }
 
     /// `owner`: inside an `impl` block, the self type's last segment — a method is recorded as `Owner::name`, because two
     /// blocks' same-named methods of DIFFERENT types are not arms of one another.
-    fn read_in(&mut self, ts: &TokenStream, body: &dyn Fn(&str) -> Option<Option<Vec<TokenStream>>>, depth: usize, owner: Option<&str>) {
+    fn read_in(&mut self, ts: &TokenStream, body: &BodyTable<'_>, depth: usize, owner: Option<&str>) {
         let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
         let mut in_use = false;
         // the first segment of the current `use` path: a glob of the toolchain's own crates binds no name of this crate's
@@ -1476,19 +1487,19 @@ impl MayDefine {
     /// body expands it, every identifier it is passed and every name its bodies declare may be defined. Another crate's macro:
     /// every identifier it is passed. A local macro with no readable body, an `include!`, a `concat_idents!`, or the budget
     /// running out: opaque.
-    fn nested(&mut self, name: &str, args: &TokenStream, body: &dyn Fn(&str) -> Option<Option<Vec<TokenStream>>>, depth: usize) {
+    fn nested(&mut self, name: &str, args: &TokenStream, body: &BodyTable<'_>, depth: usize) {
         if matches!(name, "include" | "concat_idents") {
             self.opaque = true; // an unread file, or a name minted from parts
             return;
         }
-        match body(name) {
+        match body.get(name) {
             // A recursive tower deeper than the expander follows (the very reason this text stayed unexpanded, e.g. syn's
             // `generate_to_tokens!`): the names it is passed and the names its bodies declare.
             Some(Some(bs)) if depth >= MAX_DEPTH => {
                 all_idents(args, &mut self.names);
                 for b in &bs {
                     let mut sub = MayDefine::default();
-                    sub.read(b, &|_| None, MAX_DEPTH);
+                    sub.read(b, &BodyTable::default(), MAX_DEPTH);
                     self.names.extend(sub.names);
                     self.opaque |= sub.opaque;
                 }
@@ -1513,7 +1524,7 @@ impl MayDefine {
                             self.seen.insert(name.to_string());
                         }
                         let mut sub = MayDefine::default();
-                        sub.read(b, &|_| None, MAX_DEPTH); // the body's own declared names, nested calls not followed
+                        sub.read(b, &BodyTable::default(), MAX_DEPTH); // the body's own declared names, nested calls not followed
                         self.names.extend(sub.names);
                         self.opaque |= sub.opaque;
                     }
