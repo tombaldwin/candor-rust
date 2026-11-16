@@ -16862,6 +16862,7 @@ trait G {
             i1_tagged => |m| { m.i1_tagged.insert("mk\u{1f}L\u{1f}Tr::m".into()); },
             i1_expanded => |m| { m.i1_expanded.insert("mk".into()); },
             i1_unexpanded => |m| { m.i1_unexpanded.insert("mk".into()); },
+            i1_hidden_impls => |m| { m.i1_hidden_impls = true; },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {

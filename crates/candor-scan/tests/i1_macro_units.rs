@@ -382,3 +382,26 @@ fn i1_step5_alias_to_a_primitive_with_a_local_impl_discloses() {
     let (off, _) = scan(&d, None, &[("CANDOR_I1_PRIMALIAS_OFF", "1")]);
     assert!(!off.contains_key("tp"), "OFF: the pre-existing silence: {off:?}");
 }
+
+/// Step 6 (the R1804 exposure guard) — where a crate holds a non-std derive, an attribute macro or an unexpanded item
+/// invocation, a trait may have an implementor the scan cannot see, and R828's `macro_rules!`-body hedge was the only
+/// disclosure on a dispatch over it (wasm-bindgen 0.2.130 `RefFromWasmAbi::try_ref_from_abi`, palette 0.7.7
+/// `Alpha::set_hue`; both read `Unknown` in the rustc-expanded program, pure on the first stage-1 cut). The retirement
+/// keeps that hedge there. `CANDOR_I1_HIDDEN_OFF=1` retires it anyway.
+#[test]
+fn i1_step6_hidden_impl_surface_keeps_the_r828_hedge() {
+    let d = tmpdir("hidden");
+    write_crate(
+        &d,
+        "hidden",
+        "",
+        "pub trait Go { fn go(&self); }\npub struct Pure; impl Go for Pure { fn go(&self) {} }\n\
+         macro_rules! mk { ($t:ident) => { impl Go for $t { fn go(&self) {} } } }\npub struct M; mk!(M);\n\
+         #[derive(other::GoDerive)] pub struct Hid;\n\
+         pub fn d(t: &dyn Go) { t.go() }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    assert_eq!(eff(&rows, "d"), vec!["Unknown".to_string()], "the hedge must stand: {rows:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_I1_HIDDEN_OFF", "1")]);
+    assert!(eff(&off, "d").is_empty(), "OFF retires it: {off:?}");
+}

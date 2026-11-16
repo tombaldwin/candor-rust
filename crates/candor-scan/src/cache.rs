@@ -943,6 +943,9 @@ pub(crate) struct FileDecls {
     /// (`{macro}␟{L|F|FN}␟{key}`); placed into `nested_impl_*` / `macro_hidden_fns` at the merge unless retired.
     #[serde(default)]
     pub(crate) i1_tagged: Vec<String>,
+    /// I1 stage 1 — this file can add an `impl` the scan cannot see (`mbe::has_hidden_impl_surface`).
+    #[serde(default)]
+    pub(crate) i1_hidden_impls: bool,
     /// I1 stage 1 — macros this file holds a FULLY expanded invocation of (the `mbe` marker).
     #[serde(default)]
     pub(crate) i1_expanded: Vec<String>,
@@ -1151,6 +1154,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         items, include_tests, modpath, &uses, &mut nested_local, &mut nested_foreign, &mut nonnominal, &mut i1_tagged);
     // I1 stage 1 — the retirement input: which macros this file expanded in full, and which it still invokes unexpanded.
     let (i1_expanded, i1_unexpanded) = crate::mbe::expansion_facts(items);
+    let i1_hidden_impls = crate::mbe::has_hidden_impl_surface(items); // I1 (the R1804 exposure)
     let mut nonpath_receivers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     crate::lang::collect_nonpath_receivers(items, include_tests, modpath, &uses, &mut nonpath_receivers); // R1034
     let mut glob_impl_foreign: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -1265,6 +1269,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         written_trait_quals,
         // R529 — `BTreeSet` in, sorted `Vec` out; the cache entry is content-hashed.
         i1_tagged: i1_tagged.into_iter().collect(),
+        i1_hidden_impls,
         i1_expanded,
         i1_unexpanded,
         nested_impl_members: nested_local.into_iter().collect(),
@@ -1380,6 +1385,7 @@ pub(crate) struct MergedDecls {
     pub(crate) i1_tagged: std::collections::BTreeSet<String>,
     pub(crate) i1_expanded: std::collections::BTreeSet<String>,
     pub(crate) i1_unexpanded: std::collections::BTreeSet<String>,
+    pub(crate) i1_hidden_impls: bool,
     pub(crate) nested_impl_members: std::collections::HashSet<String>,
     /// R529 — the same, keyed under the OWNING crate for an abstraction this crate does not own.
     pub(crate) nested_impl_foreign: std::collections::HashSet<String>,
@@ -1417,7 +1423,15 @@ pub(crate) fn retire_expanded(m: &mut MergedDecls) -> usize {
     for t in std::mem::take(&mut m.i1_tagged) {
         let mut it = t.splitn(3, sep);
         let (Some(mac), Some(kind), Some(key)) = (it.next(), it.next(), it.next()) else { continue };
-        if m.i1_expanded.contains(mac) && !m.i1_unexpanded.contains(mac) {
+        // R1804 exposure guard: where the crate can add impls the scan cannot see, a trait-impl hedge (`L`/`F`) may be the
+        // only disclosure over a dispatch whose missing implementor is a proc macro's — keep it. `CANDOR_I1_HIDDEN_OFF=1`.
+        let hold = (kind == "L" || kind == "F")
+            && m.i1_hidden_impls
+            && !candor_report::env::switch("CANDOR_I1_HIDDEN_OFF");
+        if hold && candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("I1RETIREHELD\t{mac}\t{kind}\t{key}"); // §E1 REACH COUNTER
+        }
+        if !hold && m.i1_expanded.contains(mac) && !m.i1_unexpanded.contains(mac) {
             retired += 1;
             if candor_report::env::trace("CANDOR_I1_INSTR") {
                 eprintln!("I1RETIRE\t{mac}\t{kind}\t{key}"); // §E1 REACH COUNTER
@@ -2354,6 +2368,7 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     acc.i1_tagged.extend(fd.i1_tagged.iter().cloned()); // set union — order-independent (I1)
     acc.i1_expanded.extend(fd.i1_expanded.iter().cloned());
     acc.i1_unexpanded.extend(fd.i1_unexpanded.iter().cloned());
+    acc.i1_hidden_impls |= fd.i1_hidden_impls;
     for n in &fd.nested_impl_foreign {
         acc.nested_impl_foreign.insert(n.clone()); // set union — order-independent (R529)
     }
@@ -2727,6 +2742,7 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     // all, so a file that gains or loses an impl member changes what the interface-union publishes for
     // the whole crate and for every chained consumer of it.
     // I1 stage 1 — the retirement input (`retire_expanded`): which `macro_rules!`-body hedges stand depends on these.
+    s.push_str(if m.i1_hidden_impls { "i1_hidden_impls|1\n" } else { "i1_hidden_impls|0\n" });
     for (label, set) in [("i1_tagged", &m.i1_tagged), ("i1_expanded", &m.i1_expanded), ("i1_unexpanded", &m.i1_unexpanded)] {
         s.push_str(label);
         for a in set {

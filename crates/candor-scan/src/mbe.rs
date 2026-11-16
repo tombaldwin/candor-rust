@@ -1160,6 +1160,66 @@ fn empty_bodies(g: &mut syn::Item) {
     }
 }
 
+/// SOUNDNESS R1541 / I1 stage 1 (the R1804 exposure) — does this file hold anything that can add an `impl` the scan cannot
+/// see: a non-std `#[derive]`, an attribute that is not a builtin (an attribute proc macro), or an item-position invocation
+/// of a macro this crate does not define (a function-like proc macro or another crate's `macro_rules!`)? Where it does, a
+/// trait's visible implementors are not all of them, and R828's `macro_rules!`-body hedge — measured on wasm-bindgen 0.2.130
+/// (`#[wasm_bindgen]` adds `impl RefFromWasmAbi for JsClosure`) and palette 0.7.7 (`#[derive(WithAlpha)]`) — was the only
+/// disclosure on a dispatch over such a trait. `cache::retire_expanded` keeps it in that crate. A guard on the retirement,
+/// not a fix for R1804: it keeps the old cover, it does not supply the missing implementor.
+pub(crate) fn has_hidden_impl_surface(items: &[syn::Item]) -> bool {
+    const STD_DERIVES: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Default"];
+    const BUILTIN: &[&str] = &[
+        "cfg", "cfg_attr", "derive", "doc", "allow", "warn", "deny", "forbid", "expect", "inline", "cold", "must_use",
+        "deprecated", "repr", "non_exhaustive", "test", "ignore", "should_panic", "bench", "path", "macro_use", "macro_export",
+        "no_mangle", "export_name", "link", "link_name", "link_section", "used", "track_caller", "automatically_derived",
+        "rustfmt", "clippy", "diagnostic", "unsafe", "target_feature", "proc_macro", "proc_macro_derive", "proc_macro_attribute",
+        "naked", "instruction_set", "debugger_visualizer", "collapse_debuginfo", "global_allocator", "panic_handler", "lang",
+        "rustversion", "stable", "unstable", "rustc_const_stable", "rustc_const_unstable", "may_dangle", "optimize", "coverage",
+        "no_coverage", "doc_cfg", "feature", "rustc_diagnostic_item", "const_trait", "fundamental",
+    ];
+    const STD_ITEM_MACROS: &[&str] =
+        &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm", "cfg_if", "pin_project", "link"];
+    fn attrs_hide(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|a| {
+            let p = a.path();
+            if p.is_ident("derive") {
+                return a
+                    .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+                    .map(|l| {
+                        l.iter().any(|d| {
+                            !STD_DERIVES.contains(&d.segments.last().map(|s| s.ident.to_string()).unwrap_or_default().as_str())
+                        })
+                    })
+                    .unwrap_or(true);
+            }
+            let first = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+            !(p.segments.len() == 1 && BUILTIN.contains(&first.as_str()) || first == "rustfmt" || first == "clippy")
+        })
+    }
+    items.iter().any(|it| {
+        if crate::lang::is_cfg_test(crate::lang::item_attrs(it)) {
+            return false;
+        }
+        let own = match it {
+            syn::Item::Fn(f) => attrs_hide(&f.attrs),
+            syn::Item::Struct(x) => attrs_hide(&x.attrs),
+            syn::Item::Enum(x) => attrs_hide(&x.attrs),
+            syn::Item::Union(x) => attrs_hide(&x.attrs),
+            syn::Item::Impl(x) => attrs_hide(&x.attrs),
+            syn::Item::Trait(x) => attrs_hide(&x.attrs),
+            // Read AFTER the splice: a fully expanded invocation is a marker by now, so any item-position invocation still
+            // here was not expanded (another crate's macro, a function-like proc macro, a refused or partial local one).
+            syn::Item::Macro(m) if m.ident.is_none() => {
+                let leaf = m.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                !STD_ITEM_MACROS.contains(&leaf.as_str())
+            }
+            _ => false,
+        };
+        own || matches!(it, syn::Item::Mod(md) if md.content.as_ref().is_some_and(|(_, inner)| has_hidden_impl_surface(inner)))
+    })
+}
+
 /// I1 stage 1 — `peel_groups` over the types a spliced DECLARATION carries (struct / enum / union fields, an alias, a
 /// const or static). Impls are peeled where they always were.
 fn peel_decl_groups(g: &mut syn::Item) {
