@@ -590,8 +590,115 @@ pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String
         }
     }
     walk(items, &mut v);
+    cfg_if_facts(items, &mut v);
     v
 }
+
+/// I1 stage 2b — crate-wide facts about what the name `cfg_if` can be bound to, carried in `CrateMacros` under keys no macro
+/// name can take (an `ALL_BODIES_KEY` entry, so they never make a file look as if it defined a macro):
+/// - `CFGIF_LOCAL`: some item of this crate binds the NAME `cfg_if` to something other than the cfg-if crate's macro AND can be
+///   seen from another module — a `pub` (any `pub(..)`) `mod cfg_if` or `use` whose bound name is `cfg_if` and whose path does
+///   not start at the crate `cfg_if` (a rename, `use dep::cfg_if;`, `use crate::r::cfg_if;`), any `macro_rules! cfg_if`, or
+///   `extern crate x as cfg_if`. A private binding reaches only its own module, which `Ctx::cfg_if_file` reads;
+/// - `CFGIF_MU_OTHER`: a `#[macro_use] extern crate x` for an `x` other than `cfg_if` (it may export a macro named `cfg_if`);
+/// - `CFGIF_MU_CFGIF`: `#[macro_use] extern crate cfg_if`.
+fn cfg_if_facts(items: &[syn::Item], v: &mut Vec<(String, Option<String>)>) {
+    let mut push = |k: &str| v.push((format!("{ALL_BODIES_KEY}{k}"), Some(String::from("1"))));
+    fn walk(items: &[syn::Item], push: &mut dyn FnMut(&str)) {
+        for it in items {
+            match it {
+                syn::Item::Mod(m) => {
+                    if m.ident == "cfg_if" && !matches!(m.vis, syn::Visibility::Inherited) {
+                        push(CFGIF_LOCAL);
+                    }
+                    if let Some((_, inner)) = &m.content {
+                        walk(inner, push);
+                    }
+                }
+                syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") && m.ident.as_ref().is_some_and(|i| i == "cfg_if") => {
+                    push(CFGIF_LOCAL)
+                }
+                syn::Item::Use(u) if !matches!(u.vis, syn::Visibility::Inherited) && cfg_if_use_binds_other(&u.tree, None) => {
+                    push(CFGIF_LOCAL)
+                }
+                syn::Item::ExternCrate(e) => {
+                    let bound = e.rename.as_ref().map(|r| r.1.to_string()).unwrap_or_else(|| e.ident.to_string());
+                    if bound == "cfg_if" && e.ident != "cfg_if" {
+                        push(CFGIF_LOCAL);
+                    }
+                    if e.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
+                        let n = e.ident.to_string();
+                        if n == "cfg_if" {
+                            push(CFGIF_MU_CFGIF);
+                        } else if !matches!(n.as_str(), "std" | "core" | "alloc") {
+                            push(CFGIF_MU_OTHER);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(items, &mut push);
+}
+/// Does this `use` tree bind the NAME `cfg_if` to anything but the cfg-if crate's macro?
+fn cfg_if_use_binds_other(t: &syn::UseTree, root: Option<&str>) -> bool {
+    match t {
+        syn::UseTree::Path(p) => {
+            let r = root.unwrap_or(&p.ident.to_string()).to_string();
+            cfg_if_use_binds_other(&p.tree, Some(&r))
+        }
+        syn::UseTree::Rename(r) => r.rename == "cfg_if" && !(r.ident == "cfg_if" && root == Some("cfg_if")),
+        syn::UseTree::Name(n) => n.ident == "cfg_if" && root != Some("cfg_if") && root.is_some(),
+        syn::UseTree::Group(g) => g.items.iter().any(|i| cfg_if_use_binds_other(i, root)),
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+/// This file's own view of the name: (it binds `cfg_if` to something else in any module — a `use`, a `mod cfg_if`, a
+/// `macro_rules! cfg_if`, an `extern crate x as cfg_if`; it writes a glob of a crate path, through which a `pub` binding
+/// elsewhere in the crate can arrive).
+fn cfg_if_file(items: &[syn::Item]) -> (bool, bool) {
+    fn glob_local(t: &syn::UseTree, root: Option<&str>) -> bool {
+        match t {
+            syn::UseTree::Path(p) => {
+                let r = root.unwrap_or(&p.ident.to_string()).to_string();
+                glob_local(&p.tree, Some(&r))
+            }
+            syn::UseTree::Glob(_) => !matches!(root, Some("std" | "core" | "alloc" | "cfg_if")),
+            syn::UseTree::Group(g) => g.items.iter().any(|i| glob_local(i, root)),
+            _ => false,
+        }
+    }
+    let (mut binds, mut glob) = (false, false);
+    for it in items {
+        match it {
+            syn::Item::Use(u) => {
+                binds |= cfg_if_use_binds_other(&u.tree, None);
+                glob |= glob_local(&u.tree, None);
+            }
+            syn::Item::Mod(m) => {
+                binds |= m.ident == "cfg_if";
+                if let Some((_, inner)) = &m.content {
+                    let (b, g) = cfg_if_file(inner);
+                    binds |= b;
+                    glob |= g;
+                }
+            }
+            syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => {
+                binds |= m.ident.as_ref().is_some_and(|i| i == "cfg_if");
+            }
+            syn::Item::ExternCrate(e) => {
+                binds |= e.rename.as_ref().is_some_and(|r| r.1 == "cfg_if") && e.ident != "cfg_if";
+            }
+            _ => {}
+        }
+    }
+    (binds, glob)
+}
+const CFGIF_LOCAL: &str = "\u{2}cfgif:local";
+const CFGIF_MU_OTHER: &str = "\u{2}cfgif:mu_other";
+const CFGIF_MU_CFGIF: &str = "\u{2}cfgif:mu_cfgif";
 
 /// The macro bodies `Ctx::read_hidden` may expand with: this file's (`Ctx::bodies`) and the crate's (`CrateMacros`, all bodies under
 /// `ALL_BODIES_KEY`). A plain lookup rather than a closure, so the reading makes no indirect call.
@@ -727,8 +834,10 @@ struct Ctx<'x> {
     partial: std::collections::HashSet<String>,
     /// I1 stage 2 — EVERY `macro_rules!` body this file writes, by name, cfg twins included (`read_hidden`).
     bodies: HashMap<String, Vec<TokenStream>>,
-    /// I1 stage 2b — this file binds the name `cfg_if` to something by `use … as cfg_if` (then the `cfg_if!` exception is off).
-    cfg_if_renamed: bool,
+    /// I1 stage 2b — this file writes `use cfg_if::cfg_if;` (the cfg-if crate's macro, imported by its own path).
+    cfg_if_imported: bool,
+    /// I1 stage 2b — `cfg_if_file`: this file binds the name `cfg_if` otherwise; it writes a glob of a crate path.
+    cfg_if_file: (bool, bool),
     /// I1 stage 2d — the `macro_rules!` bodies in TEXTUAL scope at the module being spliced, cfg twins included, saved and
     /// restored around a child module exactly as `scope` is. `read_hidden` reads a name's bodies from here when it has any,
     /// so a sibling module's same-named macro is not bound to an invocation that cannot reach it (Fable re-check 2c-2 RC4.3,
@@ -874,14 +983,13 @@ impl Ctx<'_> {
                 // RE-ARRANGES its input, emitting each branch's tokens with a `#[cfg]` added and no identifier of its own but
                 // `cfg`, `not`, `any`, `all`. rustc then expands what it emitted, so a branch holding a nested invocation binds
                 // whatever THAT macro emits (Fable 2b review `ci_e`, `ci2_e`): its input is read as the closure reads a body
-                // (`loose_closure`: follow a local `name!`, opaque on a dependency's or a `$m!`). The exception does not apply
-                // where this file binds the name `cfg_if` to something else by `use … as cfg_if` (`ci3_e`): that is opaque.
-                let cfg_if = name == "cfg_if"
-                    && !self.cfg_if_renamed
-                    && (mac.path.segments.len() == 1
-                        || mac.path.segments.first().is_some_and(|s| s.ident == "cfg_if"));
+                // (`loose_closure`: follow a local `name!`, opaque on a dependency's or a `$m!`). The exception applies only
+                // where the name PROVABLY binds the cfg-if crate's macro (`cfg_if_provable`); anywhere else `cfg_if!` is
+                // another crate's macro like any other and opaque (Fable RE-CHECK A1: `c4`, `c5`, `c10`, `c11`, `ci3`).
+                let path_form = mac.path.segments.len() == 2 && mac.path.segments.first().is_some_and(|s| s.ident == "cfg_if");
+                let cfg_if = name == "cfg_if" && (mac.path.segments.len() == 1 || path_form) && self.cfg_if_provable(path_form);
                 if cfg_if {
-                    self.loose_closure(&name, &mac.tokens, h);
+                    self.loose_closure(None, &mac.tokens, h);
                 } else if !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
                     h.opaque = true;
                 }
@@ -896,7 +1004,7 @@ impl Ctx<'_> {
         };
         if depth >= HIDDEN_DEPTH || h.steps >= HIDDEN_STEP_BUDGET {
             // FALLBACK ARM "limit". SUPERSET ARGUMENT: see `loose_closure` (every identifier rustc's expansion could emit).
-            self.loose_closure(&name, &mac.tokens, h);
+            self.loose_closure(Some(&name), &mac.tokens, h);
             h.note("limit", &name);
             return;
         }
@@ -941,7 +1049,7 @@ impl Ctx<'_> {
             // FALLBACK ARM "noexpand" (no arm matched, or an arm's expansion did not parse). SUPERSET ARGUMENT: see
             // `loose_closure`. Before, it read the invocation's identifiers and the names its bodies DECLARE, which missed a
             // name written as a nested invocation's argument or a `use` leaf (Fable RC3-3 `noexpnest2_e`, RC3-4 `noexpuse_e`).
-            self.loose_closure(&name, &mac.tokens, h);
+            self.loose_closure(Some(&name), &mac.tokens, h);
             h.note("noexpand", &name);
         }
     }
@@ -958,7 +1066,9 @@ impl Ctx<'_> {
     /// crate holds, not the textual-scope one, since a path invocation (`crate::m::inner!{}`) can name another module's
     /// definition (`ps_e`); and a `$m!` whose name is a metavariable is opaque, since the macro is not knowable from the body
     /// (`mv_e`). `a != b` is not an invocation (`!` joint with `=`). Past the step bound the reading is opaque, never short.
-    fn loose_closure(&self, name: &str, tokens: &TokenStream, h: &mut Hidden) {
+    /// `name`: the macro whose invocation `tokens` is (its bodies are read too); `None` for text that is itself an
+    /// expansion's input (the cfg-if crate's `cfg_if!`, whose own body adds nothing).
+    fn loose_closure(&self, name: Option<&str>, tokens: &TokenStream, h: &mut Hidden) {
         /// Pushes every `name!` the tokens invoke; `$m!` pushes `$` (a metavariable-named macro).
         fn invoked(ts: &TokenStream, out: &mut Vec<String>) {
             let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
@@ -983,7 +1093,7 @@ impl Ctx<'_> {
             }
         }
         all_idents(tokens, &mut h.loose);
-        let mut todo: Vec<String> = vec![name.to_string()];
+        let mut todo: Vec<String> = name.map(|n| vec![n.to_string()]).unwrap_or_default();
         invoked(tokens, &mut todo);
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(n) = todo.pop() {
@@ -1006,8 +1116,9 @@ impl Ctx<'_> {
                     }
                 }
                 Some(None) => h.opaque = true,
-                // a toolchain macro emits no new identifier; `cfg_if!` only re-arranges tokens already in this set
-                None if TOOLCHAIN_BANG_MACROS.contains(&n.as_str()) || n == "cfg_if" => {}
+                // a toolchain macro emits no new identifier; the cfg-if crate's `cfg_if!` (where the name provably binds it)
+                // only re-arranges tokens already in this set, whose invocations are followed here
+                None if TOOLCHAIN_BANG_MACROS.contains(&n.as_str()) || (n == "cfg_if" && self.cfg_if_provable(false)) => {}
                 None => {
                     if !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
                         h.opaque = true; // another crate's macro inside the closure: it can emit any name
@@ -1015,6 +1126,34 @@ impl Ctx<'_> {
                 }
             }
         }
+    }
+
+    /// I1 stage 2b — does the name `cfg_if` PROVABLY bind the cfg-if crate's macro here? Never where this file binds the name
+    /// to anything else, nor where a crate-visible binding of it (`CFGIF_LOCAL`) can arrive through a glob this file writes.
+    /// A path `cfg_if::cfg_if!` (2018: the extern crate, since nothing local takes the name):
+    /// yes. A bare `cfg_if!`: where this file imports it by `use cfg_if::cfg_if;` (an import outranks `#[macro_use]`), or where
+    /// the crate's only `#[macro_use] extern crate` is `cfg_if`'s (another one may export a macro of the name, `c10`).
+    /// `CANDOR_I1S2B_CFGIF_NONE=1` treats `cfg_if!` as opaque everywhere (measured, the no-exception alternative).
+    fn cfg_if_provable(&self, path_form: bool) -> bool {
+        let fact = |k: &str| self.xdefs.contains_key(&format!("{ALL_BODIES_KEY}{k}"));
+        let (file_binds, file_glob) = self.cfg_if_file;
+        let local = file_binds || (file_glob && fact(CFGIF_LOCAL));
+        let ok = !candor_report::env::switch("CANDOR_I1S2B_CFGIF_NONE")
+            && !local
+            && (path_form || self.cfg_if_imported || (fact(CFGIF_MU_CFGIF) && !fact(CFGIF_MU_OTHER)));
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            let why = if ok {
+                "provable"
+            } else if local {
+                "local-binding"
+            } else if fact(CFGIF_MU_OTHER) {
+                "macro_use-other"
+            } else {
+                "unbound"
+            };
+            eprintln!("I1S2BCFGIF\t{why}"); // §E1 REACH COUNTER
+        }
+        ok
     }
 
     /// I1 stage 2b — every body of `n` the crate holds: this file's (all modules, cfg twins included) and the crate-wide set,
@@ -3463,23 +3602,27 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
         }
     }
     all_bodies(items, &mut bodies);
-    fn renames_to_cfg_if(items: &[syn::Item]) -> bool {
-        fn t(u: &syn::UseTree) -> bool {
+    fn imports_cfg_if(items: &[syn::Item]) -> bool {
+        fn t(u: &syn::UseTree, root: Option<&str>) -> bool {
             match u {
-                syn::UseTree::Path(p) => t(&p.tree),
-                syn::UseTree::Rename(r) => r.rename == "cfg_if" && r.ident != "cfg_if",
-                syn::UseTree::Group(g) => g.items.iter().any(t),
+                syn::UseTree::Path(p) => {
+                    let r = root.unwrap_or(&p.ident.to_string()).to_string();
+                    t(&p.tree, Some(&r))
+                }
+                syn::UseTree::Name(n) => n.ident == "cfg_if" && root == Some("cfg_if"),
+                syn::UseTree::Group(g) => g.items.iter().any(|i| t(i, root)),
                 _ => false,
             }
         }
         items.iter().any(|it| match it {
-            syn::Item::Use(u) => t(&u.tree),
-            syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| renames_to_cfg_if(inner)),
+            syn::Item::Use(u) => t(&u.tree, None),
+            syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| imports_cfg_if(inner)),
             _ => false,
         })
     }
-    let cfg_if_renamed = renames_to_cfg_if(items);
-    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default(), bodies, cfg_if_renamed, scope_bodies: HashMap::new() };
+    let cfg_if_imported = imports_cfg_if(items);
+    let cfg_if_file = cfg_if_file(items);
+    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default(), bodies, cfg_if_imported, cfg_if_file, scope_bodies: HashMap::new() };
     cx.splice(items, 0);
 }
 

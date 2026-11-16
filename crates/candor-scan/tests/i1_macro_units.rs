@@ -1553,3 +1553,77 @@ fn i1s2b_closure_lookups_are_supersets() {
         assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: must not hold: {rows:?}");
     }
 }
+
+/// UPDATE A2 (Fable RE-CHECK A1, fixtures `fxe`/`fxe2`, executed): the `cfg_if!` exception applies only where the name
+/// PROVABLY binds the cfg-if crate's macro. A dependency's macro bound to the name otherwise is opaque like any other: a rename
+/// re-exported from another file (c4), the same through a glob (c5), a dependency's own `macro_rules! cfg_if` imported by name
+/// (c11) or in scope through `#[macro_use] extern crate` (c10, a crate of its own). Each read `deny Unknown` 0 on 0.42.0, main,
+/// 2b and A1. Also pinned, closed by A1: a `$crate::` path in a body a branch reaches (c8), `![]`/`()` delimiters (c9). Must
+/// NOT hold: the path form `cfg_if::cfg_if!` in a file binding nothing, with a nested macro naming an unrelated item (cx).
+#[test]
+fn i1s2b_the_cfg_if_exception_is_keyed_on_the_binding() {
+    let root = tmpdir("s2ba2");
+    let dep = root.join("edep");
+    write_crate(
+        &dep,
+        "edep",
+        "",
+        "#[macro_export]\nmacro_rules! cfg_if { (\"c10\") => { #[cfg(unix)] pub fn leaf_c10() { EFF } }; (\"c11\") => { #[cfg(unix)] pub fn leaf_c11() { EFF } }; }\n\
+         #[macro_export]\nmacro_rules! mint_e { (\"c4\") => { #[cfg(unix)] pub fn leaf_c4() { EFF } }; (\"c5\") => { #[cfg(unix)] pub fn leaf_c5() { EFF } }; }\n",
+    );
+    let vis = |s: &str| format!("macro_rules! vis_{s} {{ ($($i:item)*) => {{ $( #[cfg(not(unix))] $i )* }} }}\n");
+    let on = |s: &str| format!("macro_rules! on_{s} {{ ($($i:item)*) => {{ $( #[cfg(unix)] $i )* }} }}\n");
+    let d = root.join("app");
+    write_crate(
+        &d,
+        "s2ba2",
+        "[dependencies]\nedep = { path = \"../edep\" }\n",
+        "pub mod r;\npub mod c4;\npub mod c5;\npub mod c8;\npub mod c9;\npub mod c11;\npub mod cx;\n\
+         pub fn c4_e() { crate::c4::leaf_c4() }\npub fn c5_e() { crate::c5::leaf_c5() }\npub fn c8_e() { crate::c8::leaf_c8() }\n\
+         pub fn c9_e() { crate::c9::leaf_c9() }\npub fn c11_e() { crate::c11::leaf_c11() }\npub fn cx_x() { crate::cx::leaf_cx() }\n",
+    );
+    write_file(&d, "src/r.rs", "pub use edep::mint_e as cfg_if;\n");
+    write_file(&d, "src/c4.rs", &(vis("c4") + "use crate::r::cfg_if;\ncfg_if!(\"c4\");\nvis_c4! { pub fn leaf_c4() {} }\n"));
+    write_file(&d, "src/c5.rs", &(vis("c5") + "use crate::r::*;\ncfg_if!(\"c5\");\nvis_c5! { pub fn leaf_c5() {} }\n"));
+    write_file(
+        &d,
+        "src/c8.rs",
+        &(vis("c8")
+            + "macro_rules! inner_c8 { () => { pub fn leaf_c8() { EFF } } }\npub(crate) use inner_c8;\n\
+               macro_rules! wrap_c8 { () => { $crate::c8::inner_c8!{} } }\n\
+               cfg_if::cfg_if! { if #[cfg(unix)] { wrap_c8!{} } }\nvis_c8! { pub fn leaf_c8() {} }\n"),
+    );
+    write_file(
+        &d,
+        "src/c9.rs",
+        &(vis("c9")
+            + "macro_rules! inner_c9 { () => { pub fn leaf_c9() { EFF } } }\nmacro_rules! mid_c9 { () => { inner_c9![]; } }\n\
+               cfg_if::cfg_if! { if #[cfg(unix)] { mid_c9!(); } }\nvis_c9! { pub fn leaf_c9() {} }\n"),
+    );
+    write_file(&d, "src/c11.rs", &(vis("c11") + "use edep::cfg_if;\ncfg_if!(\"c11\");\nvis_c11! { pub fn leaf_c11() {} }\n"));
+    write_file(
+        &d,
+        "src/cx.rs",
+        &(vis("cx")
+            + &on("cx")
+            + "macro_rules! other_cx { () => { pub fn unrelated_cx() {} } }\n\
+               cfg_if::cfg_if! { if #[cfg(unix)] { other_cx!{} } }\non_cx! { pub fn leaf_cx() { EFF } }\nvis_cx! { pub fn leaf_cx() {} }\n"),
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["c4_e", "c5_e", "c8_e", "c9_e", "c11_e"] {
+        assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f}: must disclose the twin: {rows:?}");
+    }
+    assert_eq!(eff(&rows, "cx_x"), vec!["Fs".to_string()], "must not hold: {rows:?}");
+    // c10: the dependency's `cfg_if` in textual scope through `#[macro_use] extern crate`, a crate of its own
+    let d2 = root.join("app2");
+    write_crate(
+        &d2,
+        "s2ba2b",
+        "[dependencies]\nedep = { path = \"../edep\" }\n",
+        "#[macro_use]\nextern crate edep;\npub mod c10;\npub fn c10_e() { crate::c10::leaf_c10() }\n",
+    );
+    write_file(&d2, "src/c10.rs", &(vis("c10") + "cfg_if!(\"c10\");\nvis_c10! { pub fn leaf_c10() {} }\n"));
+    let (rows2, _) = scan(&d2, None, &[]);
+    assert!(eff(&rows2, "c10_e").contains(&"Unknown".to_string()), "c10_e: must disclose the twin: {rows2:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}

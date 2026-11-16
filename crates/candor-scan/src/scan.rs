@@ -1782,7 +1782,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .par_iter()
             .filter_map(|(p, _)| {
                 let text = std::fs::read_to_string(p).ok()?;
-                if !text.contains("macro_rules") {
+                // I1 stage 2b — also a file that may BIND the name `cfg_if` or bring macros in by `#[macro_use]`: the crate-wide
+                // facts `mbe::cfg_if_facts` decides the `cfg_if!` exception from.
+                if !text.contains("macro_rules") && !text.contains("cfg_if") && !text.contains("macro_use") {
                     return None;
                 }
                 let (file, _) = crate::lang::parse_file_2015_tolerant(&text)?;

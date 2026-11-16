@@ -16,8 +16,12 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   twin left as unexpanded text, is hedged where that text may define its name. The readings of such text were narrower than
   the text, and each now states its superset argument where it is read:
   - another crate's macro was read as the identifiers it is passed; it can emit any name, so it is now opaque. The one
-    exception is `cfg_if::cfg_if!` (not when this file binds the name `cfg_if` to something else by `use … as`): it only
-    re-arranges its input, and rustc then expands what it emitted, so its input is read as a macro body is read below;
+    exception is the cfg-if crate's `cfg_if!`, where the name provably binds it: the path `cfg_if::cfg_if!`, or a bare
+    `cfg_if!` under `use cfg_if::cfg_if;` or with `#[macro_use] extern crate cfg_if;` as the crate's only `#[macro_use]`
+    crate, and in each case only where nothing in the file, and no crate-visible binding a glob of the file could bring,
+    binds the name `cfg_if` to anything else. It only re-arranges its input, and rustc then expands what it emitted, so
+    its input is read as a macro body is read below. Anywhere else (`use dep::cfg_if;`, a rename to `cfg_if` re-exported
+    or reached through a glob, another crate's `cfg_if` by `#[macro_use]`) `cfg_if!` is opaque;
   - text whose expansion could not finish (no arm matched, an arm's expansion did not parse, or the depth or step limit) was
     read as its own identifiers plus the names its bodies declare. It is now read as every identifier of the invocation and
     of every body of every local macro reachable from it by `name!` (all bodies of the name the crate holds, not the one in
@@ -33,7 +37,7 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `use` now put back as unexpanded text); `CANDOR_I1S2B_FOREIGN_LOOSE=1` restores the narrower foreign reading. The
   cross-file `#[cfg]` lift stays behind `CANDOR_I1S2_XCFG_ON=1`; it was measured, not shipped (see I1 stage 2b's report).
   A trivially-superset cover (`CANDOR_I1S2B_TRIVIAL=1`: every produced gated item beside any unexpanded text carries the
-  refusal) is measured, not the default. Cache rev 212.
+  refusal) is measured, not the default. Cache rev 213.
 
 - ⚠ **With `--deps`, an unclassified PATH call through a dependency type now walks that type as its method spelling does,
   and discloses where its method spelling does** (SOUNDNESS R1814; a silent under-report, pre-existing on 0.42.0).
