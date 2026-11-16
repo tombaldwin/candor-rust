@@ -18527,7 +18527,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
         // to rev17 never reached the string). Each older token JOINS the stale list rather than
         // replacing an entry: an entry written by a 0.35.0-dev binary from before this analysis change
         // must be discarded, not read as an analysed file.
-        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172", "rev173", "rev174", "rev175", "rev176", "rev177", "rev178", "rev179", "rev180", "rev181", "rev182", "rev183", "rev184", "rev185", "rev190", "rev194", "rev195", "rev196", "rev197", "rev198", "rev199", "rev200", "rev201", "rev202", "rev203", "rev204", "rev205", "rev206", "rev207", "rev208", "rev209", "rev210", "rev211", "rev212"] {
+        for stale in ["rev7", "rev8", "rev9", "rev11", "rev12", "rev13", "rev14", "rev15", "rev16", "rev17", "rev18", "rev19", "rev20", "rev21", "rev22", "rev23", "rev24", "rev25", "rev26", "rev27", "rev28", "rev29", "rev30", "rev31", "rev32", "rev33", "rev34", "rev35", "rev36", "rev37", "rev38", "rev39", "rev40", "rev41", "rev42", "rev43", "rev44", "rev45", "rev46", "rev47", "rev48", "rev49", "rev50", "rev51", "rev52", "rev53", "rev54", "rev55", "rev56", "rev57", "rev58", "rev59", "rev60", "rev61", "rev62", "rev63", "rev64", "rev65", "rev66", "rev67", "rev68", "rev69", "rev70", "rev71", "rev72", "rev73", "rev74", "rev75", "rev76", "rev77", "rev78", "rev79", "rev80", "rev81", "rev82", "rev83", "rev84", "rev85", "rev86", "rev87", "rev88", "rev89", "rev90", "rev91", "rev92", "rev93", "rev94", "rev95", "rev96", "rev97", "rev98", "rev99", "rev100", "rev101", "rev102", "rev103", "rev104", "rev105", "rev106", "rev107", "rev108", "rev109", "rev110", "rev111", "rev112", "rev113", "rev114", "rev115", "rev116", "rev117", "rev118", "rev119", "rev120", "rev121", "rev122", "rev123", "rev124", "rev125", "rev126", "rev127", "rev128", "rev129", "rev130", "rev131", "rev132", "rev133", "rev134", "rev135", "rev136", "rev137", "rev138", "rev139", "rev140", "rev141", "rev142", "rev143", "rev144", "rev145", "rev146", "rev147", "rev148", "rev154", "rev155", "rev156", "rev157", "rev158", "rev159", "rev160", "rev161", "rev162", "rev163", "rev165", "rev166", "rev167", "rev168", "rev169", "rev170", "rev171", "rev172", "rev173", "rev174", "rev175", "rev176", "rev177", "rev178", "rev179", "rev180", "rev181", "rev182", "rev183", "rev184", "rev185", "rev190", "rev194", "rev195", "rev196", "rev197", "rev198", "rev199", "rev200", "rev201", "rev202", "rev203", "rev204", "rev205", "rev206", "rev207", "rev208", "rev209", "rev210", "rev211", "rev212", "rev213"] {
             let _lock = abort_injection_lock();
             let (d, policy) = abort_fixture(&format!("oldcache{stale}"));
             let out = |n: &str| d.join(n).to_string_lossy().into_owned();
@@ -18538,7 +18538,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev213/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev214/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {
@@ -34080,9 +34080,16 @@ pub fn p2_fixedmac() -> bool { DEP::Thing2::p2_check(Noisy(1)) }
 pub fn p5_blanket(h: &DEP::Hasher5) -> bool { h.p5_update(Noisy(1)) }
 pub fn p7_conv() -> usize { DEP::p7_into(Ls(1)) }
 "##));
-    for f in ["o1_mac", "o2_glob", "o3_pass", "o4_cfgif", "o7_noconv"] {
+    for f in ["o1_mac", "o2_glob", "o4_cfgif", "o7_noconv"] {
         assert!(veina_row_effs(&cv, f).is_empty(), "R1192 control `{f}` is pure (executed), and its callee is read:\n{cv:#}");
     }
+    // I1 stage 2b (UPDATE A3): `o3_check` is a produced cfg arm beside the module's `cfg_if::cfg_if!`, which is now another
+    // crate's macro like any other and so opaque: the control may carry exactly that hidden-twin hedge and nothing else. R1192's
+    // own narrowing stays pinned: a `std-witness`/conversion reason (or any other) reappearing still fails here.
+    assert!(
+        r1814_pure_or_structural_hedge(&cv, "o3_pass", crate::model::MBE_TWIN_WHY),
+        "R1192 control `o3_pass` is pure (executed) and may carry only the stage-2b opacity hedge:\n{cv:#}"
+    );
     // the R1165 witness is still narrowed away (no `std-witness`/conversion reason); what remains is R1814's structural-start
     // hedge on the kind-only `Thing8`, a path call
     assert!(r1814_pure_or_structural_hedge(&cv, "o8_inherent", "dispatch:Thing8.o8_check"), "R1192 control `o8_inherent`:\n{cv:#}");

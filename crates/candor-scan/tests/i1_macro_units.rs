@@ -1549,19 +1549,22 @@ fn i1s2b_closure_lookups_are_supersets() {
     for f in ["ci_e", "mv_e", "ps_e"] {
         assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f}: the twin's body must be read: {rows:?}");
     }
-    for f in ["cix_x", "ne_x"] {
-        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: must not hold: {rows:?}");
-    }
+    assert_eq!(eff(&rows, "ne_x"), vec!["Fs".to_string()], "ne_x: must not hold: {rows:?}");
+    // UPDATE A3: `cfg_if!` is another crate's macro, opaque like any other, so `cix_x` keeps its charge and may gain exactly
+    // that opacity's `Unknown` (the stated cost of having no `cfg_if!` exception).
+    let cix = eff(&rows, "cix_x");
+    assert!(cix.contains(&"Fs".to_string()) && cix.iter().all(|e| e == "Fs" || e == "Unknown"), "cix_x: {rows:?}");
+    assert_eq!(rows["cix::leaf_cix"].1, vec!["macro:another cfg arm of this fn is hidden by an unexpanded macro".to_string()]);
 }
 
-/// UPDATE A2 (Fable RE-CHECK A1, fixtures `fxe`/`fxe2`, executed): the `cfg_if!` exception applies only where the name
-/// PROVABLY binds the cfg-if crate's macro. A dependency's macro bound to the name otherwise is opaque like any other: a rename
+/// UPDATE A2/A3 (Fable RE-CHECK A1/A2, fixtures `fxe`..`fxe7`, executed): there is no `cfg_if!` exception (A3: an identity
+/// check was not provable from the source), so `cfg_if!` is opaque like any other foreign macro, which closes: a rename
 /// re-exported from another file (c4), the same through a glob (c5), a dependency's own `macro_rules! cfg_if` imported by name
 /// (c11) or in scope through `#[macro_use] extern crate` (c10, a crate of its own). Each read `deny Unknown` 0 on 0.42.0, main,
 /// 2b and A1. Also pinned, closed by A1: a `$crate::` path in a body a branch reaches (c8), `![]`/`()` delimiters (c9). Must
-/// NOT hold: the path form `cfg_if::cfg_if!` in a file binding nothing, with a nested macro naming an unrelated item (cx).
+/// NOT hold, priced: the path form beside a once-defined pair (cx) keeps `Fs` and gains exactly the opacity `Unknown`.
 #[test]
-fn i1s2b_the_cfg_if_exception_is_keyed_on_the_binding() {
+fn i1s2b_cfg_if_is_opaque_like_any_foreign_macro() {
     let root = tmpdir("s2ba2");
     let dep = root.join("edep");
     write_crate(
@@ -1613,7 +1616,9 @@ fn i1s2b_the_cfg_if_exception_is_keyed_on_the_binding() {
     for f in ["c4_e", "c5_e", "c8_e", "c9_e", "c11_e"] {
         assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f}: must disclose the twin: {rows:?}");
     }
-    assert_eq!(eff(&rows, "cx_x"), vec!["Fs".to_string()], "must not hold: {rows:?}");
+    // UPDATE A3: no `cfg_if!` exception, so the path form is opaque too: `cx_x` keeps its charge, plus exactly that `Unknown`.
+    let cx = eff(&rows, "cx_x");
+    assert!(cx.contains(&"Fs".to_string()) && cx.iter().all(|e| e == "Fs" || e == "Unknown"), "cx_x: {rows:?}");
     // c10: the dependency's `cfg_if` in textual scope through `#[macro_use] extern crate`, a crate of its own
     let d2 = root.join("app2");
     write_crate(

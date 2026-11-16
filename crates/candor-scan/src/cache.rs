@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev214 (rustagent-i1s2b, UPDATE A3): `cfg_if!` has no exception (opaque like any foreign macro); a rev213 entry may hold a
+    // decl read under the exception (corpus reports are unchanged; the fixtures' are not).
     // rev213 (rustagent-i1s2b, UPDATE A2): the `cfg_if!` exception is keyed on what provably binds the name (crate-wide
     // `cfg_if` facts in `CrateMacros`); a rev212 entry may hold a decl read under the name-keyed exception.
     // rev212 (rustagent-i1s2b, UPDATE A1): the closure reads every body of a name and treats `$m!` as opaque, and `cfg_if!`'s
@@ -751,7 +753,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev213/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev214/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
