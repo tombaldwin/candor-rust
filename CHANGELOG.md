@@ -24,16 +24,21 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   - introduced on main by I1 stage 1 (`97c23112`, unreleased; 1 on 0.42.0, 0 on main): the trait twin or the trait-impl twin
     in a sibling module (inline or file, `pub(crate)`, named through `super::`, a glob re-export or a `use … as` rename,
     including a rename hidden on both arms), the hidden trait one or two modules down inside the hidden text, and a hidden
-    blanket impl in the same or a sibling module;
+    blanket impl over a bare type parameter (`impl<T: Mk> Tr for T`) in the same or a sibling module;
   - introduced by the module splice in the entry below (1 on 0.42.0 and on main, 0 with that splice alone): the impl pair
     inside produced cfg-gated modules (`on! { pub mod imp { impl Tr for S {} } }` beside `vis! { pub mod imp { impl Tr for S
     { fn go() {} } } }`) with the trait twin hidden in the same or a sibling module;
   - silent on 0.42.0 too: an inherent twin in a sibling module or in a nested hidden module, member-level hidden text in a
     sibling module's impl, a hand-written gated impl pair in a hand-written module, a hidden default inside the trait body
     (a trait-item-position invocation), and a member-gated hand-written impl beside a hidden trait.
-  Not covered, stated: crate-wide matching reads only the keys of text that expanded or parsed, not the identifier-only
-  fallbacks; an out-of-line module arm (`#[path] mod imp;`) has a body the cover cannot mark, and holds today only through
-  the call's own `macro:` disclosure. Cost, named: matching by last segment over-holds where a DIFFERENT type or trait of the
+  STILL OPEN, introduced on main by I1 stage 1 (`97c23112`; each reads `deny Unknown` 1 on 0.42.0 and 0 on main and on
+  this build, executed): a hidden blanket impl whose self type is not a bare parameter (`impl<T: Mk> Tr for &T`, `&mut T`,
+  a pointer, a tuple or a slice of `T`) beside a visible gated impl for `&S`; and a visible gated impl whose self type is a
+  `type` alias (`impl Tr for Alias` with `type Alias = S;`) beside a hidden impl for `S` (renames are followed for the
+  trait only). Not covered, stated: crate-wide matching reads only the keys of text that expanded or parsed, not the
+  identifier-only fallbacks; an out-of-line module arm has a body the cover cannot mark: spelled `#[path = ".."] mod imp;`
+  it holds today only through the call's own `macro:` disclosure, and a plain produced `mod imp;` (its body in `imp.rs`) is
+  silent on every build, 0.42.0 included. Cost, named: matching by last segment over-holds where a DIFFERENT type or trait of the
   same name in another module has hidden text, and where two impls of one generic trait differ only in its arguments (two
   controls read `Fs` plus `Unknown`); on 181 crates the check marks 102 units in 7 crates (rand 36, syn 31, tokio 15,
   futures-util 8, palette 6, mio 6) and 22 rows newly carry `Unknown` only (0.02%), 0 removed, 0 concrete or disclosure
