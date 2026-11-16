@@ -45,10 +45,17 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
     resolution, and the `Flags::bits` key is kept;
   - a path call through `type Cursor = u32;` to a local trait impl for `u32`, x11rb-protocol. This is disclosed.
 
-  Corpus A/B main → this, 181 crates: 0 concrete effects lost, 28 unit-scoped `deny E` gates newly fire (Rand 25, Log 3),
-  27 existing rows newly `Unknown` (0.022%), and every lost `Unknown` / removed row is accounted for in the lane report.
+  Where a crate also holds a non-std derive, an attribute macro or an unexpanded item invocation, the macro-implementor
+  hedge on its traits is kept: one of those may add an implementor the scan cannot see (R1804).
+
+  Corpus A/B main → this, 181 crates:
+  - 0 concrete effects lost;
+  - 28 unit-scoped `deny E` gates newly fire (Rand 25, Log 3), and 2 crate-wide `deny Rand`;
+  - 31 existing rows newly `Unknown` (0.025% of analysed units), and 1 crate newly fails a crate-wide `deny Unknown`;
+  - every lost `Unknown` and every removed row is accounted for in the lane report.
+
   Kill switches: `CANDOR_I1_OFF=1`, `CANDOR_I1_BIND_OFF=1`, `CANDOR_I1_RESPAN_OFF=1`, `CANDOR_I1_RETGENW_OFF=1`,
-  `CANDOR_I1_PRIMALIAS_OFF=1`. Scan cache rev 195.
+  `CANDOR_I1_PRIMALIAS_OFF=1`, `CANDOR_I1_HIDDEN_OFF=1`. Scan cache rev 195.
 
 - ⚠ **A member called on a GENERIC receiver now follows the bound's `Deref` target, conversion argument and projection**
   (SOUNDNESS R1657 bound projection, R1793, R1795, R1796; silent under-reports, pre-existing on 0.42.0). A bound was stored as
