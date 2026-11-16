@@ -906,17 +906,44 @@ impl Ctx<'_> {
                         if let syn::ImplItem::Fn(f) = ii {
                             let mk = format!("{ik}::{}", f.sig.ident);
                             h.sigs.entry(mk.clone()).or_insert_with(|| f.sig.clone());
+                            h.xkeys.insert(mk.clone());
                             h.keys.insert(mk);
                         }
                     }
+                    h.xkeys.insert(ik.clone());
                     h.keys.insert(ik);
                 }
                 for ii in &im.items {
                     self.read_hidden_member(&owner, ii, out, h, depth);
                 }
             }
+            // I1 stage 2c — a module INSIDE hidden text (`hid! { pub mod inner { pub trait Tr { .. } } }`): its path items are
+            // keyed under its name (`inner::x`), its impl-scoped keys unprefixed (they are not path-scoped). Before, the
+            // module's NAME was all that was read, so a trait or impl inside it was invisible to every lookup (Fable merge
+            // review 2a `rc_e`).
+            syn::Item::Mod(md) if md.content.is_some() && !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") => {
+                h.keys.insert(md.ident.to_string());
+                let inner = &md.content.as_ref().map(|c| &c.1).into_iter().flatten().cloned().collect::<Vec<_>>();
+                let mut sub = Hidden { steps: h.steps, ..Hidden::default() };
+                for x in inner {
+                    self.read_hidden_item(x, inner, &mut sub, depth + 1);
+                }
+                h.steps = sub.steps;
+                let pre = md.ident.to_string();
+                let Hidden { opaque, keys, loose, xkeys, sigs, .. } = sub;
+                h.opaque |= opaque;
+                h.keys.extend(keys.into_iter().map(|k| format!("{pre}::{k}")));
+                h.loose.extend(loose);
+                h.xkeys.extend(xkeys);
+                for (k, v) in sigs {
+                    h.sigs.entry(k).or_insert(v);
+                }
+            }
             _ => {
                 let k = item_keys(it, out);
+                if matches!(it, syn::Item::Trait(_)) || mbe_trait_body_of(it).is_some() {
+                    h.xkeys.extend(k.names.iter().cloned()); // `Tr`, `Tr::m`: a trait's items reach its impls crate-wide
+                }
                 if let syn::Item::Use(u) = it {
                     if candor_report::env::trace("CANDOR_I1_INSTR") {
                         let t = quote::ToTokens::to_token_stream(&u.tree).to_string();
@@ -937,6 +964,7 @@ impl Ctx<'_> {
     fn read_hidden_member(&self, owner: &str, ii: &syn::ImplItem, out: &[syn::Item], h: &mut Hidden, depth: usize) {
         match ii {
             syn::ImplItem::Fn(f) => {
+                h.xkeys.insert(format!("{owner}::{}", f.sig.ident));
                 h.keys.insert(format!("{owner}::{}", f.sig.ident));
             }
             syn::ImplItem::Macro(m) => self.read_hidden(&m.mac, Some(owner), out, h, depth),
@@ -1351,12 +1379,7 @@ impl Ctx<'_> {
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
                             eprintln!("I1S2HIDBY\t{}", invocation_key(&m.mac).split('!').next().unwrap_or("")); // §E1 REACH COUNTER
                         }
-                        item.opaque |= h.opaque;
-                        item.keys.extend(h.keys);
-                        item.loose.extend(h.loose);
-                        for (k, v) in h.sigs {
-                            item.sigs.entry(k).or_insert(v);
-                        }
+                        item.absorb(h);
                     }
                     syn::Item::Impl(im) => {
                         let owner = ty_key(&im.self_ty);
@@ -1364,9 +1387,19 @@ impl Ctx<'_> {
                             if let syn::ImplItem::Macro(m) = ii {
                                 let mut h = Hidden::default();
                                 self.read_hidden(&m.mac, Some(&owner), &out, &mut h, 0);
-                                member.opaque |= h.opaque;
-                                member.keys.extend(h.keys);
-                                member.loose.extend(h.loose);
+                                member.absorb(h);
+                            }
+                        }
+                    }
+                    // I1 stage 2c — a TRAIT-ITEM-position invocation left unexpanded (`trait Tr { hid! { fn go { .. } }
+                    // #[cfg(not(unix))] fn go(&self) {} }`) is the trait's own hidden member text, keyed `Tr::m` (`rd_e`).
+                    syn::Item::Trait(t) if !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") => {
+                        let owner = t.ident.to_string();
+                        for ti in &t.items {
+                            if let syn::TraitItem::Macro(m) = ti {
+                                let mut h = Hidden::default();
+                                self.read_hidden(&m.mac, Some(&owner), &out, &mut h, 0);
+                                member.absorb(h);
                             }
                         }
                     }
@@ -1374,6 +1407,25 @@ impl Ctx<'_> {
                 }
             }
             mark_hidden_twins(&mut out, &spliced, &item, &member);
+            // I1 stage 2c — export this module's impl-scoped hidden keys (and, for the measured `all` scope, its path keys)
+            // for the crate-wide check at pass B (`cache::twin_facts`).
+            if !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
+                let mut ks: Vec<String> = item.xkeys.iter().chain(&member.xkeys).cloned().collect();
+                ks.extend(item.keys.iter().map(|k| format!("p:{k}")));
+                if item.opaque || member.opaque {
+                    ks.push("!opaque".to_string());
+                }
+                ks.sort();
+                ks.dedup();
+                if !ks.is_empty() {
+                    let mut ts = TokenStream::new();
+                    ts.extend([TokenTree::Ident(Ident::new(XKEYS_MARK, proc_macro2::Span::call_site()))]);
+                    for k in ks {
+                        ts.extend([TokenTree::Literal(proc_macro2::Literal::string(&k))]);
+                    }
+                    out.push(syn::Item::Verbatim(ts));
+                }
+            }
         }
         *items = out;
     }
@@ -1413,7 +1465,7 @@ fn is_hidden_text(m: &syn::ItemMacro, partial: &std::collections::HashSet<String
     !(toolchain_path && TOOLCHAIN_BANG_MACROS.contains(&leaf.as_str()))
 }
 
-fn is_gated(a: &[syn::Attribute]) -> bool {
+pub(crate) fn is_gated(a: &[syn::Attribute]) -> bool {
     a.iter().any(|x| x.path().is_ident("cfg") || x.path().is_ident("cfg_attr"))
 }
 
@@ -1518,6 +1570,12 @@ struct Hidden {
     steps: usize,
     /// the signature of each hidden trait-impl member, keyed `Owner as Trait::m` (see `read_hidden_item`)
     sigs: std::collections::HashMap<String, syn::Signature>,
+    /// I1 stage 2c — the IMPL-SCOPED keys: `Tr`, `Tr::m` (a trait and its items), `S as Tr`, `S as Tr::m` (a trait impl),
+    /// `S::m` (any impl member). Unlike a path item (a fn, `use`, module or type, whose cfg twin must sit at the same path, so
+    /// in this module), an impl's twin can sit in ANY module of the crate, and a trait's default reaches every impl of it
+    /// wherever that impl is written: these keys are read through nested hidden modules unprefixed and exported crate-wide
+    /// (`XKEYS_MARK`, `cache::FileDecls::i1_xkeys`), where pass B checks every gated impl member against them.
+    xkeys: std::collections::HashSet<String>,
 }
 
 /// Expansions one hidden invocation's reading may attempt before it falls to `loose`.
@@ -1542,11 +1600,22 @@ impl Hidden {
     fn covers_method(&self, owner: &str, m: &str, type_twin: bool) -> bool {
         self.opaque
             || self.keys.contains(&format!("{owner}::{m}"))
+            || self.xkeys.contains(&format!("{owner}::{m}"))
             || self.loose.contains(m)
             || (type_twin && (self.keys.contains(owner) || self.loose.contains(owner)))
     }
     fn is_empty(&self) -> bool {
-        !self.opaque && self.keys.is_empty() && self.loose.is_empty()
+        !self.opaque && self.keys.is_empty() && self.loose.is_empty() && self.xkeys.is_empty()
+    }
+    /// Fold another reading in (the module-level union of every hidden invocation's reading).
+    fn absorb(&mut self, h: Hidden) {
+        self.opaque |= h.opaque;
+        self.keys.extend(h.keys);
+        self.loose.extend(h.loose);
+        self.xkeys.extend(h.xkeys);
+        for (k, v) in h.sigs {
+            self.sigs.entry(k).or_insert(v);
+        }
     }
 }
 
@@ -1587,7 +1656,7 @@ fn all_idents(ts: &TokenStream, out: &mut std::collections::HashSet<String>) {
 }
 
 /// An impl's self type as both readers key it: the last path segment, or the type's text for a non-path type.
-fn ty_key(t: &syn::Type) -> String {
+pub(crate) fn ty_key(t: &syn::Type) -> String {
     match t {
         syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
         syn::Type::Group(g) => ty_key(&g.elem),
@@ -1819,6 +1888,21 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
             cover_trait_marker(it, item);
             continue;
         }
+        // I1 stage 2c — a gated DEFAULT body beside the trait's own unexpanded trait-item text that may define it (`rd_e`).
+        if let syn::Item::Trait(t) = it {
+            if !member.is_empty() && !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
+                let tn = t.ident.to_string();
+                for ti in t.items.iter_mut() {
+                    if let syn::TraitItem::Fn(f) = ti {
+                        let n = f.sig.ident.to_string();
+                        if f.default.is_some() && is_gated(&f.attrs) && member.covers_method(&tn, &n, false) {
+                            mark_fn_as(&mut f.attrs, &format!("{tn}::{n}"), "I1S2MARKTRAITITEM");
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         if let syn::Item::Impl(im) = it {
             if item.is_empty() && member.is_empty() {
                 continue;
@@ -1840,12 +1924,21 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
             // this arm and is OPEN. `CANDOR_I1S2_TRAITARM_OFF=1` drops this arm.
             let tr = trait_key(im);
             let ik = tr.as_ref().map(|t| format!("{owner} as {t}"));
-            let hidden_trait = |t: &str| item.keys.contains(t) || member.keys.contains(t) || item.opaque;
+            let hidden_trait =
+                |t: &str| item.keys.contains(t) || item.xkeys.contains(t) || member.keys.contains(t) || item.opaque;
             let hidden_impl = |k: &str, t: &str| {
-                item.keys.contains(k) || member.keys.contains(k) || (item.loose.contains(t) && item.loose.contains(&owner))
+                item.keys.contains(k)
+                    || item.xkeys.contains(k)
+                    || member.keys.contains(k)
+                    || (item.loose.contains(t) && item.loose.contains(&owner))
             };
-            let arm_on = block && tr.is_some() && !candor_report::env::switch("CANDOR_I1S2_TRAITARM_OFF");
-            let trait_twin = arm_on && tr.as_ref().is_some_and(|t| hidden_trait(t) || hidden_impl(ik.as_deref().unwrap_or(""), t));
+            let arm_enabled = tr.is_some() && !candor_report::env::switch("CANDOR_I1S2_TRAITARM_OFF");
+            let arm_on = block && arm_enabled;
+            // I1 stage 2c — the trait leg applies to a member gated on its own as well as to a gated block (`rm_e`: a
+            // hand-written `impl Tr for S { #[cfg(not(unix))] fn go(&self) {} }` beside a hidden trait default).
+            let trait_twin = arm_enabled
+                && tr.as_ref().is_some_and(|t| hidden_trait(t) || hidden_impl(ik.as_deref().unwrap_or(""), t))
+                && (block || !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF"));
             let mut have: std::collections::HashSet<String> = std::collections::HashSet::new();
             for ii in im.items.iter_mut() {
                 if let syn::ImplItem::Fn(f) = ii {
@@ -1887,6 +1980,106 @@ fn i1_refused(g: &syn::Item) -> bool {
         }
         _ => false,
     }
+}
+
+/// I1 stage 2c — the marker carrying one module's exported hidden keys (`Hidden::xkeys`, `p:`-prefixed path keys, `!opaque`).
+const XKEYS_MARK: &str = "__candor_i1_xkeys";
+
+/// I1 stage 2c — the crate-wide twin facts of one file: every module's exported hidden keys (`XKEYS_MARK`), the `use … as`
+/// renames it writes (`Alias=Orig`, last segments), and every cfg-gated trait impl block (`S as Tr|m1,m2`, the members it
+/// writes). Read into `cache::FileDecls`, unioned at the merge, consulted at pass B.
+pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<String>) {
+    fn renames(t: &syn::UseTree, out: &mut Vec<String>) {
+        match t {
+            syn::UseTree::Path(p) => renames(&p.tree, out),
+            syn::UseTree::Rename(r) => out.push(format!("{}={}", r.rename, r.ident)),
+            syn::UseTree::Group(g) => g.items.iter().for_each(|i| renames(i, out)),
+            _ => {}
+        }
+    }
+    fn walk(items: &[syn::Item], x: &mut Vec<String>, r: &mut Vec<String>, g: &mut Vec<String>) {
+        for it in items {
+            match it {
+                syn::Item::Verbatim(ts) => {
+                    let mut toks = ts.clone().into_iter();
+                    if matches!(toks.next(), Some(TokenTree::Ident(a)) if a == XKEYS_MARK) {
+                        for t in toks {
+                            if let TokenTree::Literal(l) = t {
+                                if let Ok(syn::Lit::Str(s)) = syn::parse2::<syn::Lit>(TokenTree::Literal(l).into()) {
+                                    x.push(s.value());
+                                }
+                            }
+                        }
+                    }
+                }
+                syn::Item::Use(u) => renames(&u.tree, r),
+                syn::Item::Impl(im) if is_gated(&im.attrs) => {
+                    if let Some(t) = trait_key(im) {
+                        let ms: Vec<String> = im
+                            .items
+                            .iter()
+                            .filter_map(|ii| match ii {
+                                syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        g.push(format!("{} as {t}|{}", ty_key(&im.self_ty), ms.join(",")));
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, inner)) = &m.content {
+                        walk(inner, x, r, g);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (mut x, mut r, mut g) = (Vec::new(), Vec::new(), Vec::new());
+    walk(items, &mut x, &mut r, &mut g);
+    for v in [&mut x, &mut r, &mut g] {
+        v.sort();
+        v.dedup();
+    }
+    (x, r, g)
+}
+
+/// I1 stage 2c — the lookup keys of one gated impl member, `Tr|S|m` (`Tr` empty for an inherent impl), with the trait's
+/// renames followed: what the crate-wide hidden keys are checked for (pass B).
+pub(crate) fn twin_cand_keys(cand: &str, renames: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>) -> Vec<String> {
+    let mut it = cand.splitn(3, '|');
+    let (Some(tr), Some(s), Some(m)) = (it.next(), it.next(), it.next()) else { return Vec::new() };
+    let mut out = Vec::new();
+    if !s.is_empty() {
+        out.push(format!("{s}::{m}"));
+    }
+    if tr.is_empty() {
+        if s.is_empty() {
+            out.push(format!("p:{m}")); // a gated free fn: only the measured `all` scope asks
+        }
+        return out;
+    }
+    let mut trs: Vec<String> = vec![tr.to_string()];
+    let mut i = 0;
+    while i < trs.len() && i < 16 {
+        if let Some(o) = renames.get(&trs[i]) {
+            for x in o {
+                if !trs.contains(x) {
+                    trs.push(x.clone());
+                }
+            }
+        }
+        i += 1;
+    }
+    for t in &trs {
+        out.push(t.clone());
+        out.push(format!("{t}::{m}"));
+        if !s.is_empty() {
+            out.push(format!("{s} as {t}"));
+            out.push(format!("{s} as {t}::{m}"));
+        }
+    }
+    out
 }
 
 /// I1 stage 1 — the marker that stands where a fully expanded invocation was. Read by `mbe_expanded_of`.

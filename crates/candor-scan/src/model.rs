@@ -289,6 +289,10 @@ pub(crate) struct FnInfo {
     /// here can only ADD `Unknown`; none of them withdraws an answer.
     #[serde(rename = "rf", default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) refusals: Vec<String>,
+    /// I1 stage 2c — a member of a cfg-gated impl (block or member gated), `Tr|S|m` (`Tr` empty for an inherent impl;
+    /// `||m` a gated free fn): pass B checks the crate's exported hidden keys for its twin (`mbe::twin_cand_keys`).
+    #[serde(rename = "ic", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) i1_cand: Option<String>,
     /// ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf)` pairs this fn dispatches on through a local
     /// bounded-CHA-eligible receiver — see `CallCollector::dispatch_sites` for the full rationale. NOT
     /// part of `candor_report::ReportEntry` (the public wire schema): an ordinary scan's published report

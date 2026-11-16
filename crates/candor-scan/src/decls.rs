@@ -150,6 +150,9 @@ pub(crate) fn scan_items(
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
                 let mut info = fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
+                if crate::mbe::is_gated(&f.attrs) {
+                    info.i1_cand = Some(format!("||{n}")); // I1 stage 2c — consulted only under the measured `all` scope
+                }
                 if f.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
                     info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
                 }
@@ -270,6 +273,11 @@ pub(crate) fn scan_items(
                         info.derive_synth = crate::model::is_derive_synth(&im.attrs);
                         info.mbe_prim_op = mbe_prim.is_some(); // R1157
                         info.mbe_op = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_OP_ATTR)); // R1180
+                        // I1 stage 2c — a member of a cfg-gated impl is one arm; its twin may sit in any module of the crate.
+                        if crate::mbe::is_gated(&im.attrs) || crate::mbe::is_gated(&m.attrs) {
+                            let tr = im.trait_.as_ref().and_then(|(_, p, _)| p.segments.last()).map(|s| s.ident.to_string());
+                            info.i1_cand = Some(format!("{}|{}|{n}", tr.unwrap_or_default(), crate::mbe::ty_key(&im.self_ty)));
+                        }
                         if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
                             info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
                         }
@@ -5190,6 +5198,7 @@ pub(crate) fn fninfo(
         ret_bound_type,
         ret_proto,
         refusals: c.refusals.into_iter().chain(c.late_refusals.into_inner()).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
+        i1_cand: None,
         dispatch: c.dispatch_sites.into_iter().collect(),
         dispatch_named: c.dispatch_named.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),

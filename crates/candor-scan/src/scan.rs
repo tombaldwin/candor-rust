@@ -4418,7 +4418,60 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         m
     };
     let mut sc_records: Vec<serde_json::Value> = Vec::new(); // STEP 0b sidecar (empty unless on)
+    // I1 stage 2c — THE CRATE-WIDE TWIN CHECK. The cover (`mbe::mark_hidden_twins`) reads hidden text per module, which is
+    // the right unit for a PATH item (a fn, `use`, module or type: its cfg twin is at the same path) and the wrong one for an
+    // IMPL, whose arms can sit in any module, and for a trait, whose default reaches every impl of it wherever written. Stage
+    // 1 spliced macro-made trait impls crate-wide, so a gated impl member whose twin (the trait's default, another impl of the
+    // same trait for the same type, an inherent impl of the same type) is unexpanded text in ANOTHER module resolved alone
+    // (Fable merge review 2a `ra_e`/`rb_e`). Here every gated impl member (`FnInfo::i1_cand`) is checked against the keys
+    // every module exported (`MergedDecls::i1_xkeys`), by last segment, following `use … as` renames; and a trait default
+    // whose type's hidden impl overrides it while the visible gated impl lacks the member is hedged at the default.
+    // `CANDOR_I1S2C_XMOD_OFF=1` drops it; `CANDOR_I1S2C_SCOPE=all` also checks gated free fns against path keys (measured,
+    // not the default: a path item's twin is in its own module, so a crate-wide name match there is a guess).
+    let i1c_on = !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF");
+    let i1c_all = i1c_on && candor_report::env::switch_value("CANDOR_I1S2C_SCOPE", candor_report::env::Selects::AnyOf(&["all"]));
+    let mut i1c_renames: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = Default::default();
+    let mut i1c_defaults: HashSet<String> = HashSet::new();
+    if i1c_on {
+        for r in &merged.i1_renames {
+            if let Some((a, o)) = r.split_once('=') {
+                i1c_renames.entry(a.to_string()).or_default().insert(o.to_string());
+            }
+        }
+        for g in &merged.i1_gated_impls {
+            let Some((ik, ms)) = g.split_once('|') else { continue };
+            let Some((s, t)) = ik.split_once(" as ") else { continue };
+            let have: HashSet<&str> = ms.split(',').filter(|m| !m.is_empty()).collect();
+            for k in crate::mbe::twin_cand_keys(&format!("{t}|{s}|"), &i1c_renames) {
+                let Some(ti) = k.strip_prefix(&format!("{s} as ")).filter(|x| !x.contains("::")) else { continue };
+                let pre = format!("{s} as {ti}::");
+                for x in merged.i1_xkeys.range(pre.clone()..) {
+                    let Some(m) = x.strip_prefix(&pre) else { break };
+                    if !have.contains(m) {
+                        i1c_defaults.insert(format!("{t}::{m}"));
+                        i1c_defaults.insert(format!("{ti}::{m}"));
+                    }
+                }
+            }
+        }
+    }
     for f in &fns {
+        if i1c_on && !f.refusals.iter().any(|w| w == crate::model::MBE_TWIN_WHY) {
+            let hit = f.i1_cand.as_deref().is_some_and(|c| {
+                crate::mbe::twin_cand_keys(c, &i1c_renames)
+                    .iter()
+                    .any(|k| (i1c_all || !k.starts_with("p:")) && merged.i1_xkeys.contains(k))
+            });
+            let dflt = !i1c_defaults.is_empty()
+                && i1c_defaults.iter().any(|d| f.qual == *d || f.qual.ends_with(&format!("::{d}")));
+            if hit || dflt {
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                unknown_why.entry(f.qual.clone()).or_default().insert(crate::model::MBE_TWIN_WHY.to_string());
+                if candor_report::env::trace("CANDOR_I1_INSTR") {
+                    eprintln!("I1S2CXMARK	{}	{}", if hit { "member" } else { "default" }, f.qual); // §E1 REACH COUNTER
+                }
+            }
+        }
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
         // perform any effect, so record an honest `Unknown` (propagated like any effect, surfaced in the
