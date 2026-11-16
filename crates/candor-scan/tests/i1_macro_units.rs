@@ -1296,3 +1296,85 @@ fn i1s2c_gated_modules_blanket_impls_and_hidden_renames_keep_a_hedge() {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "XMOD_OFF: {f} resolves to the visible arm alone: {off:?}");
     }
 }
+
+/// I1 stage 2d (Fable re-check 2c-2 RC4-1/RC4-2/RC4.3, fixtures `fxu`/`fxw`/`fxv`, executed). (r) a hidden blanket over a
+/// NON-PATH self type (`impl<T: Mk> Tr for &T`) was keyed `& T`, which no candidate asked for (`deny Unknown` 1 on 0.42.0,
+/// 0 on main); now it is a blanket (`* as Tr`), as are `&mut T`, tuples and slices of `T`. (a) a visible gated impl whose
+/// self type is a `type` alias of the type the hidden impl names (1 on 0.42.0, 0 on main), and the reverse orientation.
+/// (o) the OVER-HOLD removed: a same-named `macro_rules!` in a SIBLING cfg module was read as the hidden invocation's body,
+/// so a member that invocation never defines was marked; hidden bodies now come from textual scope. Must NOT hold: a hidden
+/// `&T` blanket of ANOTHER trait beside a once-defined pair, and the over-hold shape `o`.
+#[test]
+fn i1s2d_ref_blankets_aliases_and_scoped_bodies() {
+    let d = tmpdir("s2d");
+    let hdr = |s: &str| {
+        format!(
+            "#[cfg(feature = \"x\")]\nmacro_rules! hid_{s} {{ ($($t:tt)*) => {{ #[cfg(unix)] $($t)* }} }}\n\
+             #[cfg(not(feature = \"x\"))]\nmacro_rules! hid_{s} {{ ($($u:tt)*) => {{ #[cfg(unix)] $($u)* }} }}\n\
+             macro_rules! vis_{s} {{ ($($i:item)*) => {{ $( #[cfg(not(unix))] $i )* }} }}\n\
+             macro_rules! on_{s} {{ ($($i:item)*) => {{ $( #[cfg(unix)] $i )* }} }}\n"
+        )
+    };
+    let files: &[(&str, &str)] = &[
+        (
+            "r",
+            "pub trait TrR { fn go(&self); }\npub trait MkR {}\npub struct SR;\nimpl MkR for SR {}\n\
+             hid_r! { impl<T: MkR> TrR for &T { fn go(&self) { EFF } } }\nvis_r! { impl TrR for &SR { fn go(&self) {} } }\n",
+        ),
+        (
+            "t",
+            "pub trait TrT { fn go(&self); }\npub trait MkT {}\npub struct ST;\nimpl MkT for ST {}\n\
+             hid_t! { impl<T: MkT> TrT for (T,) { fn go(&self) { EFF } } }\nvis_t! { impl TrT for (ST,) { fn go(&self) {} } }\n",
+        ),
+        (
+            "a",
+            "pub trait TrA { fn go(&self); }\npub struct SA;\npub type AA = SA;\n\
+             hid_a! { impl TrA for SA { fn go(&self) { EFF } } }\nvis_a! { impl TrA for AA { fn go(&self) {} } }\n",
+        ),
+        (
+            "b",
+            "pub trait TrB { fn go(&self); }\npub struct SB;\npub type AB = SB;\n\
+             hid_b! { impl TrB for AB { fn go(&self) { EFF } } }\nvis_b! { impl TrB for SB { fn go(&self) {} } }\n",
+        ),
+        (
+            "x",
+            "pub trait TrX { fn go(&self); }\npub trait OtherX { fn go(&self); }\npub trait MkX {}\npub struct SX;\n\
+             hid_x! { impl<T: MkX> OtherX for &T { fn go(&self) {} } }\n\
+             on_x! { impl TrX for SX { fn go(&self) { EFF } } }\nvis_x! { impl TrX for SX { fn go(&self) {} } }\n",
+        ),
+        (
+            "o",
+            "pub trait FdO { fn fd(&self); }\npub trait HandleO { fn handle(&self); }\npub struct SO;\n\
+             #[cfg(unix)]\nmod sys {\n    macro_rules! ito { ($t:ty) => { impl super::FdO for $t { fn fd(&self) { EFF } } } }\n    ito!(super::SO);\n}\n\
+             #[cfg(any(windows, docsrs))]\nmod win {\n    #[cfg(not(docsrs))]\n    macro_rules! ito { ($t:ty) => { impl super::HandleO for $t { fn handle(&self) {} } } }\n\
+                 #[cfg(docsrs)]\n    macro_rules! ito { ($t:ty) => { impl super::HandleO for $t { fn handle(&self) {} } } }\n    ito!(super::SO);\n}\n",
+        ),
+    ];
+    let mut lib = String::new();
+    for (n, _) in files {
+        lib.push_str(&format!("pub mod {n};\n"));
+    }
+    lib.push_str(
+        "pub fn er_e() { use crate::r::TrR; let s = crate::r::SR; (&s).go() }\n\
+         pub fn et_e() { use crate::t::TrT; (crate::t::ST,).go() }\n\
+         pub fn ea_e() { use crate::a::TrA; crate::a::SA.go() }\npub fn eb_e() { use crate::b::TrB; crate::b::SB.go() }\n\
+         pub fn ex_x() { use crate::x::TrX; crate::x::SX.go() }\npub fn eo_x() { use crate::o::FdO; crate::o::SO.fd() }\n",
+    );
+    write_crate(&d, "s2d", "[features]\nx = []\n", &lib);
+    for (n, body) in files {
+        let text = if *n == "o" { body.to_string() } else { hdr(n) + body };
+        write_file(&d, &format!("src/{n}.rs"), &text);
+    }
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["er_e", "et_e", "ea_e", "eb_e"] {
+        assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f} must disclose the hidden twin: {rows:?}");
+    }
+    for f in ["ex_x", "eo_x"] {
+        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: must not hold: {rows:?}");
+    }
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2D_REFBLANKET_OFF", "1"), ("CANDOR_I1S2D_ALIAS_OFF", "1"), ("CANDOR_I1S2D_SCOPEBODY_OFF", "1")]);
+    for f in ["er_e", "ea_e"] {
+        assert!(!eff(&off, f).contains(&"Unknown".to_string()), "switches off: {f} is main's silence again: {off:?}");
+    }
+    assert!(eff(&off, "eo_x").contains(&"Unknown".to_string()), "SCOPEBODY_OFF: the sibling body is bound again: {off:?}");
+}

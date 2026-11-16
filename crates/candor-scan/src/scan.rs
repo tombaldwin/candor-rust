@@ -4436,6 +4436,10 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         for r in &merged.i1_renames {
             if let Some((a, o)) = r.split_once('=') {
                 i1c_renames.entry(a.to_string()).or_default().insert(o.to_string());
+                // I1 stage 2d — both ways: the hidden arm may name the alias where the visible arm names the original.
+                if !candor_report::env::switch("CANDOR_I1S2D_ALIAS_OFF") {
+                    i1c_renames.entry(o.to_string()).or_default().insert(a.to_string());
+                }
             }
         }
         for g in &merged.i1_gated_impls {

@@ -11,6 +11,24 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A hidden blanket impl over a reference, pointer, tuple, slice or array of its parameter, and a visible gated impl
+  whose self type is a `type` alias, now keep the hidden-twin hedge; a same-named macro in a sibling module no longer
+  does** (SOUNDNESS R1541, I1 stage 2d). Two positions I1 stage 1 (`97c23112`, unreleased) introduced on main, each `deny
+  Unknown` 1 on 0.42.0 and 0 on main, executed: `hid! { impl<T: Mk> Tr for &T { fn go() { write } } }` beside `vis! {
+  impl Tr for &S { fn go() {} } }` keyed its self type as the text `& T`, which no candidate asked for; it is now a blanket
+  over that SHAPE (`& as Tr`, likewise `&mut`, `*const`, `*mut`, tuples, `[T]`, `[T; N]`), asked for by every candidate
+  whose self type has the shape. And `impl Tr for Alias` (`type Alias = S;`) beside a hidden `impl Tr for S`: `type`
+  aliases, visible or hidden, are now followed like renames, both ways, for the self type as for the trait (the reverse
+  orientation and an alias chain were introduced by stage 1 too). Also closed, silent on 0.42.0 too: the tuple and slice
+  blankets, and an alias declared in another module. And one over-hold removed (direction: a reason, not an effect): a hidden invocation's macro bodies are
+  now read from TEXTUAL scope, so tokio's `impl_traits!` in `#[cfg(unix)] mod sys` is no longer read as the body of the
+  windows arm's refused `impl_traits!` in a sibling module; 9 tokio rows (`ChildStd{in,out,err}::{as_fd, as_raw_fd,
+  into_owned_fd}`) lose the `macro:another cfg arm …` reason and keep `Unknown` from their callees. Cost: on 181 crates
+  the check marks 113 units (palette 26, rand 36, syn 31, futures-util 8, mio 6, tokio 6) and 1 more row newly carries
+  `Unknown` (palette `hues::into_iter`: a `&`-shape blanket over `&'a Hue<T>` matches every `&`-shape impl of
+  `IntoIterator`); 0 removed, 0 concrete or disclosure lost. Kill switches `CANDOR_I1S2D_REFBLANKET_OFF`,
+  `CANDOR_I1S2D_ALIAS_OFF`, `CANDOR_I1S2D_SCOPEBODY_OFF`. Cache rev 208.
+
 - ⚠ **A cfg-gated impl member whose twin is unexpanded macro text in ANOTHER module, or inside a module the hidden text
   declares, now carries `macro:another cfg arm of this fn is hidden by an unexpanded macro`** (SOUNDNESS R1541, I1 stage
   2c). The hidden-twin cover read hidden text per module: right for a fn, `use` or type, whose cfg twin sits at the same
@@ -31,11 +49,7 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   - silent on 0.42.0 too: an inherent twin in a sibling module or in a nested hidden module, member-level hidden text in a
     sibling module's impl, a hand-written gated impl pair in a hand-written module, a hidden default inside the trait body
     (a trait-item-position invocation), and a member-gated hand-written impl beside a hidden trait.
-  STILL OPEN, introduced on main by I1 stage 1 (`97c23112`; each reads `deny Unknown` 1 on 0.42.0 and 0 on main and on
-  this build, executed): a hidden blanket impl whose self type is not a bare parameter (`impl<T: Mk> Tr for &T`, `&mut T`,
-  a pointer, a tuple or a slice of `T`) beside a visible gated impl for `&S`; and a visible gated impl whose self type is a
-  `type` alias (`impl Tr for Alias` with `type Alias = S;`) beside a hidden impl for `S` (renames are followed for the
-  trait only). Not covered, stated: crate-wide matching reads only the keys of text that expanded or parsed, not the
+  A hidden blanket over a non-bare self type and a `type`-alias self type are the next entry's. Not covered, stated: crate-wide matching reads only the keys of text that expanded or parsed, not the
   identifier-only fallbacks; an out-of-line module arm has a body the cover cannot mark: spelled `#[path = ".."] mod imp;`
   it holds today only through the call's own `macro:` disclosure, and a plain produced `mod imp;` (its body in `imp.rs`) is
   silent on every build, 0.42.0 included. Cost, named: matching by last segment over-holds where a DIFFERENT type or trait of the

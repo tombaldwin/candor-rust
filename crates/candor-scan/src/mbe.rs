@@ -597,6 +597,8 @@ pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String
 /// `ALL_BODIES_KEY`). A plain lookup rather than a closure, so the reading makes no indirect call.
 #[derive(Default)]
 struct BodyTable<'a> {
+    /// I1 stage 2d — the bodies in textual scope (`Ctx::scope_bodies`), consulted first; absent from the visible splice's table.
+    scoped: Option<&'a HashMap<String, Vec<TokenStream>>>,
     bodies: Option<&'a HashMap<String, Vec<TokenStream>>>,
     xdefs: Option<&'a CrateMacros>,
 }
@@ -604,6 +606,12 @@ struct BodyTable<'a> {
 impl BodyTable<'_> {
     /// `None`: not a local macro; `Some(None)`: local, but no body readable; `Some(Some(bodies))`.
     fn get(&self, n: &str) -> Option<Option<Vec<TokenStream>>> {
+        if let Some(bs) = self.scoped.and_then(|b| b.get(n)).filter(|v| !v.is_empty()) {
+            if candor_report::env::trace("CANDOR_I1_INSTR") && self.bodies.and_then(|b| b.get(n)).is_some_and(|all| all.len() > bs.len()) {
+                eprintln!("I1S2DSCOPEBODY\t{n}"); // §E1 REACH COUNTER: a same-named body out of textual scope left unread
+            }
+            return Some(Some(bs.clone()));
+        }
         if let Some(bs) = self.bodies.and_then(|b| b.get(n)) {
             return Some(Some(bs.clone()));
         }
@@ -719,6 +727,11 @@ struct Ctx<'x> {
     partial: std::collections::HashSet<String>,
     /// I1 stage 2 — EVERY `macro_rules!` body this file writes, by name, cfg twins included (`read_hidden`).
     bodies: HashMap<String, Vec<TokenStream>>,
+    /// I1 stage 2d — the `macro_rules!` bodies in TEXTUAL scope at the module being spliced, cfg twins included, saved and
+    /// restored around a child module exactly as `scope` is. `read_hidden` reads a name's bodies from here when it has any,
+    /// so a sibling module's same-named macro is not bound to an invocation that cannot reach it (Fable re-check 2c-2 RC4.3,
+    /// tokio's `impl_traits!` in `mod sys` read as `mod windows`'s hidden text).
+    scope_bodies: HashMap<String, Vec<TokenStream>>,
 }
 
 /// I1 step 1 — every name a `use` item of this file binds through a path that is NOT rooted at `crate`/`self`/`super`
@@ -798,7 +811,8 @@ impl Ctx<'_> {
             h.note("opaque", &name);
             return;
         }
-        let table = BodyTable { bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
+        let scoped = (!candor_report::env::switch("CANDOR_I1S2D_SCOPEBODY_OFF")).then_some(&self.scope_bodies);
+        let table = BodyTable { scoped, bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
         // The toolchain's own item macros define no name of the crate's but what they DECLARE: `thread_local! { static X .. }`
         // binds `X`; `compile_error!`, `global_asm!` and the rest bind nothing. A local definition shadowing the name is read below.
         let root_tc = mac.path.segments.len() == 1
@@ -906,8 +920,18 @@ impl Ctx<'_> {
                     // also keyed under the wildcard owner `*` (`* as Tr`, `* as Tr::m`), which every candidate of `Tr` asks
                     // for (`twin_cand_keys`). Keyed under its parameter's name alone it matched nothing (Fable merge
                     // review 2c `tg_e`/`tg2_e`, introduced on main by stage 1).
-                    let blanket = !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF")
-                        && im.generics.type_params().any(|p| p.ident == owner);
+                    let xmod = !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF");
+                    let blanket = xmod && im.generics.type_params().any(|p| p.ident == owner);
+                    // I1 stage 2d — a blanket over a non-path type (`&T`, a tuple, a slice…) twins only impls of that SHAPE.
+                    let shaped = (xmod && !blanket && structural_blanket(im)).then(|| self_shape(&owner)).flatten();
+                    if let Some(sh) = &shaped {
+                        h.xkeys.insert(format!("{sh} as {t}"));
+                        for ii in &im.items {
+                            if let syn::ImplItem::Fn(f) = ii {
+                                h.xkeys.insert(format!("{sh} as {t}::{}", f.sig.ident));
+                            }
+                        }
+                    }
                     for ii in &im.items {
                         if let syn::ImplItem::Fn(f) = ii {
                             let mk = format!("{ik}::{}", f.sig.ident);
@@ -955,6 +979,12 @@ impl Ctx<'_> {
                 let k = item_keys(it, out);
                 if matches!(it, syn::Item::Trait(_)) || mbe_trait_body_of(it).is_some() {
                     h.xkeys.extend(k.names.iter().cloned()); // `Tr`, `Tr::m`: a trait's items reach its impls crate-wide
+                }
+                // I1 stage 2d — a `type` alias the hidden text writes names its type another way (`=Alias=Orig`, as a rename).
+                if let syn::Item::Type(t) = it {
+                    if !candor_report::env::switch("CANDOR_I1S2D_ALIAS_OFF") {
+                        h.xkeys.insert(format!("={}={}", t.ident, ty_key(&t.ty)));
+                    }
                 }
                 if let syn::Item::Use(u) = it {
                     // I1 stage 2c — a `use … as` the hidden text writes is a rename the crate-wide check must follow too
@@ -1215,6 +1245,7 @@ impl Ctx<'_> {
                 if let (Some(name), true) = (&m.ident, m.mac.path.is_ident("macro_rules")) {
                     let gated = crate::lang::has_cfg(&m.attrs);
                     self.scope.insert(name.to_string(), (!gated).then(|| m.mac.tokens.to_string()));
+                    self.scope_bodies.entry(name.to_string()).or_default().push(m.mac.tokens.clone());
                 }
             }
             match &mut it {
@@ -1378,9 +1409,11 @@ impl Ctx<'_> {
                         // R1156 — a child sees the parent's textual scope; its own definitions leave with it
                         // unless the module is `#[macro_use]`.
                         let saved = self.scope.clone();
+                        let saved_bodies = self.scope_bodies.clone();
                         self.splice(inner, depth);
                         if !md.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
                             self.scope = saved;
+                            self.scope_bodies = saved_bodies;
                         }
                     }
                 }
@@ -1686,6 +1719,57 @@ pub(crate) fn ty_key(t: &syn::Type) -> String {
     }
 }
 
+/// I1 stage 2d — an impl whose self type is a NON-PATH type built over one of its own type parameters (`&T`, `&mut T`,
+/// `*const T`, `(T, U)`, `[T]`, `[T; N]`): a blanket over every type of that SHAPE, keyed `{shape} as Tr` (`self_shape`), which
+/// every candidate whose self type has the shape asks for (Fable re-check 2c-2 RC4-1 `tgref_e`: `ty_key(&T)` read `& T`, which
+/// no candidate asked for). A PATH self type over a parameter (`Box<T>`, `Vec<T>`) is keyed by its last segment, which the
+/// visible arm's `Box<S>` shares already.
+fn structural_blanket(im: &syn::ItemImpl) -> bool {
+    if candor_report::env::switch("CANDOR_I1S2D_REFBLANKET_OFF") || matches!(&*im.self_ty, syn::Type::Path(_)) {
+        return false;
+    }
+    let params: std::collections::HashSet<String> = im.generics.type_params().map(|p| p.ident.to_string()).collect();
+    let mut ids = std::collections::HashSet::new();
+    all_idents(&quote::ToTokens::to_token_stream(&*im.self_ty), &mut ids);
+    let hit = ids.iter().any(|i| params.contains(i));
+    if hit && candor_report::env::trace("CANDOR_I1_INSTR") {
+        eprintln!("I1S2DBLANKET\t{}", ty_key(&im.self_ty)); // §E1 REACH COUNTER
+    }
+    hit
+}
+
+/// I1 stage 2d — the outer constructor of a non-path self type, read from its `ty_key` text: `&`, `&mut`, `*const`, `*mut`,
+/// `()` (a tuple), `[;]` (an array), `[]` (a slice). `None` for a path type.
+pub(crate) fn self_shape(k: &str) -> Option<String> {
+    let t = k.trim_start();
+    let sh = if t.starts_with("& mut") || t.starts_with("&mut") {
+        "&mut"
+    } else if t.starts_with('&') {
+        "&"
+    } else if t.starts_with("* const") || t.starts_with("*const") {
+        "*const"
+    } else if t.starts_with("* mut") || t.starts_with("*mut") {
+        "*mut"
+    } else if t.starts_with('(') {
+        "()"
+    } else if t.starts_with('[') {
+        let mut depth = 0i32;
+        let mut arr = false;
+        for c in t.chars() {
+            match c {
+                '[' | '(' | '<' | '{' => depth += 1,
+                ']' | ')' | '>' | '}' => depth -= 1,
+                ';' if depth == 1 => arr = true,
+                _ => {}
+            }
+        }
+        if arr { "[;]" } else { "[]" }
+    } else {
+        return None;
+    };
+    Some(sh.to_string())
+}
+
 /// The trait an impl implements, as both readers key it: its last path segment.
 fn trait_key(im: &syn::ItemImpl) -> Option<String> {
     im.trait_.as_ref().and_then(|(_, p, _)| p.segments.last()).map(|s| s.ident.to_string())
@@ -1948,10 +2032,12 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
             let ik = tr.as_ref().map(|t| format!("{owner} as {t}"));
             let hidden_trait =
                 |t: &str| item.keys.contains(t) || item.xkeys.contains(t) || member.keys.contains(t) || item.opaque;
+            let shape = self_shape(&owner);
             let hidden_impl = |k: &str, t: &str| {
                 item.keys.contains(k)
                     || item.xkeys.contains(k)
                     || item.xkeys.contains(&format!("* as {t}"))
+                    || shape.as_ref().is_some_and(|sh| item.xkeys.contains(&format!("{sh} as {t}")))
                     || member.keys.contains(k)
                     || (item.loose.contains(t) && item.loose.contains(&owner))
             };
@@ -2032,6 +2118,10 @@ pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<
                     }
                 }
                 syn::Item::Use(u) => use_renames(&u.tree, r),
+                // I1 stage 2d — a visible `type` alias: the self type `impl Tr for Alias` names (Fable RC4-2 `trsa_e`).
+                syn::Item::Type(t) if !candor_report::env::switch("CANDOR_I1S2D_ALIAS_OFF") => {
+                    r.push(format!("{}={}", t.ident, ty_key(&t.ty)));
+                }
                 syn::Item::Impl(im) if is_gated(&im.attrs) => {
                     if let Some(t) = trait_key(im) {
                         let ms: Vec<String> = im
@@ -2077,37 +2167,47 @@ fn use_renames(t: &syn::UseTree, out: &mut Vec<String>) {
 /// renames followed: what the crate-wide hidden keys are checked for (pass B).
 pub(crate) fn twin_cand_keys(cand: &str, renames: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>) -> Vec<String> {
     let mut it = cand.splitn(3, '|');
-    let (Some(tr), Some(s), Some(m)) = (it.next(), it.next(), it.next()) else { return Vec::new() };
+    let (Some(tr), Some(s0), Some(m)) = (it.next(), it.next(), it.next()) else { return Vec::new() };
+    fn closure(x: &str, renames: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>) -> Vec<String> {
+        let mut v: Vec<String> = vec![x.to_string()];
+        let mut i = 0;
+        while i < v.len() && i < 16 {
+            if let Some(o) = renames.get(&v[i]) {
+                for y in o {
+                    if !v.contains(y) {
+                        v.push(y.clone());
+                    }
+                }
+            }
+            i += 1;
+        }
+        v
+    }
+    // I1 stage 2d — the self type's aliases and renames too (`type Alias = S;`, `use S as Alias`), both ways.
+    let ss: Vec<String> = if s0.is_empty() { Vec::new() } else { closure(s0, renames) };
     let mut out = Vec::new();
-    if !s.is_empty() {
+    for s in &ss {
         out.push(format!("{s}::{m}"));
     }
     if tr.is_empty() {
-        if s.is_empty() {
+        if s0.is_empty() {
             out.push(format!("p:{m}")); // a gated free fn: only the measured `all` scope asks
         }
         return out;
     }
-    let mut trs: Vec<String> = vec![tr.to_string()];
-    let mut i = 0;
-    while i < trs.len() && i < 16 {
-        if let Some(o) = renames.get(&trs[i]) {
-            for x in o {
-                if !trs.contains(x) {
-                    trs.push(x.clone());
-                }
-            }
-        }
-        i += 1;
-    }
+    let trs = closure(tr, renames);
     for t in &trs {
         out.push(t.clone());
         out.push(format!("{t}::{m}"));
         out.push(format!("* as {t}")); // a hidden blanket impl of the trait
         out.push(format!("* as {t}::{m}"));
-        if !s.is_empty() {
+        for s in &ss {
             out.push(format!("{s} as {t}"));
             out.push(format!("{s} as {t}::{m}"));
+            if let Some(sh) = self_shape(s) {
+                out.push(format!("{sh} as {t}")); // a hidden blanket over this shape (`impl<T> Tr for &T`)
+                out.push(format!("{sh} as {t}::{m}"));
+            }
         }
     }
     out
@@ -3168,7 +3268,7 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
         }
     }
     all_bodies(items, &mut bodies);
-    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default(), bodies };
+    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default(), bodies, scope_bodies: HashMap::new() };
     cx.splice(items, 0);
 }
 
