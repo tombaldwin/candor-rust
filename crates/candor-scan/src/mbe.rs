@@ -1197,6 +1197,90 @@ fn empty_bodies(g: &mut syn::Item) {
 /// (`#[wasm_bindgen]` adds `impl RefFromWasmAbi for JsClosure`) and palette 0.7.7 (`#[derive(WithAlpha)]`) — was the only
 /// disclosure on a dispatch over such a trait. `cache::retire_expanded` keeps it in that crate. A guard on the retirement,
 /// not a fix for R1804: it keeps the old cover, it does not supply the missing implementor.
+/// The toolchain's own function-like macros (std / core / alloc, and the prelude's). Their expansions are fixed by the
+/// toolchain and add no `impl` of a caller's choosing (Fable merge re-check RC2: the hold is for every OTHER bang macro).
+pub(crate) const TOOLCHAIN_BANG_MACROS: &[&str] = &[
+    "println", "print", "eprintln", "eprint", "format", "format_args", "write", "writeln", "panic", "assert", "assert_eq",
+    "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "vec", "unreachable", "unimplemented", "todo",
+    "matches", "dbg", "concat", "stringify", "line", "column", "file", "module_path", "env", "option_env", "include_str",
+    "include_bytes", "include", "cfg", "compile_error", "thread_local", "try", "ready", "addr_of", "addr_of_mut",
+    "offset_of", "assert_matches", "debug_assert_matches", "const_format_args", "format_args_nl", "concat_idents",
+    "trace_macros", "log_syntax", "asm", "global_asm", "naked_asm", "pin", "is_x86_feature_detected",
+    "is_aarch64_feature_detected", "is_arm_feature_detected", "unreachable_unchecked", "macro_rules",
+];
+
+/// SOUNDNESS R1541 / R1804, Fable's merge re-check RC2 — every bang-macro invocation of this file, at ANY position (a
+/// statement or an expression inside a fn body included), whose expansion this scan does not read and which may therefore
+/// emit an `impl` the scan cannot see: a function-like proc macro's or a dependency `macro_rules!`'s
+/// (`pub fn setup() { other::make_go!(Hid); }`, executed: the hidden implementor wrote, HEAD read `d = []`).
+/// Returned as names the MERGE judges, because which names are local `macro_rules!` is a crate-wide fact:
+/// - `::{path}` — certainly not local: a path rooted at another crate, or a bare name this file imports by `use`;
+/// - `{name}` — a bare name, foreign unless the crate defines a `macro_rules!` of that name or it is a toolchain macro.
+/// Toolchain-rooted paths (`std::`/`core::`/`alloc::`) and `crate::`/`self::`/`super::` paths are judged as above.
+/// `#[cfg(test)]` items are skipped: they are not in the build the report describes.
+pub(crate) fn foreign_bang_macros(items: &[syn::Item]) -> Vec<String> {
+    let mut imported = std::collections::HashSet::new();
+    imported_names(items, &mut imported);
+    struct V<'a> {
+        imported: &'a std::collections::HashSet<String>,
+        out: std::collections::BTreeSet<String>,
+        // `macro_rules!` this file defines at ANY depth (a fn body's included, which the crate-wide `local_macros` index
+        // does not record): measured, time-macros' fn-local `div_floor!` was read as foreign.
+        defined: std::collections::HashSet<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V<'_> {
+        fn visit_item(&mut self, it: &'ast syn::Item) {
+            if crate::lang::is_cfg_test(crate::lang::item_attrs(it)) {
+                return;
+            }
+            if let syn::Item::Macro(m) = it {
+                if let (Some(id), true) = (&m.ident, m.mac.path.is_ident("macro_rules")) {
+                    self.defined.insert(id.to_string());
+                }
+            }
+            syn::visit::visit_item(self, it);
+        }
+        fn visit_macro(&mut self, m: &'ast syn::Macro) {
+            let segs: Vec<String> = m.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let Some(leaf) = segs.last() else { return };
+            if leaf == "macro_rules" {
+                return;
+            }
+            if segs.len() > 1 || m.path.leading_colon.is_some() {
+                match segs[0].as_str() {
+                    "std" | "core" | "alloc" => {}
+                    "crate" | "self" | "super" => {
+                        self.out.insert(leaf.clone());
+                    }
+                    _ => {
+                        self.out.insert(format!("::{}", segs.join("::")));
+                    }
+                }
+            } else if self.imported.contains(leaf) {
+                self.out.insert(format!("::{leaf}"));
+            } else {
+                self.out.insert(leaf.clone());
+            }
+        }
+    }
+    let mut v = V { imported: &imported, out: Default::default(), defined: Default::default() };
+    for it in items {
+        syn::visit::Visit::visit_item(&mut v, it);
+    }
+    let defined = v.defined;
+    v.out.into_iter().filter(|n| !defined.contains(n)).collect()
+}
+
+/// The merge's reading of `foreign_bang_macros`: does any of these names expand code this scan cannot read?
+pub(crate) fn any_foreign_bang_macro<'a>(
+    names: impl IntoIterator<Item = &'a String>,
+    local: &std::collections::HashMap<String, String>,
+) -> Option<&'a String> {
+    names.into_iter().find(|n| {
+        n.starts_with("::") || !(local.contains_key(n.as_str()) || TOOLCHAIN_BANG_MACROS.contains(&n.as_str()))
+    })
+}
+
 pub(crate) fn has_hidden_impl_surface(items: &[syn::Item]) -> bool {
     // THE POSITIONS (Fable merge review §4: the first cut read only plain attributes on fn/struct/enum/union/impl/trait and
     // missed 7 of 9 measured shapes). An attribute macro or a derive can add an `impl` from ANY item it decorates, at ANY

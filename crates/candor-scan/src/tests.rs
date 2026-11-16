@@ -16863,6 +16863,7 @@ trait G {
             i1_expanded => |m| { m.i1_expanded.insert("mk".into()); },
             i1_unexpanded => |m| { m.i1_unexpanded.insert("mk".into()); },
             i1_hidden_impls => |m| { m.i1_hidden_impls = true; },
+            i1_foreign_macros => |m| { m.i1_foreign_macros.insert("::dep::mk".into()); },
         };
         let empty = decl_index_digest(&MergedDecls::default());
         for (name, mutate) in table {

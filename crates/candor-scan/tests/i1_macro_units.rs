@@ -469,3 +469,44 @@ fn i1_step1b_glob_and_macro_use_refuse_a_gated_stub() {
         assert!(off.contains("bnd_f"), "{name}: OFF binds it: {off:?}");
     }
 }
+
+/// Fable's merge re-check RC2 — a bang macro this scan does not expand, at a STATEMENT or EXPRESSION position inside a fn
+/// body, can emit the hidden implementor. Executed in the lane (`stmt/`: proc macro `pmfn::make_go!`, dependency
+/// `dmlib2::make_go_dep!`): the implementor wrote through `d(&Hid)` while the step-6b binary read `d = []`. Main covered it
+/// only through the unexpanded `mk!`. A toolchain macro and a LOCAL `macro_rules!` in the body hold nothing new.
+#[test]
+fn i1_rc2_a_foreign_bang_macro_in_a_body_keeps_the_hedge() {
+    const SHAPES: &[(&str, &str, bool)] = &[
+        ("stmt_path", "pub fn setup() { other::make_go!(Hid); }", true),
+        ("stmt_dep_path", "pub fn setup() { dmlib::make_go_dep!(Hid); }", true),
+        ("expr_tail", "pub fn setup() -> u32 { other::make_go!(Hid) }", true),
+        ("expr_let", "pub fn setup() { let _x = other::make_go!(Hid); }", true),
+        ("imported_bare", "use other::make_go;\npub fn setup() { make_go!(Hid); }", true),
+        ("macro_use_bare", "pub fn setup() { make_go!(Hid); }", true),
+        ("closure_body", "pub fn setup() { let f = || { other::make_go!(Hid); }; f() }", true),
+        ("method_body", "pub struct S0; impl S0 { pub fn s(&self) { other::make_go!(Hid); } }", true),
+        ("toolchain_only", "pub fn setup() { println!(\"x\"); let _v = vec![1]; assert!(true); std::format!(\"y\"); }", false),
+        ("local_macro_only", "macro_rules! twice { ($e:expr) => { $e + $e } }\npub fn setup() -> u32 { twice!(1) }", false),
+    ];
+    for (name, shape, holds) in SHAPES {
+        let d = tmpdir(&format!("rc2-{name}"));
+        write_crate(
+            &d,
+            &format!("rc2_{name}"),
+            "",
+            &format!(
+                "pub trait Go {{ fn go(&self); }}\npub struct Pure; impl Go for Pure {{ fn go(&self) {{}} }}\n\
+                 macro_rules! mk {{ ($t:ident) => {{ impl Go for $t {{ fn go(&self) {{}} }} }} }}\npub struct M; mk!(M);\n\
+                 pub struct Hid;\npub fn d(t: &dyn Go) {{ t.go() }}\n{shape}\n"
+            ),
+        );
+        let (rows, _) = scan(&d, None, &[]);
+        if *holds {
+            assert_eq!(eff(&rows, "d"), vec!["Unknown".to_string()], "{name}: the hedge must stand: {rows:?}");
+            let (off, _) = scan(&d, None, &[("CANDOR_I1_HIDDEN_OFF", "1")]);
+            assert!(eff(&off, "d").is_empty(), "{name}: OFF retires it (the fixture reaches the code): {off:?}");
+        } else {
+            assert!(eff(&rows, "d").is_empty(), "{name}: nothing foreign, so `mk!` retires as before: {rows:?}");
+        }
+    }
+}
