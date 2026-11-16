@@ -867,7 +867,14 @@ impl Ctx<'_> {
                 // dependency's `mk!(S)` minting `impl S { fn go }` names `go` only in ITS body). The only superset is "anything":
                 // the reading stays (it feeds the qualified keys) and the text is OPAQUE. `CANDOR_I1S2B_FOREIGN_LOOSE=1` restores
                 // the narrower reading, for measurement.
-                if !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
+                //
+                // One exception with its own argument: `cfg_if::cfg_if!` (the `cfg-if` crate's) only RE-ARRANGES its input,
+                // emitting each branch's items with a `#[cfg]` added and no token of its own but `cfg`, `not`, `any`, `all`:
+                // every name it can bind is an identifier of its input, which the "foreign" reading above already holds.
+                let cfg_if = name == "cfg_if"
+                    && (mac.path.segments.len() == 1
+                        || mac.path.segments.first().is_some_and(|s| s.ident == "cfg_if"));
+                if !cfg_if && !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
                     h.opaque = true;
                 }
                 return;
@@ -976,7 +983,8 @@ impl Ctx<'_> {
                     }
                 }
                 Some(None) => h.opaque = true,
-                None if TOOLCHAIN_BANG_MACROS.contains(&n.as_str()) => {}
+                // a toolchain macro emits no new identifier; `cfg_if!` only re-arranges tokens already in this set
+                None if TOOLCHAIN_BANG_MACROS.contains(&n.as_str()) || n == "cfg_if" => {}
                 None => {
                     if !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
                         h.opaque = true; // another crate's macro inside the closure: it can emit any name
@@ -2103,8 +2111,8 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
         // a trait-body marker exists only for a trait an expansion declared (`mbe_trait_body_marker`): produced by construction
         if mbe_trait_body_of(it).is_some() && (!item.is_empty() || trivial) {
             if trivial {
-                let mut all = Hidden::default();
-                all.opaque = true; // the trivial superset: every default body of a produced trait beside unexpanded text
+                // the trivial superset: every default body of a produced trait beside unexpanded text
+                let all = Hidden { opaque: true, ..Hidden::default() };
                 cover_trait_marker(it, &all);
             } else {
                 cover_trait_marker(it, item);
