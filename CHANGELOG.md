@@ -11,6 +11,25 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A cfg-gated impl member whose twin is unexpanded macro text in ANOTHER module, or inside a module the hidden text
+  declares, now carries `macro:another cfg arm of this fn is hidden by an unexpanded macro`** (SOUNDNESS R1541, I1 stage
+  2c; closes silent under-reports that I1 stage 1 introduced on main, unreleased, and five that 0.42.0 already had). Stage
+  1 splices macro-made trait impls crate-wide, and the hidden-twin cover read hidden text per module: right for a path item
+  (a fn, `use`, module or type, whose cfg twin sits at the same path), wrong for an impl, whose arms can sit in any module,
+  and for a trait, whose default reaches every impl of it. So `impl crate::t::Tr for S { fn go() {} }` gated in one module
+  beside `hid! { pub trait Tr { fn go() { write } } }` in another resolved to the pure member (`deny Unknown` 1 on 0.42.0, 0
+  on main, executed). Every module now exports the impl-scoped keys its hidden text may define (`Tr`, `Tr::m`, `S as Tr`,
+  `S as Tr::m`, `S::m`, read through nested hidden modules), and every gated impl member is checked against them crate-wide
+  by last path segment, following `use … as` renames; a hidden override whose visible gated impl lacks the member hedges the
+  trait's default. Also closed, all silent on 0.42.0 too: an inherent twin in a sibling module or in a nested hidden module,
+  a hidden default inside the trait body (a trait-item-position invocation), and a member-gated hand-written impl beside a
+  hidden trait. Executed fixtures (14 positions and 4 controls, plus the review's own three): 6 positions and the review's
+  three read `deny Unknown` 1 on 0.42.0 and 0 on main, 5 read 0 on both, 3 were already disclosed; all read 1 now. Cost,
+  named: matching by last segment over-holds where a DIFFERENT type or trait of the same name in another module has hidden
+  text (two controls read `Fs` plus `Unknown`); on 181 crates the check marks 91 units in 7
+  crates (rand 36, syn 31, futures-util 8, palette 6, mio 6, tokio 4) and 20 rows newly carry `Unknown` only (0.02%), 0
+  removed, 0 concrete or disclosure lost. `CANDOR_I1S2C_XMOD_OFF=1` restores the per-module cover. Cache rev 206.
+
 - ⚠ **Modules, `use`s and `extern crate`s that a crate's own `macro_rules!` generates are now spliced** (SOUNDNESS R1541,
   I1 stage 2a; closes R1535 and R1688, silent under-reports pre-existing on 0.42.0). The expander's allowlist and
   `CANDOR_I1_OFF` are gone: every item an expansion parses as is spliced beside the invocation except a nested invocation it
@@ -31,10 +50,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   as loose identifiers, which no qualified lookup reads, and this also closes a foreign-wrapped inherent-method twin that was
   silent on 0.42.0 too). Such an impl's members are marked where the hidden text may hold the trait or an impl of it for the
   same type, and a member the hidden impl overrides is stood on the visible arm, marked (`CANDOR_I1S2_TRAITARM_OFF=1` drops
-  it). STILL OPEN, introduced on main by stage 1 and not closed here: the same twin when it is in ANOTHER module (the trait,
-  or the other impl arm, declared in a sibling module) or one module down inside the hidden text (`hid! { pub mod inner {
-  pub trait Tr { .. } } }`), because the cover reads hidden text per module; each reads `deny Unknown` 1 on 0.42.0 and 0 on
-  main and on this build. `use ::dep::x::*` names the extern crate even beside a module `dep` (pre-existing for the
+  it). The same twin in ANOTHER module, or one module down inside the hidden text, is the next entry's.
+  `use ::dep::x::*` names the extern crate even beside a module `dep` (pre-existing for the
   hand-written shape; a spliced `mod rand09;` in time's benchmarks would have cost 129 rows their `invisible:[rand09]`). And
   candor's own marker attributes (`candor_mbe_op`, `candor_mbe_prim_op`, `candor_derive_synth`) no longer read as attribute
   macros that hold R828's hedge: 7 interface-union rows lose `Unknown`, all over pure bodies. Executed fixtures: 45 probes
