@@ -1209,25 +1209,63 @@ pub(crate) const TOOLCHAIN_BANG_MACROS: &[&str] = &[
     "is_aarch64_feature_detected", "is_arm_feature_detected", "unreachable_unchecked", "macro_rules",
 ];
 
-/// SOUNDNESS R1541 / R1804, Fable's merge re-check RC2 — every bang-macro invocation of this file, at ANY position (a
-/// statement or an expression inside a fn body included), whose expansion this scan does not read and which may therefore
-/// emit an `impl` the scan cannot see: a function-like proc macro's or a dependency `macro_rules!`'s
-/// (`pub fn setup() { other::make_go!(Hid); }`, executed: the hidden implementor wrote, HEAD read `d = []`).
-/// Returned as names the MERGE judges, because which names are local `macro_rules!` is a crate-wide fact:
-/// - `::{path}` — certainly not local: a path rooted at another crate, or a bare name this file imports by `use`;
-/// - `{name}` — a bare name, foreign unless the crate defines a `macro_rules!` of that name or it is a toolchain macro.
+/// SOUNDNESS R1541 / R1804, Fable's merge re-checks RC2 and RC2-1/RC2-2 — the TEXT THIS SCAN NEVER PARSES, read for what it
+/// can add. An `impl` the scan cannot see hides inside any of:
+/// - an invocation of a macro whose expansion is not read here — a function-like proc macro, a dependency's `macro_rules!`
+///   (`pub fn setup() { other::make_go!(Hid); }`), at ANY position, a fn body's statements and expressions included;
+/// - the ARGUMENTS of ANY unexpanded invocation, a toolchain macro's included (`println!("{}", { impl Go for Hid {..} 1 })`):
+///   an `impl` token, a non-builtin attribute or derive, or a nested bang invocation;
+/// - the BODY of a local `macro_rules!` that is invoked where it is not expanded (a fn body), followed transitively through
+///   the local macros it invokes: `macro_rules! wrap { ($t:ident) => { $crate::re::make_go_dep!($t); } }` + `wrap!(Hid)`
+///   in a body;
+/// - an `include!` the parse could not splice (an `OUT_DIR` target): its whole text.
 ///
-/// Toolchain-rooted paths (`std::`/`core::`/`alloc::`) and `crate::`/`self::`/`super::` paths are judged as above.
+/// A name is not trusted under an import that may rebind it: a `#[macro_use] extern crate dep` (crate-wide) or a glob `use`
+/// (this file) puts a dependency's macro ahead of the std prelude (a `vec!` that emits an impl) and beside a `#[cfg]`-gated
+/// local stub; only an UNGATED local `macro_rules!` of that name outranks it.
+///
+/// Returned as ENTRIES the merge judges, because which names are local and which local macros are invoked unexpanded are
+/// crate-wide facts:
+/// - `!{why}` — this file's unparsed text can add an impl (hold);
+/// - `::{path}` — an invocation of a path rooted at another crate, a `$var!` metavariable invocation, or a bare name this
+///   file imports by `use` (foreign);
+/// - `^{name}` — a `crate::`/`self::`/`super::`/`$crate::` path: foreign unless the crate defines that `macro_rules!`;
+/// - `?{name}` — a bare name under this file's glob import: foreign unless an UNGATED local definition exists;
+/// - `{name}` — a bare name: foreign unless local or a toolchain macro (and, under a crate-wide `macro_use`, ungated local);
+/// - `={name}` — an UNGATED `macro_rules!` this file defines, at any depth;
+/// - `*macro_use` — this file holds a non-toolchain `#[macro_use] extern crate`;
+/// - `%{module}` — (added by `cache::file_decls`) an out-of-line `mod NAME;`, judged at the merge against the files read;
+/// - `@{mac}>{entry}` — an entry read in the BODY of local `macro_rules! mac`, judged only when `mac` is invoked unexpanded
+///   (directly or through another such body); a bare `{name}` there also marks that local macro unexpanded.
+///
 /// `#[cfg(test)]` items are skipped: they are not in the build the report describes.
 pub(crate) fn foreign_bang_macros(items: &[syn::Item]) -> Vec<String> {
     let mut imported = std::collections::HashSet::new();
     imported_names(items, &mut imported);
+    // A name (a macro, or a module a macro path starts from) this file imports ONLY from the toolchain (`use core::arch::asm;`,
+    // `use core::ptr;`) is the toolchain's: measured, cmov's `asm!` under `use core::arch::asm` read as foreign and held 12
+    // records over nothing. A name imported from both a toolchain crate and another stays foreign.
+    let toolchain_only = toolchain_imports(items);
+    for n in &toolchain_only {
+        imported.remove(n);
+        imported.insert(format!("\u{1}tc:{n}")); // read by `judge_path` for a path's first segment (`ptr::addr_of!`)
+    }
+    let glob = imported.contains("*");
+    let mut out = std::collections::BTreeSet::new();
+    for it in items {
+        if let syn::Item::ExternCrate(e) = it {
+            if e.attrs.iter().any(|a| a.path().is_ident("macro_use"))
+                && !matches!(e.ident.to_string().as_str(), "std" | "core" | "alloc")
+                && !crate::lang::is_cfg_test(&e.attrs)
+            {
+                out.insert("*macro_use".to_string());
+            }
+        }
+    }
     struct V<'a> {
         imported: &'a std::collections::HashSet<String>,
+        glob: bool,
         out: std::collections::BTreeSet<String>,
-        // `macro_rules!` this file defines at ANY depth (a fn body's included, which the crate-wide `local_macros` index
-        // does not record): measured, time-macros' fn-local `div_floor!` was read as foreign.
-        defined: std::collections::HashSet<String>,
     }
     impl<'ast> syn::visit::Visit<'ast> for V<'_> {
         fn visit_item(&mut self, it: &'ast syn::Item) {
@@ -1236,50 +1274,311 @@ pub(crate) fn foreign_bang_macros(items: &[syn::Item]) -> Vec<String> {
             }
             if let syn::Item::Macro(m) = it {
                 if let (Some(id), true) = (&m.ident, m.mac.path.is_ident("macro_rules")) {
-                    self.defined.insert(id.to_string());
+                    let name = id.to_string();
+                    if !crate::lang::has_cfg(&m.attrs) {
+                        self.out.insert(format!("={name}"));
+                    }
+                    let mut body = std::collections::BTreeSet::new();
+                    unparsed_tokens(m.mac.tokens.clone(), true, false, self.imported, &mut body);
+                    for e in body {
+                        self.out.insert(format!("@{name}>{e}"));
+                    }
+                    return;
                 }
             }
             syn::visit::visit_item(self, it);
         }
         fn visit_macro(&mut self, m: &'ast syn::Macro) {
             let segs: Vec<String> = m.path.segments.iter().map(|s| s.ident.to_string()).collect();
-            let Some(leaf) = segs.last() else { return };
-            if leaf == "macro_rules" {
+            if segs.last().is_some_and(|l| l == "macro_rules") {
                 return;
             }
-            if segs.len() > 1 || m.path.leading_colon.is_some() {
-                match segs[0].as_str() {
-                    "std" | "core" | "alloc" => {}
-                    "crate" | "self" | "super" => {
-                        self.out.insert(leaf.clone());
-                    }
-                    _ => {
-                        self.out.insert(format!("::{}", segs.join("::")));
-                    }
-                }
-            } else if self.imported.contains(leaf) {
-                self.out.insert(format!("::{leaf}"));
-            } else {
-                self.out.insert(leaf.clone());
+            if let Some(e) = judge_path(&segs, m.path.leading_colon.is_some(), false, self.glob, self.imported) {
+                self.out.insert(e);
             }
+            if segs.last().is_some_and(|l| l == "include") {
+                // A spliced `include!` is gone by now; one still here is text the parse could not read (an `OUT_DIR` target).
+                self.out.insert("!an include! the parse could not splice".to_string());
+            }
+            unparsed_tokens(m.tokens.clone(), false, self.glob, self.imported, &mut self.out);
         }
     }
-    let mut v = V { imported: &imported, out: Default::default(), defined: Default::default() };
+    let mut v = V { imported: &imported, glob, out };
     for it in items {
         syn::visit::Visit::visit_item(&mut v, it);
     }
-    let defined = v.defined;
-    v.out.into_iter().filter(|n| !defined.contains(n)).collect()
+    v.out.into_iter().collect()
 }
 
-/// The merge's reading of `foreign_bang_macros`: does any of these names expand code this scan cannot read?
-pub(crate) fn any_foreign_bang_macro<'a>(
-    names: impl IntoIterator<Item = &'a String>,
-    local: &std::collections::HashMap<String, String>,
-) -> Option<&'a String> {
-    names.into_iter().find(|n| {
-        n.starts_with("::") || !(local.contains_key(n.as_str()) || TOOLCHAIN_BANG_MACROS.contains(&n.as_str()))
+/// Names this file's `use` items bind from `std`/`core`/`alloc` and from nowhere else.
+fn toolchain_imports(items: &[syn::Item]) -> std::collections::HashSet<String> {
+    fn walk(t: &syn::UseTree, root: Option<&str>, tc: &mut std::collections::HashSet<String>, other: &mut std::collections::HashSet<String>) {
+        let is_tc = matches!(root, Some("std") | Some("core") | Some("alloc"));
+        match t {
+            syn::UseTree::Path(p) => {
+                let first = p.ident.to_string();
+                walk(&p.tree, Some(root.unwrap_or(first.as_str())), tc, other);
+            }
+            syn::UseTree::Name(n) if root.is_some() => {
+                if is_tc { tc.insert(n.ident.to_string()) } else { other.insert(n.ident.to_string()) };
+            }
+            syn::UseTree::Rename(r) if root.is_some() => {
+                if is_tc { tc.insert(r.rename.to_string()) } else { other.insert(r.rename.to_string()) };
+            }
+            syn::UseTree::Group(g) => g.items.iter().for_each(|x| walk(x, root, tc, other)),
+            _ => {}
+        }
+    }
+    let (mut tc, mut other) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    for it in items {
+        if let syn::Item::Use(u) = it {
+            walk(&u.tree, if u.leading_colon.is_some() { Some("::") } else { None }, &mut tc, &mut other);
+        }
+    }
+    tc.retain(|n| !other.contains(n));
+    tc
+}
+
+/// One invocation path as an entry (see `foreign_bang_macros`). `None` for a toolchain-rooted path.
+fn judge_path(
+    segs: &[String],
+    leading_colon: bool,
+    dollar_crate: bool,
+    glob: bool,
+    imported: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let leaf = segs.last()?;
+    if dollar_crate {
+        return Some(format!("^{leaf}"));
+    }
+    if segs.len() > 1 || leading_colon {
+        return match segs[0].as_str() {
+            "std" | "core" | "alloc" => None,
+            m if !leading_colon && imported.contains(&format!("\u{1}tc:{m}")) => None,
+            "crate" | "self" | "super" => Some(format!("^{leaf}")),
+            _ => Some(format!("::{}", segs.join("::"))),
+        };
+    }
+    Some(if imported.contains(leaf) {
+        format!("::{leaf}")
+    } else if glob {
+        format!("?{leaf}")
+    } else {
+        leaf.clone()
     })
+}
+
+/// Read a token stream the scan does not parse. `body` is a local `macro_rules!` definition (matchers and transcribers):
+/// there an `impl` is R828's to hedge (kept while the macro is unexpanded) and a `#[$m]` forwards the caller's attribute,
+/// which the caller's own arguments carry. Elsewhere (an invocation's arguments) an `impl` token is a hidden impl.
+fn unparsed_tokens(
+    ts: TokenStream,
+    body: bool,
+    glob: bool,
+    imported: &std::collections::HashSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    const KEYWORDS: &[&str] = &[
+        "as", "break", "const", "continue", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
+        "match", "mod", "move", "mut", "pub", "ref", "return", "static", "struct", "trait", "true", "type", "unsafe", "use",
+        "where", "while", "async", "await", "dyn", "yield", "box",
+    ];
+    fn has_dollar(ts: &TokenStream) -> bool {
+        ts.clone().into_iter().any(|t| match t {
+            TokenTree::Punct(p) => p.as_char() == '$',
+            TokenTree::Group(g) => has_dollar(&g.stream()),
+            _ => false,
+        })
+    }
+    let tt: Vec<TokenTree> = ts.into_iter().collect();
+    for i in 0..tt.len() {
+        match &tt[i] {
+            TokenTree::Ident(id) if id == "impl" && !body => {
+                out.insert("!an impl in a macro's arguments".to_string());
+            }
+            TokenTree::Punct(p) if p.as_char() == '#' => {
+                let mut j = i + 1;
+                if matches!(tt.get(j), Some(TokenTree::Punct(q)) if q.as_char() == '!') {
+                    j += 1;
+                }
+                if let Some(TokenTree::Group(g)) = tt.get(j) {
+                    if g.delimiter() == Delimiter::Bracket && !has_dollar(&g.stream()) {
+                        let hides = syn::parse2::<syn::Meta>(g.stream()).map(|m| meta_hides(&m)).unwrap_or(true);
+                        if hides {
+                            out.insert("!an attribute or derive in unparsed text".to_string());
+                        }
+                    }
+                }
+            }
+            TokenTree::Punct(p) if p.as_char() == '!' && p.spacing() == Spacing::Alone && i > 0 => {
+                let (Some(TokenTree::Ident(last)), Some(TokenTree::Group(_))) = (tt.get(i - 1), tt.get(i + 1)) else { continue };
+                if KEYWORDS.contains(&last.to_string().as_str()) {
+                    continue;
+                }
+                // Walk the path back: `a::b::c!`, `::a::c!`, `$crate::c!`, `$m!`.
+                let mut segs = vec![last.to_string()];
+                let mut k = i - 1;
+                let (mut leading, mut dollar_crate, mut metavar) = (false, false, false);
+                loop {
+                    let colons = k >= 2
+                        && matches!(&tt[k - 1], TokenTree::Punct(c) if c.as_char() == ':')
+                        && matches!(&tt[k - 2], TokenTree::Punct(c) if c.as_char() == ':' && c.spacing() == Spacing::Joint);
+                    if colons {
+                        match tt.get(k.wrapping_sub(3)) {
+                            Some(TokenTree::Ident(seg)) if k >= 3 => {
+                                segs.insert(0, seg.to_string());
+                                k -= 3;
+                                continue;
+                            }
+                            _ => {
+                                leading = true;
+                                break;
+                            }
+                        }
+                    }
+                    if k >= 1 && matches!(&tt[k - 1], TokenTree::Punct(d) if d.as_char() == '$') {
+                        if segs[0] == "crate" {
+                            dollar_crate = true;
+                            segs.remove(0);
+                        } else {
+                            metavar = true;
+                        }
+                    }
+                    break;
+                }
+                if metavar {
+                    out.insert(format!("::${}", segs.join("::")));
+                } else if segs.last().is_some_and(|l| l != "macro_rules") {
+                    if let Some(e) = judge_path(&segs, leading, dollar_crate, glob, imported) {
+                        out.insert(e);
+                    }
+                    if segs.last().is_some_and(|l| l == "include") {
+                        out.insert("!an include! the parse could not splice".to_string());
+                    }
+                }
+            }
+            TokenTree::Group(g) => unparsed_tokens(g.stream(), body, glob, imported, out),
+            _ => {}
+        }
+    }
+}
+
+/// The merge's reading of every file's `foreign_bang_macros` entries. Returns the first reason the crate can add an impl
+/// this scan cannot see (if any), and every local `macro_rules!` that is invoked unexpanded only THROUGH another local
+/// macro's body (`wrap2!` in a fn body invoking `mk3!`): their R828 records must not be retired as fully expanded.
+pub(crate) fn judge_unparsed(
+    entries: &std::collections::BTreeSet<String>,
+    local: &std::collections::HashMap<String, String>,
+    unexpanded: &std::collections::BTreeSet<String>,
+) -> (Option<String>, Vec<String>) {
+    let macro_use = entries.contains("*macro_use");
+    let ungated: std::collections::HashSet<&str> = entries.iter().filter_map(|e| e.strip_prefix('=')).collect();
+    let is_local = |n: &str| local.contains_key(n) || ungated.contains(n);
+    // `None` = not foreign; `Some(Some(n))` = a local macro to follow; `Some(None)` = foreign.
+    let judge = |e: &str| -> Result<Option<String>, ()> {
+        if e.starts_with('!') || e.starts_with("::") {
+            return Err(());
+        }
+        if let Some(n) = e.strip_prefix('^') {
+            return if is_local(n) { Ok(Some(n.to_string())) } else { Err(()) };
+        }
+        if let Some(n) = e.strip_prefix('?') {
+            return if ungated.contains(n) { Ok(Some(n.to_string())) } else { Err(()) };
+        }
+        if macro_use && !ungated.contains(e) {
+            return Err(());
+        }
+        if is_local(e) {
+            return Ok(Some(e.to_string()));
+        }
+        if TOOLCHAIN_BANG_MACROS.contains(&e) { Ok(None) } else { Err(()) }
+    };
+    let mut bodies: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in entries {
+        if let Some((mac, inner)) = e.strip_prefix('@').and_then(|r| r.split_once('>')) {
+            bodies.entry(mac).or_default().push(inner);
+        }
+    }
+    // The file-level entries (invocations and their arguments) are judged as they stand.
+    for e in entries {
+        if e.starts_with('@') || e.starts_with('=') || e.starts_with('%') || e == "*macro_use" {
+            continue;
+        }
+        if judge(e).is_err() {
+            return (Some(e.clone()), vec![]);
+        }
+    }
+    // Local bodies, from every local macro invoked unexpanded, transitively.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut work: Vec<String> = unexpanded.iter().filter(|n| is_local(n)).cloned().collect();
+    let mut via_body = vec![];
+    while let Some(mac) = work.pop() {
+        if !seen.insert(mac.clone()) {
+            continue;
+        }
+        for inner in bodies.get(mac.as_str()).into_iter().flatten() {
+            match judge(inner) {
+                Err(()) => return (Some(format!("{mac} -> {inner}")), via_body),
+                Ok(Some(n)) => {
+                    if !unexpanded.contains(&n) {
+                        via_body.push(n.clone());
+                    }
+                    work.push(n);
+                }
+                Ok(None) => {}
+            }
+        }
+    }
+    (None, via_body)
+}
+
+// The attribute reading shared by the item walk and the unparsed-text reading (Fable re-check 2).
+const STD_DERIVES: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Default"];
+const BUILTIN: &[&str] = &[
+    "cfg", "cfg_attr", "derive", "doc", "allow", "warn", "deny", "forbid", "expect", "inline", "cold", "must_use",
+    "deprecated", "repr", "non_exhaustive", "test", "ignore", "should_panic", "bench", "path", "macro_use", "macro_export",
+    "no_mangle", "export_name", "link", "link_name", "link_section", "used", "track_caller", "automatically_derived",
+    "rustfmt", "clippy", "diagnostic", "unsafe", "target_feature", "proc_macro", "proc_macro_derive", "proc_macro_attribute",
+    "naked", "instruction_set", "debugger_visualizer", "collapse_debuginfo", "global_allocator", "panic_handler", "lang",
+    "stable", "unstable", "rustc_const_stable", "rustc_const_unstable", "may_dangle", "optimize", "coverage",
+    "no_coverage", "doc_cfg", "feature", "rustc_diagnostic_item", "const_trait", "fundamental", "no_std", "no_implicit_prelude",
+    "crate_type", "crate_name", "recursion_limit", "type_length_limit", "windows_subsystem", "no_main", "macro_escape",
+    "target_arch", "ignore_function", "rustversion",
+];
+const STD_ITEM_MACROS: &[&str] = &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm"];
+fn derive_hides(list: &syn::punctuated::Punctuated<syn::Path, syn::Token![,]>) -> bool {
+    list.iter().any(|d| !STD_DERIVES.contains(&d.segments.last().map(|s| s.ident.to_string()).unwrap_or_default().as_str()))
+}
+fn path_hides(p: &syn::Path) -> bool {
+    let first = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+    // `rustversion::since(..)` & co. only gate; every other multi-segment or unknown path is a macro.
+    !(p.segments.len() == 1 && BUILTIN.contains(&first.as_str()) || matches!(first.as_str(), "rustfmt" | "clippy" | "rustversion"))
+}
+/// One `Meta` as an attribute body: `derive(..)`, a nested `cfg_attr(pred, ..)`, or any other path.
+fn meta_hides(m: &syn::Meta) -> bool {
+    let p = m.path();
+    if p.is_ident("derive") {
+        return match m {
+            syn::Meta::List(l) => l
+                .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+                .map(|l| derive_hides(&l))
+                .unwrap_or(true),
+            _ => false,
+        };
+    }
+    if p.is_ident("cfg_attr") {
+        return match m {
+            syn::Meta::List(l) => l
+                .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+                .map(|metas| metas.iter().skip(1).any(meta_hides)) // the first is the predicate
+                .unwrap_or(true),
+            _ => false,
+        };
+    }
+    path_hides(p)
+}
+fn attrs_hide(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| meta_hides(&a.meta))
 }
 
 pub(crate) fn has_hidden_impl_surface(items: &[syn::Item]) -> bool {
@@ -1291,53 +1590,6 @@ pub(crate) fn has_hidden_impl_surface(items: &[syn::Item]) -> bool {
     // attribute there is a derive helper, never a macro), with `cfg_attr` read recursively; plus every item-position macro
     // invocation still unexpanded at any depth, and the brace groups of one (`cfg_if! { if #[cfg(..)] { items } }`) parsed
     // as items and walked the same way.
-    const STD_DERIVES: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Default"];
-    const BUILTIN: &[&str] = &[
-        "cfg", "cfg_attr", "derive", "doc", "allow", "warn", "deny", "forbid", "expect", "inline", "cold", "must_use",
-        "deprecated", "repr", "non_exhaustive", "test", "ignore", "should_panic", "bench", "path", "macro_use", "macro_export",
-        "no_mangle", "export_name", "link", "link_name", "link_section", "used", "track_caller", "automatically_derived",
-        "rustfmt", "clippy", "diagnostic", "unsafe", "target_feature", "proc_macro", "proc_macro_derive", "proc_macro_attribute",
-        "naked", "instruction_set", "debugger_visualizer", "collapse_debuginfo", "global_allocator", "panic_handler", "lang",
-        "stable", "unstable", "rustc_const_stable", "rustc_const_unstable", "may_dangle", "optimize", "coverage",
-        "no_coverage", "doc_cfg", "feature", "rustc_diagnostic_item", "const_trait", "fundamental", "no_std", "no_implicit_prelude",
-        "crate_type", "crate_name", "recursion_limit", "type_length_limit", "windows_subsystem", "no_main", "macro_escape",
-        "target_arch", "ignore_function", "rustversion",
-    ];
-    const STD_ITEM_MACROS: &[&str] = &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm"];
-    fn derive_hides(list: &syn::punctuated::Punctuated<syn::Path, syn::Token![,]>) -> bool {
-        list.iter().any(|d| !STD_DERIVES.contains(&d.segments.last().map(|s| s.ident.to_string()).unwrap_or_default().as_str()))
-    }
-    fn path_hides(p: &syn::Path) -> bool {
-        let first = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
-        // `rustversion::since(..)` & co. only gate; every other multi-segment or unknown path is a macro.
-        !(p.segments.len() == 1 && BUILTIN.contains(&first.as_str()) || matches!(first.as_str(), "rustfmt" | "clippy" | "rustversion"))
-    }
-    /// One `Meta` as an attribute body: `derive(..)`, a nested `cfg_attr(pred, ..)`, or any other path.
-    fn meta_hides(m: &syn::Meta) -> bool {
-        let p = m.path();
-        if p.is_ident("derive") {
-            return match m {
-                syn::Meta::List(l) => l
-                    .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
-                    .map(|l| derive_hides(&l))
-                    .unwrap_or(true),
-                _ => false,
-            };
-        }
-        if p.is_ident("cfg_attr") {
-            return match m {
-                syn::Meta::List(l) => l
-                    .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
-                    .map(|metas| metas.iter().skip(1).any(meta_hides)) // the first is the predicate
-                    .unwrap_or(true),
-                _ => false,
-            };
-        }
-        path_hides(p)
-    }
-    fn attrs_hide(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|a| meta_hides(&a.meta))
-    }
     struct V {
         hit: bool,
     }

@@ -2040,7 +2040,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // `X#…`. Two authorities spelling one trait two ways: serde_json's `de::Error::invalid_type(..)` lost its key (the
     // witness asked `serde_core#…` of an index holding `serde#…`) and its union rows published under `serde#`, an owner
     // no dependency report carries. See `rekey_root_extern_owners`.
-    crate::cache::retire_expanded(&mut merged); // I1 stage 1 — before the foreign keys are canonicalised below
+    let file_mods: HashSet<String> = decls_per_file.iter().map(|(rel, _, _)| module_path(Path::new(rel))).collect();
+    crate::cache::retire_expanded(&mut merged, &file_mods); // I1 stage 1 — before the foreign keys are canonicalised below
     rekey_root_extern_owners(&mut merged);
     // SOUNDNESS R1056 — the slice / array / tuple receiver tails Pass B may type a receiver into. See
     // `lang::NONPATH_RECV_TAILS`; installed here, after the last merge and before any Pass B collection.

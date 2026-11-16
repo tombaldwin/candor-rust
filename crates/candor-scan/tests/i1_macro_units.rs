@@ -485,6 +485,15 @@ fn i1_rc2_a_foreign_bang_macro_in_a_body_keeps_the_hedge() {
         ("macro_use_bare", "pub fn setup() { make_go!(Hid); }", true),
         ("closure_body", "pub fn setup() { let f = || { other::make_go!(Hid); }; f() }", true),
         ("method_body", "pub struct S0; impl S0 { pub fn s(&self) { other::make_go!(Hid); } }", true),
+        // Fable re-check 2, RC2-1/RC2-2: the text the scan never parses, each shape executed in the lane (`stmt2/`).
+        ("local_wrap_in_body", "pub mod re { pub use other::make_go; }\nmacro_rules! wrap { ($t:ident) => { $crate::re::make_go!($t); } }\npub fn setup() { wrap!(Hid); }", true),
+        ("macro_use_beside_empty_gated_stub", "#[macro_use] extern crate other;\n#[cfg(any())] macro_rules! make_go { ($t:ident) => {}; }\npub fn setup() { make_go!(Hid); }", true),
+        ("macro_use_toolchain_name", "#[macro_use] extern crate other;\npub fn setup() { let _v = vec!(Hid); }", true),
+        ("impl_in_toolchain_args", "pub fn setup() { println!(\"{}\", { impl Go for Hid { fn go(&self) {} } 1 }); }", true),
+        ("missing_module_file", "mod gen;", true),
+        ("unspliced_include", "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));", true),
+        ("toolchain_imports", "use core::ptr;\nuse core::arch::asm;\npub fn setup() { let x = 0u8; let _p = ptr::addr_of!(x); }\npub fn n() { unsafe { asm!(\"nop\") } }", false),
+        ("builtin_attr_in_args", "thread_local! { #[allow(unused)] static X: u8 = 0; }\npub fn setup() { let _v = vec![1]; }", false),
         ("toolchain_only", "pub fn setup() { println!(\"x\"); let _v = vec![1]; assert!(true); std::format!(\"y\"); }", false),
         ("local_macro_only", "macro_rules! twice { ($e:expr) => { $e + $e } }\npub fn setup() -> u32 { twice!(1) }", false),
     ];
@@ -509,4 +518,52 @@ fn i1_rc2_a_foreign_bang_macro_in_a_body_keeps_the_hedge() {
             assert!(eff(&rows, "d").is_empty(), "{name}: nothing foreign, so `mk!` retires as before: {rows:?}");
         }
     }
+}
+
+/// Fable re-check 2 — a local macro invoked only inside another local macro's body that is itself invoked unexpanded (in a fn
+/// body) is not fully expanded: `mk3!`'s macro-implementor hedge stands although `mk3!(M3)` also expands at item position.
+#[test]
+fn i1_rc2_a_local_macro_reached_through_an_unexpanded_body_keeps_its_hedge() {
+    let d = tmpdir("rc2-via-body");
+    write_crate(
+        &d,
+        "rc2_via_body",
+        "",
+        "pub trait Go { fn go(&self); }\npub struct Pure; impl Go for Pure { fn go(&self) {} }\n\
+         macro_rules! mk3 { ($t:ident) => { impl Go for $t { fn go(&self) {} } } }\npub struct M3; mk3!(M3);\n\
+         macro_rules! wrap2 { ($t:ident) => { mk3!($t); } }\npub struct Hid;\npub fn setup() { wrap2!(Hid); }\n\
+         pub fn d(t: &dyn Go) { t.go() }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    assert_eq!(eff(&rows, "d"), vec!["Unknown".to_string()], "mk3's hedge must stand: {rows:?}");
+    // The control: without the body invocation, mk3 is fully expanded and retires.
+    let c = tmpdir("rc2-via-body-ctl");
+    write_crate(
+        &c,
+        "rc2_via_body_ctl",
+        "",
+        "pub trait Go { fn go(&self); }\npub struct Pure; impl Go for Pure { fn go(&self) {} }\n\
+         macro_rules! mk3 { ($t:ident) => { impl Go for $t { fn go(&self) {} } } }\npub struct M3; mk3!(M3);\n\
+         pub struct Hid;\npub fn d(t: &dyn Go) { t.go() }\n",
+    );
+    let (rows, _) = scan(&c, None, &[]);
+    assert!(eff(&rows, "d").is_empty(), "control: mk3 fully expanded retires: {rows:?}");
+}
+
+/// Fable re-check 2 (the lane's own sweep of unparsed-text positions) — the control for `missing_module_file`: the same
+/// `mod gen;` with its file present is parsed text, so `mk!` retires as before.
+#[test]
+fn i1_rc2_a_present_module_file_holds_nothing() {
+    let d = tmpdir("rc2-modfile");
+    write_crate(
+        &d,
+        "rc2_modfile",
+        "",
+        "pub trait Go { fn go(&self); }\npub struct Pure; impl Go for Pure { fn go(&self) {} }\n\
+         macro_rules! mk { ($t:ident) => { impl Go for $t { fn go(&self) {} } } }\npub struct M; mk!(M);\n\
+         pub struct Hid;\npub fn d(t: &dyn Go) { t.go() }\nmod gen;\n",
+    );
+    std::fs::write(d.join("src/gen.rs"), "pub fn g() {}\n").unwrap();
+    let (rows, _) = scan(&d, None, &[]);
+    assert!(eff(&rows, "d").is_empty(), "the module file is read, nothing hidden: {rows:?}");
 }

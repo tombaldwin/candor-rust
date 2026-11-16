@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev197 (rustagent-i1, Fable re-check 2, RC2-1/RC2-2): `i1_foreign_macros` now carries the unparsed-text reading (argument
+    // tokens, local macro bodies, import kinds); a rev196 entry would judge none of it.
     // rev196 (rustagent-i1, Fable re-check RC2): `FileDecls` gained `i1_foreign_macros` (a rev195 entry deserializes it EMPTY
     // and would retire a hedge a body's foreign bang macro must hold).
     // rev195 (rustagent-i1, I1 stage 1, SOUNDNESS R1541): a macro expansion splices trait impls and declarations and a
@@ -707,7 +709,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev196/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev197/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1161,7 +1163,10 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // I1 stage 1 — the retirement input: which macros this file expanded in full, and which it still invokes unexpanded.
     let (i1_expanded, i1_unexpanded) = crate::mbe::expansion_facts(items);
     let i1_hidden_impls = crate::mbe::has_hidden_impl_surface(items); // I1 (the R1804 exposure)
-    let i1_foreign_macros = crate::mbe::foreign_bang_macros(items); // I1 (RC2: a bang macro in a body)
+    let mut i1_foreign_macros = crate::mbe::foreign_bang_macros(items); // I1 (RC2: a bang macro in a body)
+    let mut outline = Vec::new();
+    crate::decls::collect_outline_mods(items, modpath, &dir, include_tests, &mut outline); // I1 (re-check 2: a missing module file)
+    i1_foreign_macros.extend(outline.into_iter().map(|m| format!("%{m}")));
     let mut nonpath_receivers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     crate::lang::collect_nonpath_receivers(items, include_tests, modpath, &uses, &mut nonpath_receivers); // R1034
     let mut glob_impl_foreign: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -1426,22 +1431,30 @@ pub(crate) struct MergedDecls {
 /// no file holds it unexpanded at any position) now stands as units, so its evidence is RETIRED; any other definition keeps
 /// it, exactly as before. Must run before `rekey_root_extern_owners`, which canonicalises the foreign keys this places.
 /// Returns how many tagged records were retired (a reach counter).
-pub(crate) fn retire_expanded(m: &mut MergedDecls) -> usize {
+pub(crate) fn retire_expanded(m: &mut MergedDecls, file_mods: &std::collections::HashSet<String>) -> usize {
     let sep = crate::lang::I1_TAG_SEP;
     let mut retired = 0;
-    // Fable's merge re-check RC2: a bang macro this scan does not expand (a function-like proc macro, a dependency's
-    // `macro_rules!`) can emit an `impl` at a STATEMENT or EXPRESSION position inside a fn body, which no item walk sees.
-    // Executed: `pub fn setup() { other::make_go!(Hid); }` wrote through `d(&Hid)` while HEAD read `d = []`.
-    let foreign = crate::mbe::any_foreign_bang_macro(&m.i1_foreign_macros, &m.local_macros).cloned();
-    if foreign.is_some() {
-        if candor_report::env::trace("CANDOR_I1_INSTR") {
-            for f in m.i1_foreign_macros.iter().filter(|n| crate::mbe::any_foreign_bang_macro([*n], &m.local_macros).is_some()) {
-                eprintln!("I1HOLDBY\tmacro\t{f}"); // §E1: every invocation that makes the crate hold
-            }
-        }
-    } else if m.i1_hidden_impls && candor_report::env::trace("CANDOR_I1_INSTR") {
-        eprintln!("I1HOLDBY\tsurface\t-");
+    // Fable's merge re-checks RC2 and RC2-1/RC2-2: text this scan never parses (a foreign macro's expansion, any unexpanded
+    // invocation's arguments, the body of a local macro invoked where it is not expanded, an unspliced `include!`) can carry
+    // an `impl`. Executed: `pub fn setup() { other::make_go!(Hid); }`, a local `wrap!` reaching a dependency macro from a fn
+    // body, a `#[macro_use]` crate's `vec!`, and `println!("{}", { impl Go for Hid {..} 1 })` each wrote through `d(&Hid)`.
+    let (mut foreign, via_body) = crate::mbe::judge_unparsed(&m.i1_foreign_macros, &m.local_macros, &m.i1_unexpanded);
+    if foreign.is_none() {
+        // An out-of-line `mod NAME;` with no file the scan read: its text was never parsed.
+        foreign = m.i1_foreign_macros.iter().find(|e| e.strip_prefix('%').is_some_and(|p| !file_mods.contains(p))).cloned();
     }
+    if candor_report::env::trace("CANDOR_I1_INSTR") {
+        match &foreign {
+            Some(f) => eprintln!("I1HOLDBY\tunparsed\t{f}"), // §E1: the first reason the crate holds
+            None if m.i1_hidden_impls => eprintln!("I1HOLDBY\tsurface\t-"),
+            None => {}
+        }
+        for n in &via_body {
+            eprintln!("I1VIABODY\t{n}"); // §E1: a local macro unexpanded only through another local macro's body
+        }
+    }
+    // A local macro invoked only inside another local macro's body that is itself unexpanded is not fully expanded either.
+    m.i1_unexpanded.extend(via_body);
     for t in std::mem::take(&mut m.i1_tagged) {
         let mut it = t.splitn(3, sep);
         let (Some(mac), Some(kind), Some(key)) = (it.next(), it.next(), it.next()) else { continue };

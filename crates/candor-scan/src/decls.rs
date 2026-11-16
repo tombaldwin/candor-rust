@@ -3459,6 +3459,34 @@ pub(crate) const HIDDEN_MOD_PLACE: &str = "\u{6}hidden-mod\u{6}";
 /// `cfg_attr` path may not apply. Inline modules recurse. `scan.rs` reads the crate-wide union to prove that a caller
 /// sits in exactly one compiled position, which is what licenses resolving `crate::<m>::..` written inside an arm of
 /// `m` to that arm alone.
+/// I1 (Fable re-check 2: the text the scan never parses) — every OUT-OF-LINE `mod NAME;` as the module path its file would
+/// carry (`#[path]` read as `collect_mod_places` reads it). The merge compares these with the files the scan read: a
+/// declared module with no file (generated, or under a path the walk does not reach) is text that can add an `impl`.
+pub(crate) fn collect_outline_mods(items: &[syn::Item], modpath: &str, dir: &Path, include_tests: bool, out: &mut Vec<String>) {
+    for it in items {
+        if let syn::Item::Mod(md) = it {
+            if !include_tests && is_cfg_test(&md.attrs) {
+                continue;
+            }
+            let name = md.ident.to_string();
+            let own = qualify(modpath, &name);
+            match &md.content {
+                Some((_, inner)) => collect_outline_mods(inner, &own, &dir.join(&name), include_tests, out),
+                None => {
+                    let paths = mod_path_attrs(&md.attrs);
+                    if paths.is_empty() {
+                        out.push(own);
+                    } else {
+                        for p in paths {
+                            out.push(module_path(&normalize_rel(&dir.join(p))));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn collect_mod_places(
     items: &[syn::Item],
     modpath: &str,
