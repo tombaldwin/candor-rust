@@ -23,16 +23,22 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   read silent (ABSENT or `[]`) over a write on main, 22 on 0.42.0. Two covers keep the lift from deleting a disclosure: a `#[cfg]`-gated fn whose
   name the same module's UNEXPANDED macro text also defines carries `macro:another cfg arm of this fn is hidden by an
   unexpanded macro` (a twin whose wrapper this pass will not expand otherwise read as its stub: `deny Unknown` 1 on 0.42.0
-  and main, 0 on the lift alone; 5 marks on 181 crates, rkyv and hashbrown specialisation `default!` arms); and
+  and main, 0 on the lift alone; 11 rows carry the reason on 181 crates, rkyv and hashbrown specialisation `default!` arms,
+  the rest of the 32 newly `Unknown` rows inherit it). The cover reaches every kind the hidden text can define: a fn or
+  method is marked, a module twin's fns are marked, and a spliced `use` stub beside a hidden arm of the same name is put
+  back as unexpanded text (Fable's review: `useuse_e`, `fnuse_e`, `useother_e` read 1 on 0.42.0 and main and 0 on the first
+  cut; 0 such sites on the 181 crates). And candor's own marker attributes (`candor_mbe_op`, `candor_mbe_prim_op`,
+  `candor_derive_synth`) no longer read as attribute macros that hold R828's hedge (7 interface-union rows lose `Unknown`,
+  all over pure bodies); and
   `use ::dep::x::*` names the extern crate even beside a module `dep` (pre-existing for the hand-written shape; time's
   benchmarks' spliced `mod rand09;` would have cost 129 rows their `invisible:[rand09]`). Corpus A/B over 181 crates against
-  main: ADDED 2,408 / REMOVED 33 / CHANGED 2,200; 453 rows newly concrete (tokio 378, palette 40, mio 34), 926 newly
+  main: ADDED 2,408 / REMOVED 33 / CHANGED 2,214; 453 rows newly concrete (tokio 378, palette 40, mio 34), 926 newly
   `Unknown` only, of which 1,623 rows are units that were absent; concrete lost 3 (mio `event::source::Box::{register,
-  reregister,deregister}` lose `Log` and keep `Unknown dispatch:Source.register`: `Source` now has 13 visible implementors,
-  past the §4 bound, R1812); 180 rows lose `Unknown` (C1 21, C2 18, cascade 93, C3 48, seeded C3 39/39; hashbrown, syn and
+  reregister,deregister}` lose `Log` and keep `Unknown dispatch:Source.register`: the cross-file cfg lift makes 13
+  implementors visible, past the §4 bound, R1812; `deny Log` on those rows goes from 1 to 2, fail-closed INCOMPLETE); 180 rows lose `Unknown` (C1 21, C2 18, cascade 93, C3 48, seeded C3 39/39; plus the 7 union rows above; hashbrown, syn and
   rand_chacha agree with the rustc-expanded program; tokio's read by hand or chained through socket2). tokio's 86-row `Log`
   cell from R1004: 0 of 421 `Log` rows lost (87 lost with `CANDOR_I1S2_MODUSE_OFF=1`, the calibration). Oracle: palette's
-  253 absent effectful units → 0, mio (all features) 17 → 0. Cache rev 199. Kill switches `CANDOR_I1S2_MODUSE_OFF`,
+  253 absent effectful units → 0, mio (all features) 17 → 0. Cache rev 200. Kill switches `CANDOR_I1S2_MODUSE_OFF`,
   `CANDOR_I1S2_XCFG_OFF`, `CANDOR_I1S2_TWIN_OFF`, `CANDOR_I1S2_LCGLOB_OFF`.
 
 - ⚠ **With `--deps`, a call the curated classifier answers now ALSO carries the chained dependency's row for it, on every

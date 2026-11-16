@@ -1156,7 +1156,8 @@ fn hidden_names(ts: &TokenStream, out: &mut std::collections::HashSet<String>) {
                 if s == "use" {
                     in_use = true;
                 }
-                prev_fn = s == "fn";
+                // `fn <name>` and `mod <name>`: a hidden module twin is as much an arm as a hidden fn (Fable stage-2 review §6).
+                prev_fn = s == "fn" || s == "mod";
             }
             TokenTree::Punct(p) => {
                 if p.as_char() == ';' {
@@ -1176,6 +1177,46 @@ fn hidden_use_idents(ts: &TokenStream, out: &mut std::collections::HashSet<Strin
                 let s = i.to_string();
                 if !matches!(s.as_str(), "crate" | "self" | "super" | "as" | "pub" | "in") {
                     out.insert(s);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The names a `use` tree binds (a rename binds its new name; a glob binds nothing nameable).
+fn use_leaves(t: &syn::UseTree) -> Vec<String> {
+    match t {
+        syn::UseTree::Path(p) => use_leaves(&p.tree),
+        syn::UseTree::Name(n) if n.ident != "self" => vec![n.ident.to_string()],
+        syn::UseTree::Rename(r) => vec![r.rename.to_string()],
+        syn::UseTree::Group(g) => g.items.iter().flat_map(use_leaves).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Every fn and method of a module twin carries the hidden-twin mark (`mark_hidden_twins`), at any depth.
+fn mark_all_fns(items: &mut [syn::Item]) {
+    let id = || syn::Ident::new(crate::model::MBE_TWIN_ATTR, proc_macro2::Span::call_site());
+    for it in items.iter_mut() {
+        match it {
+            syn::Item::Fn(f) if !f.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) => {
+                let i = id();
+                f.attrs.push(syn::parse_quote!(#[#i]));
+            }
+            syn::Item::Impl(im) => {
+                for ii in im.items.iter_mut() {
+                    if let syn::ImplItem::Fn(f) = ii {
+                        if !f.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
+                            let i = id();
+                            f.attrs.push(syn::parse_quote!(#[#i]));
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &mut m.content {
+                    mark_all_fns(inner);
                 }
             }
             _ => {}
@@ -1235,6 +1276,37 @@ fn mark_hidden_twins(out: &mut [syn::Item], partial: &std::collections::HashSet<
             syn::Item::Fn(f) if free.contains(&f.sig.ident.to_string()) && gated(&f.attrs) => {
                 let n = f.sig.ident.to_string();
                 mark(&mut f.attrs, &n);
+            }
+            // A visible `use` arm (`cfg_not_unix! { pub use self::stub::leaf; }`, spliced) beside a hidden arm of the same name
+            // (a `use` or a `fn`): the name would RESOLVE to the stub. A `use` carries no unit to mark, so the visible arm is
+            // put back as unexpanded text — exactly the state every earlier build read (R128 discloses the module), never a
+            // resolution to one arm. Fable's stage-2 review, item 1: `useuse_e`, `fnuse_e`, `useother_e` read 1 on 0.42.0 and
+            // main, 0 on the first stage-2 cut.
+            syn::Item::Use(u) if gated(&u.attrs) && use_leaves(&u.tree).iter().any(|n| free.contains(n)) => {
+                if candor_report::env::trace("CANDOR_I1_INSTR") {
+                    eprintln!("I1S2TWINUSE\t{}", use_leaves(&u.tree).join(",")); // §E1 REACH COUNTER, on the ADDED branch only
+                }
+                let toks = quote::ToTokens::to_token_stream(&*u);
+                *it = syn::Item::Macro(syn::ItemMacro {
+                    attrs: Vec::new(),
+                    ident: None,
+                    mac: syn::Macro {
+                        path: syn::parse_quote!(__candor_i1_hidden_twin_use),
+                        bang_token: Default::default(),
+                        delimiter: syn::MacroDelimiter::Brace(Default::default()),
+                        tokens: toks,
+                    },
+                    semi_token: None,
+                });
+            }
+            // A visible module arm beside a hidden module of the same name: every fn and method in it carries the mark.
+            syn::Item::Mod(m) if gated(&m.attrs) && free.contains(&m.ident.to_string()) => {
+                if let Some((_, inner)) = &mut m.content {
+                    if candor_report::env::trace("CANDOR_I1_INSTR") {
+                        eprintln!("I1S2TWINMOD\t{}", m.ident); // §E1 REACH COUNTER, on the ADDED branch only
+                    }
+                    mark_all_fns(inner);
+                }
             }
             // A method's twin may be hidden in an impl-item invocation of an impl block of this module, or in an item-position
             // invocation that writes a whole `impl` block (`cfg_unix! { impl Go for S { fn go(..) .. } }`).
@@ -1363,6 +1435,8 @@ pub(crate) const TOOLCHAIN_BANG_MACROS: &[&str] = &[
     "offset_of", "assert_matches", "debug_assert_matches", "const_format_args", "format_args_nl", "concat_idents",
     "trace_macros", "log_syntax", "asm", "global_asm", "naked_asm", "pin", "is_x86_feature_detected",
     "is_aarch64_feature_detected", "is_arm_feature_detected", "unreachable_unchecked", "macro_rules",
+    // candor's own placeholder for a visible `use` twin put back as unexpanded text (`mark_hidden_twins`)
+    "__candor_i1_hidden_twin_use",
 ];
 
 /// SOUNDNESS R1541 / R1804, Fable's merge re-checks RC2 and RC2-1/RC2-2 — the TEXT THIS SCAN NEVER PARSES, read for what it
@@ -1705,8 +1779,10 @@ const BUILTIN: &[&str] = &[
     "no_coverage", "doc_cfg", "feature", "rustc_diagnostic_item", "const_trait", "fundamental", "no_std", "no_implicit_prelude",
     "crate_type", "crate_name", "recursion_limit", "type_length_limit", "windows_subsystem", "no_main", "macro_escape",
     "target_arch", "ignore_function", "rustversion",
-    // candor's own I1 stage-2 mark (`mark_hidden_twins`), not an attribute macro
-    "candor_i1_hidden_twin",
+    // candor's OWN marker attributes, none of which is an attribute macro: the I1 stage-2 twin mark (`mark_hidden_twins`), the
+    // R1157/R1180 operator-impl marks and the R1146 synthesised-derive mark. Read as attribute macros they held every R828
+    // hedge in any crate with a macro-made operator impl or a synthesised comparison (Fable stage-2 review, finding (c)).
+    "candor_i1_hidden_twin", "candor_mbe_op", "candor_mbe_prim_op", "candor_derive_synth",
 ];
 const STD_ITEM_MACROS: &[&str] = &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm"];
 fn derive_hides(list: &syn::punctuated::Punctuated<syn::Path, syn::Token![,]>) -> bool {
@@ -2366,5 +2442,17 @@ mod tests {
     fn typed_fragments_and_nested_repetition() {
         let def = "macro_rules! ex { ($(#[$a:meta])* extern \"C\" { $(fn $n:ident($($args:tt)*) -> $r:ty;)* }) => { $( unsafe extern \"C\" fn $n($($args)*) -> $r { panic!() } )* } }";
         assert_eq!(exp(def, "ex! { extern \"C\" { fn f(v: u32) -> (); fn g() -> u8; } }").as_deref(), Some("f,g"));
+    }
+
+    /// Fable stage-2 review, finding (c): candor's OWN marker attributes are not attribute macros, so a crate whose only
+    /// "attribute" is one of them holds no R828 hedge; a real attribute macro beside them still does.
+    #[test]
+    fn candor_marker_attributes_are_not_a_hidden_impl_surface() {
+        for m in ["candor_mbe_op", "candor_mbe_prim_op", "candor_derive_synth", "candor_i1_hidden_twin"] {
+            let f: syn::File = syn::parse_str(&format!("#[{m}] impl X {{ #[{m}] fn f(&self) {{}} }} pub struct X;")).unwrap();
+            assert!(!super::has_hidden_impl_surface(&f.items), "{m} read as an attribute macro");
+        }
+        let f: syn::File = syn::parse_str("#[candor_mbe_op] impl X {} #[other::attr] pub struct X;").unwrap();
+        assert!(super::has_hidden_impl_surface(&f.items), "a real attribute macro still counts");
     }
 }

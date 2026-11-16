@@ -797,3 +797,54 @@ fn i1s2_a_leading_colon_glob_names_the_extern_crate() {
     assert_eq!(inv(&app, &[]), vec!["dep1".to_string()], "the glob names the extern crate");
     assert!(inv(&app, &[("CANDOR_I1S2_LCGLOB_OFF", "1")]).is_empty(), "LCGLOB_OFF: the local module answers, nothing named");
 }
+
+/// Fable's stage-2 review, item 1: the twin cover reached fns and methods only. A spliced `use` stub beside a hidden arm of
+/// the same name (a `use` or a `fn`) resolved to the stub, and a spliced module beside a hidden module twin was read alone.
+/// Executed (fixture `fxm`): `useuse_e`, `fnuse_e`, `useother_e` read `deny Unknown` 1 on 0.42.0 and main, 0 on the first
+/// stage-2 cut; `modtw_e` was silent on every arm. Must NOT hold: a once-defined pair of module arms (`modctl_e`) is charged.
+#[test]
+fn i1s2_a_hidden_use_or_module_twin_keeps_a_hedge() {
+    let d = tmpdir("s2twu");
+    write_crate(
+        &d,
+        "s2twu",
+        "[features]\nx = []\n",
+        "#[macro_use]\nmod macros;\npub mod m1;\npub mod m1c;\npub mod m3;\npub mod m4;\npub mod m5;\n\
+         pub fn modtw_e() { m1::sys::f() }\npub fn modctl_e() { m1c::sysc::fc() }\npub fn useuse_e() { m3::leaf3() }\n\
+         pub fn fnuse_e() { m4::leaf4() }\npub fn useother_e() { m5::via5() }\n",
+    );
+    write_file(
+        &d,
+        "src/macros.rs",
+        "#[cfg(feature = \"x\")]\nmacro_rules! cfg_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         #[cfg(not(feature = \"x\"))]\nmacro_rules! cfg_unix { ($($it:item)*) => { $( #[cfg(unix)] $it )* } }\n\
+         macro_rules! cfg_not_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n\
+         macro_rules! on_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         macro_rules! off_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n",
+    );
+    write_file(&d, "src/m1.rs", "cfg_unix! { pub mod sys { pub fn f() { EFF } } }\ncfg_not_unix! { pub mod sys { pub fn f() {} } }\n");
+    write_file(&d, "src/m1c.rs", "on_unix! { pub mod sysc { pub fn fc() { EFF } } }\noff_unix! { pub mod sysc { pub fn fc() {} } }\n");
+    write_file(
+        &d,
+        "src/m3.rs",
+        "pub mod real { pub fn leaf3() { EFF } }\npub mod stub { pub fn leaf3() {} }\n\
+         cfg_unix! { pub use self::real::leaf3; }\ncfg_not_unix! { pub use self::stub::leaf3; }\n",
+    );
+    write_file(
+        &d,
+        "src/m4.rs",
+        "pub mod stub4 { pub fn leaf4() {} }\ncfg_unix! { pub fn leaf4() { EFF } }\ncfg_not_unix! { pub use self::stub4::leaf4; }\n\
+         pub mod real5 { pub fn leaf5() { EFF } }\npub mod stub5 { pub fn leaf5() {} }\n\
+         cfg_unix! { pub use self::real5::leaf5; }\ncfg_not_unix! { pub use self::stub5::leaf5; }\n",
+    );
+    write_file(&d, "src/m5.rs", "use crate::m4::leaf5;\npub fn via5() { leaf5() }\n");
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["modtw_e", "useuse_e", "fnuse_e", "useother_e"] {
+        assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden arm: {rows:?}");
+    }
+    assert_eq!(eff(&rows, "modctl_e"), vec!["Fs".to_string()], "a once-defined module pair is charged: {rows:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
+    for f in ["modtw_e", "useuse_e", "fnuse_e", "useother_e"] {
+        assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to the stub alone: {off:?}");
+    }
+}

@@ -44,7 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
-    // rev200 (rustagent-i1s2, I1 stage 2): modules, `use`s and `extern crate`s an expansion yields are SPLICED, a cross-file
+    // rev200 (rustagent-i1s2 rework, Fable stage-2 review): a visible `use` twin is put back as unexpanded text and a module
+    // twin's fns carry the hidden-twin refusal; candor's own marker attributes no longer read as attribute macros. A rev199
+    // entry holds the decls and refusals of neither.
+    // rev199 (rustagent-i1s2, I1 stage 2): modules, `use`s and `extern crate`s an expansion yields are SPLICED, a cross-file
     // expansion carrying `#[cfg]` is no longer refused, and a cfg-gated fn beside an unexpanded twin carries a refusal in its
     // cached `FnInfo` (`mbe::mark_hidden_twins`). A rev198 entry holds the stage-1 decls and none of the refusals.
     // rev199 (rustagent-r1807): SOUNDNESS R1807 — a classified call into a chained crate now joins its row. No cached field moves
