@@ -20,7 +20,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   alias arms and the builder-chain guess skipped the row for a classified call. Now one rule at every site: the UNION of the
   curated charge and the row (its effects, `Unknown` and reasons, surfaces, and the obligation-3 `dispatchesOn` follow-on).
   A classified call asks with the most specific key its spelling forms (full qual first; a same-tail sibling type's row is
-  not charged to it), and a classified call whose row is absent adds nothing beyond its curated charge. Adds only: 0 rows
+  not charged to it). A classified call whose own row is absent adds only what the engine's walk reaches from the written
+  type (its trait's provided bodies and its `Deref` target, by exact key), on method and `Type::member(..)` spellings
+  alike; a same-tail sibling's row is never walked into. Adds only: 0 rows
   removed, 0 effects or disclosures lost, in every corpus below. Precision cost, named: a complete row over a member whose
   curated effect has a platform leaf now also carries the curated charge (over-approximation, never silence). A chained report
   from a different producer version (§2.1 downgraded) now adds its `Unknown` + `dep-stale:` reason to classified calls into
