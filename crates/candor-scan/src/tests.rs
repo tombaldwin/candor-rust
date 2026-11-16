@@ -7525,6 +7525,14 @@ pub fn ctl_std_io(p: &str) -> std::io::Result<()> { let _: Option<io::Error> = N
                                    ("r128incl", included, &[gen][..])] {
             let v = scan_fixture_files(name, src, extra);
             let eff = fixture_effects(&v, "go");
+            // I1 stage 2 — a macro-made `use` is now SPLICED, so (1) is no longer hidden: the re-export binds `spawn` and
+            // the call is charged through it, which is the resolution R128's hedge stood in for.
+            if name == "r128reexp" {
+                if eff != vec!["Exec".to_string()] {
+                    wrong.push(format!("{name}: the spliced re-export must charge go = {eff:?}"));
+                }
+                continue;
+            }
             let whys: Vec<String> = v["functions"].as_array().into_iter().flatten()
                 .filter(|f| f["fn"].as_str() == Some("go"))
                 .flat_map(|f| f["unknownWhy"].as_array().into_iter().flatten()
@@ -29415,7 +29423,9 @@ fn r1484_a_caller_inside_one_arm_names_its_own_arm_only_where_that_is_proven() {
     for (tag, lib, gate) in [
         ("r1484e", "#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n#[cfg(unix)] #[path = \"u.rs\"] mod imp;\n#[path = \"w.rs\"] mod shared;\n", "w::caller"),
         ("r1484f", "mod w;\n#[cfg(windows)] #[path = \"w.rs\"] mod imp;\n#[cfg(unix)] #[path = \"u.rs\"] mod imp;\n", "w::caller"),
-        ("r1484g", &format!("macro_rules! m {{ ($($t:tt)*) => {{ $($t)* }} }}\nm! {{ mod hidden; }}\n{uw}"), "w::caller"),
+        // I1 stage 2 — the macro must stay UNEXPANDED for this arm to mean anything (a module it may declare could `#[path]`
+        // the file again): a local `m! { mod hidden; }` is now expanded and spliced, so a dependency's macro stands in.
+        ("r1484g", &format!("other_crate::m! {{ mod hidden; }}\n{uw}"), "w::caller"),
     ] {
         let (wsrc, usrc) = if gate == "w::caller" && tag != "r1484g" { (format!("{pure}{caller}"), fs_w.to_string()) } else { (format!("{fs_w}{caller}"), format!("{pure}{caller}")) };
         let probe = if tag == "r1484g" { "u::caller" } else { gate };

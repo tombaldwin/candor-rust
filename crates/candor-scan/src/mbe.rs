@@ -982,13 +982,7 @@ impl Ctx<'_> {
                             );
                         let full = gen.iter().all(|g| !i1_refused(g) || matches!(g, syn::Item::Trait(_)));
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
-                            for g in &gen {
-                                let k = match g {
-                                    syn::Item::Mod(_) => "mod",
-                                    syn::Item::Use(_) => "use",
-                                    syn::Item::ExternCrate(_) => "extern-crate",
-                                    _ => continue,
-                                };
+                            for (g, k) in gen.iter().filter_map(|g| stage2_kind(g).map(|k| (g, k))) {
                                 if !i1_refused(g) {
                                     eprintln!("I1S2SPLICE\t{k}\t{seed_name}"); // §E1 REACH COUNTER, on the CHANGED branch only
                                 }
@@ -1118,6 +1112,16 @@ impl Ctx<'_> {
             mark_hidden_twins(&mut out, &self.partial);
         }
         *items = out;
+    }
+}
+
+/// I1 stage 2 — the item kinds stage 2 started splicing, named for the reach counter.
+fn stage2_kind(g: &syn::Item) -> Option<&'static str> {
+    match g {
+        syn::Item::Mod(_) => Some("mod"),
+        syn::Item::Use(_) => Some("use"),
+        syn::Item::ExternCrate(_) => Some("extern-crate"),
+        _ => None,
     }
 }
 

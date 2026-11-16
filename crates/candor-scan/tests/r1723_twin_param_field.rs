@@ -213,10 +213,14 @@ fn r1723_twin_drop_glue_unions_built_arms_in_both_file_orders() {
     assert_ne!(off_cells[0], off_cells[1], "the switched-off arm must reproduce the order dependence (else this test cannot fail)");
 }
 
+// I1 stage 2 — the macro is invoked BY PATH: a bare `hide! { pub use .. }` is now expanded and spliced, and then reads as the
+// hand-written re-export does (`dispatchesOn: futures_io#AsyncBufRead::consume`, `invisible: [futures_io]`), so this hedge would
+// not be exercised. A path-invoked macro is still left unexpanded, which is the shape R1724 is about.
 const R1724_LIB: &str = "\
 pub mod io {
     macro_rules! hide { ($($i:item)*) => { $($i)* } }
-    hide! { pub use futures_io::AsyncBufRead as BufRead; }
+    pub(crate) use hide;
+    crate::io::hide! { pub use futures_io::AsyncBufRead as BufRead; }
 }
 pub mod chain {
     use crate::io::BufRead;
