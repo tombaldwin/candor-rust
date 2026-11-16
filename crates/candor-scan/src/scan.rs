@@ -1092,6 +1092,64 @@ fn r1578_type(
     Some((Call { path, leaf: method, typed: true, method: true, dot: true, ..c.clone() }, twin))
 }
 
+/// SOUNDNESS R1787 — A CHAINED JOIN THAT STILL CARRIES `Unknown` MUST NOT WITHDRAW THE CURATED CHARGE ON THE PATH IT
+/// ANSWERED. With the dependency UNCHAINED, `r1578_type` types `raw_sql(..).fetch_all(..)`'s receiver from the lock-pinned
+/// source and the typed call `sqlx_core::raw_sql::RawSql::fetch_all` goes down the ordinary path, where the classifier
+/// charges `Db`. With it CHAINED, `r1578_type` stands aside (the report answers), the `<untyped>` route's `returns` join
+/// answers from the dependency's report and `continue`s past the classifier, and a report whose row for that member is only
+/// `Unknown` (`dispatchesOn: Executor::fetch_all`, no platform leaf — `Db` is curated, nothing in the dependency performs it
+/// by name) replaced a determined `Db` with a hedge: `(E, {})` and `({}, {r})` are incomparable, so `deny Db` went 1 to 0.
+/// SPEC §2 "a dependency scan replaces a curated entry" is about a report that KNOWS something; a row that still carries
+/// `Unknown` has not resolved the member and cannot vouch that `E` is absent from it.
+///
+/// So where the join the `<untyped>` route is about to take (`returns`, then `by_key`) carries `Unknown`, the typed call the
+/// unchained arm forms is formed here too, spelled as `r1578_type` spells it, and goes down the ordinary path BESIDE the join:
+/// the join's effects, `Unknown` and reason all stay, and the classifier answers for the member. A row with NO `Unknown`
+/// (concrete effects, or pure) is a complete answer and keeps replacing the curated entry, exactly as today; a row with
+/// concrete effects AND `Unknown` keeps its concrete effects (the join is unchanged) and gains the curated charge beside
+/// them; a local nominal type of the same leaf refuses (the typed route must not take it), and so does an unresolvable
+/// type. ADDS a classifier charge only; never removes one. `CANDOR_R1787_OFF=1` disables it.
+fn r1787_chain_typed(
+    c: &Call,
+    deps: &std::collections::HashSet<String>,
+    renames: &HashMap<String, String>,
+    deps_idx: &DepIndex,
+    dir: &str,
+    sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
+    returns: &ReturnIndex,
+) -> Option<Call> {
+    if candor_report::env::switch("CANDOR_R1787_OFF") {
+        return None;
+    }
+    let (cr, rest) = c.path.split_once(&format!("::{UNTYPED_RECV_MARKER}::"))?;
+    let cr_real: &str = renames.get(cr).map(String::as_str).unwrap_or(cr);
+    if cr.contains("::") || !deps.contains(cr) || !deps_idx.crates.contains(cr_real) || rest.contains('<') {
+        return None;
+    }
+    let (callee, method) = rest.rsplit_once("::")?;
+    // the route's own lookup, verbatim: `returns` for the factory, then `by_key` for the member on the type it names
+    let ty_full = deps_idx.returns.get(&format!("{cr_real}#{callee}"))?;
+    let de = deps_idx.by_key.get(&format!("{ty_full}::{method}"))?;
+    if !de.effects.contains("Unknown") {
+        return None;
+    }
+    let ty = ty_full.strip_prefix(&format!("{cr_real}#"))?.to_string();
+    if ty.contains('<') {
+        return None;
+    }
+    let leaf = ty.rsplit("::").next().unwrap_or(&ty);
+    if returns.contains_key(&crate::model::nominal_key(leaf)) {
+        return None; // a same-leaf LOCAL type: the typed route might take it
+    }
+    let ty = r1619_public(cr, renames, dir, sigs, ty, method);
+    let path = format!("{cr}::{ty}::{method}");
+    if candor_report::env::trace("CANDOR_R1787_INSTR") {
+        let only = de.effects.len() == 1; // `Unknown` alone, against `Unknown` beside concrete effects
+        eprintln!("R1787TYPED\t{}\t{path}\tunknown_only={only}", c.path); // §E1 REACH COUNTER
+    }
+    Some(Call { path, leaf: method.to_string(), typed: true, method: true, dot: true, ..c.clone() })
+}
+
 /// SOUNDNESS R1605 — a BUILDER STEP on a typed `R1605_TRAITS`-crate value. The collector types `post::Entity::find()` (and
 /// `E::find()` under `E: EntityTrait`) as the dependency's `Select`; a `let` over a further step (`let q = E::find().filter(c);
 /// q.all(db)`) records that typed base and the steps (`<cr>::<untyped>::<Type>::filter::all`, or `…::<Type>::<chain>a.b::m`),
@@ -4338,6 +4396,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             Option<BTreeSet<String>>,
         ) = Default::default();
         let mut sc_lens = [0usize; 7];
+        // SOUNDNESS R1787 — the typed calls a chained, `Unknown`-only join stands beside (see `r1787_chain_typed`).
+        let r1787_extra: Vec<Call> = f
+            .calls
+            .iter()
+            .filter_map(|c| r1787_chain_typed(c, &deps, &dep_renames, deps_idx, dir, &r1578_sigs, &returns))
+            .collect();
         let mut sc_prev: Option<&Call> = None;
         if sc_on {
             let _ = crate::sidecar::take_dep_hits(); // nothing a previous function looked up belongs to this one
@@ -4394,7 +4458,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             };
         }
-        for c in &f.calls {
+        for c in f.calls.iter().chain(r1787_extra.iter()) {
             sc_step!();
             sc_prev = Some(c);
             // SOUNDNESS R1578 — an UNTYPED receiver whose value an UNCHAINED dependency produced is typed from that

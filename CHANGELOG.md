@@ -11,6 +11,21 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **With `--deps`, a dependency row that still carries `Unknown` no longer withdraws the curated charge on the path it
+  answered** (SOUNDNESS R1787; the lost charge was disclosed by the `Unknown`, so `deny E Unknown` never moved). Unchained, a
+  lock types `raw_sql(..).fetch_all(..)` and the classifier charges `Db`; chained over sqlx_core's real report the
+  untyped-receiver route answered from the report (`Unknown` + `dispatchesOn: Executor::fetch_all`, no platform leaf, since
+  `Db` is curated) and skipped the classifier, so `deny Db` went 1 to 0. Where that join carries `Unknown`, the typed call the
+  unchained arm forms is now formed too and goes down the ordinary path beside the join: the row's effects, `Unknown` and
+  reason stay and the curated charge is added. A row with no `Unknown` (concrete effects or pure) is a complete answer and
+  still replaces the curated entry, as before. Adds a classifier charge only; `CANDOR_R1787_OFF=1` restores the old reading
+  (byte-identical to the previous build on the field case). Executed fixture (sqlx-sqlite, one row returned): `deny Db` 0 to 1
+  chained on the field-case shape, `deny Db Unknown` unchanged at 1, pure twin 0 on every arm. Chained A/B over 32 effect-weighted
+  crates: 0 rows added or removed, 0 effects lost, 18 rows newly `Db`, all in sqlx-postgres (16 reach the two catalog-query
+  `fill_cache` bodies by call edge; 2 are `AnyConnectionBackend` trait-member rows over the implementor that does), from 3 changed
+  call sites in the whole draw. Standalone A/B over 400 crates: byte-identical (the
+  route is unreachable without a chained report).
+
 - ⚠ **A member called on a GENERIC receiver now follows the bound's `Deref` target, conversion argument and projection**
   (SOUNDNESS R1657 bound projection, R1793, R1795, R1796; silent under-reports, pre-existing on 0.42.0). A bound was stored as
   its trait leaf, so `self.session.read_tls(..)` under `C: DerefMut + Deref<Target = ConnectionCommon<..>>` (tokio-rustls,
