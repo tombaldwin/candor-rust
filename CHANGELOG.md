@@ -22,22 +22,38 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `CANDOR_I1S2_XCFG_ON=1` (a result-moving switch, so a gate over such a report exits 2) until its cover is shown complete.
   Within one file a cfg-gated fn whose name the same module's UNEXPANDED macro text may also define carries `macro:another
   cfg arm of this fn is hidden by an unexpanded macro` (the cover is read by expanding the hidden text and parsing it with
-  the reader the visible arm uses). The cover also reaches a cfg-gated TRAIT impl: I1 stage 1 (on main, unreleased) splices
-  macro-made trait impls, and a gated `impl Tr for S` whose twin stayed unexpanded in the same file (the trait itself with
-  its default body, an empty impl inheriting a default, or an impl overriding one) resolved to its own pure member or to the
-  pure default, where 0.42.0 disclosed `macro:` (`deny Unknown` 1 on 0.42.0, 0 on main, executed). Such an impl's members
-  are now marked where the hidden text may hold the trait or an impl of it for the same type, and a member the hidden impl
-  overrides is stood on the visible arm, marked (`CANDOR_I1S2_TRAITARM_OFF=1` drops it). `use ::dep::x::*` names the extern crate even beside a module `dep` (pre-existing for the
+  the reader the visible arm uses). The cover also reaches a cfg-gated TRAIT impl. I1 stage 1 (on main since `97c23112`,
+  unreleased) splices macro-made trait impls, and a gated `impl Tr for S` whose twin stayed unexpanded resolved to its own
+  pure member or to the pure default, where 0.42.0 disclosed `macro:` (`deny Unknown` 1 on 0.42.0, 0 on main, executed).
+  This closes that silence where the twin is in the SAME module and its wrapper is a local macro this pass will not expand
+  (the trait itself with its default body, an empty impl inheriting a default, an impl overriding one, or the same impl), or
+  another crate's macro whose input parses as items (that input is now also read on the cover's keys path; it was filed only
+  as loose identifiers, which no qualified lookup reads, and this also closes a foreign-wrapped inherent-method twin that was
+  silent on 0.42.0 too). Such an impl's members are marked where the hidden text may hold the trait or an impl of it for the
+  same type, and a member the hidden impl overrides is stood on the visible arm, marked (`CANDOR_I1S2_TRAITARM_OFF=1` drops
+  it). STILL OPEN, introduced on main by stage 1 and not closed here: the same twin when it is in ANOTHER module (the trait,
+  or the other impl arm, declared in a sibling module) or one module down inside the hidden text (`hid! { pub mod inner {
+  pub trait Tr { .. } } }`), because the cover reads hidden text per module; each reads `deny Unknown` 1 on 0.42.0 and 0 on
+  main and on this build. `use ::dep::x::*` names the extern crate even beside a module `dep` (pre-existing for the
   hand-written shape; a spliced `mod rand09;` in time's benchmarks would have cost 129 rows their `invisible:[rand09]`). And
   candor's own marker attributes (`candor_mbe_op`, `candor_mbe_prim_op`, `candor_derive_synth`) no longer read as attribute
-  macros that hold R828's hedge: 7 interface-union rows lose `Unknown`, all over pure bodies. Executed fixtures: 33 probes
-  that read silent (ABSENT or `[]`) over a write on main, 28 on 0.42.0, are now charged or disclosed; no probe in the stage-1
-  and stage-2 fixtures or the review fixtures reads lower than on main or 0.42.0. Corpus A/B over 181 crates against
+  macros that hold R828's hedge: 7 interface-union rows lose `Unknown`, all over pure bodies. Executed fixtures: 45 probes
+  that read silent (ABSENT or `[]`) over a write on main, 33 on 0.42.0, are now charged or disclosed; no probe in the stage-1
+  and stage-2 fixtures or the review fixtures reads lower than on main, and against 0.42.0 only the three open stage-1
+  positions named above do. Corpus A/B over 181 crates against
   main: ADDED 227 / REMOVED 0 / CHANGED 220; 1 row newly concrete (aws-lc-sys `Env`), 163 newly `Unknown` only (0.17%;
-  palette 102, aes 33, rkyv 25), 0 concrete lost; 11 rows lose `Unknown` (the 7 union rows, and rand_chacha's 4 derived
-  `eq`s, which compare ppv_lite86 vectors and keep `invisible:[ppv_lite86]`); 8 palette rows lose `invisible:[approx]` and the
-  keys `approx#{AbsDiffEq,RelativeEq,UlpsEq}::shift_hue` (or `set_hue`, `shift_hue_assign`), members approx does not declare,
-  and keep `Unknown` and their `palette#` key. Oracle: palette's 253 absent effectful units → 163. Cache rev 204. Kill
+  palette 102, aes 33, rkyv 25), 0 concrete lost; 11 rows lose `Unknown`: the 7 union rows, and rand_chacha's 4 `eq`s, whose
+  hedge was R1004's name-collision evidence from `chacha_impl!`'s partial text (its `mod` was refused, so the invocation
+  stayed hidden and its `fn eq` matched); with the module spliced the text is gone and the rows resolve, pure by reading
+  (`#[derive(PartialEq)]` over ppv_lite86 `vec128_storage` fields, whose `PartialEq` compares the integers), keeping
+  `invisible:[ppv_lite86]`. 8 palette rows lose `invisible:[approx]` and the keys
+  `approx#{AbsDiffEq,RelativeEq,UlpsEq}::shift_hue` (or `set_hue`, `shift_hue_assign`), members approx does not declare, and
+  keep `Unknown` and their `palette#` key. Cost not visible as a lost effect: palette's spliced `make_partial_cam16!` modules
+  add six implementors each to `SetHue`, `ShiftHue`, `ShiftHueAssign` and `WithHue` (11 → 17 per trait, plus `Alpha`'s own),
+  past the §4 implementor bound, so 12 rows (`Alpha::{set_hue,shift_hue,shift_hue_assign,with_hue}`, the six
+  `color_theory::T::*`, `set_hue`, `shift_hue_assign`) lose their enumerated implementor edges and keep the `dispatch:` hedge
+  (`CANDOR_I1S2_MODUSE_OFF=1` restores them; every implementor is a pure field store, so no gate moves; R1812's class without
+  the lift). Oracle: palette's 253 absent effectful units → 163. Cache rev 205. Kill
   switches `CANDOR_I1S2_MODUSE_OFF`, `CANDOR_I1S2_TWIN_OFF`, `CANDOR_I1S2_TRAITARM_OFF`, `CANDOR_I1S2_LCGLOB_OFF`; opt-in
   `CANDOR_I1S2_XCFG_ON`.
 
