@@ -48,10 +48,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   Where a crate also holds a non-std derive, an attribute macro or an unexpanded item invocation, the macro-implementor
   hedge on its traits is kept: one of those may add an implementor the scan cannot see (R1804). Every position is read:
   items at any depth (modules, `extern` blocks and their foreign items, const, static, type alias, impl and trait items,
-  items inside fn bodies, the branches of `cfg_if!`), with `#[cfg_attr(..)]` read recursively. So is a bang macro the
-  scan does not expand, at any position including a statement or expression in a fn body: a function-like proc macro, or a
-  dependency's `macro_rules!` (`pub fn setup() { other::make_go!(Hid); }`; toolchain and local macros excepted). Measured
-  on 181 crates, this adds no hold the attribute/derive surface had not already made.
+  items inside fn bodies, the branches of `cfg_if!`), with `#[cfg_attr(..)]` read recursively. The text the scan never
+  parses is read for what it can add, and holds the hedge:
+  - a bang macro the scan does not expand, at any position including a fn body: a function-like proc macro, or a
+    dependency's `macro_rules!`;
+  - any unexpanded invocation's arguments, a toolchain macro's included: an `impl`, a non-builtin attribute, or a nested
+    invocation;
+  - the body of a local `macro_rules!` invoked where it is not expanded, followed through the local macros it calls;
+  - a bare name under a `#[macro_use]` or glob import (a dependency's `vec!` outranks std's) unless an ungated local
+    definition exists;
+  - an unspliced `include!`, and a `mod NAME;` with no file the scan read.
 
   A glob `use dep::*` or a `#[macro_use] extern crate dep` counts as importing any macro name, so a `#[cfg]`-gated
   `macro_rules!` stub beside one is not bound (pre-existing on 0.42.0). Globs of `std`, `core` and `alloc` do not count.
