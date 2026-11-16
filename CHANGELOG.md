@@ -39,6 +39,17 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   A trivially-superset cover (`CANDOR_I1S2B_TRIVIAL=1`: every produced gated item beside any unexpanded text carries the
   refusal) is measured, not the default. Cache rev 214.
 
+- ⚠ **A method called on a receiver no route typed, whose every candidate is the same-named type's member in two or more
+  modules (the `#[cfg]` arms of one type), now discloses `Unknown` when any arm is not provably pure** — an arm that is
+  `Unknown`-only, or whose reach ends in an unchained dependency or a call nothing handled. Before, the untyped-receiver floor
+  counted only a concretely effectful arm, so `registry.selector().id()` over arms one of which writes through a dependency
+  read ABSENT. Executed: plain `#[cfg]` arm modules read `deny Unknown` 0 on 0.42.0 and main and now 1; with the cross-file
+  `#[cfg]` lift on, the same shape behind a cfg-stamping macro (inherent and trait methods) read 0 and now 1; an all-pure arm set
+  stays silent. A leaf several distinct types share (`clone`, `write`, `get`) keeps the concrete-only floor, which is what keeps
+  the cost small. Cost on 181 crates: 37 rows newly carry `Unknown` only (0.039%; object 27 units, rustix 20, reqwest 5,
+  polling, compact_str, bitflags, plotters), 38 unit-scope `deny Unknown` 0→1, 0 crate-scope flips, 0 removed, 0 concrete lost;
+  the same 37 with the lift on. `CANDOR_ARMSET_OFF=1` restores the old floor. Cache rev 216.
+
 - ⚠ **A type written through a crate-ROOT local re-export of another item (`pub use crate::ident::Ident;` at the root,
   `pub use proc_macro2::Ident;` in `ident`) now names that item.** Spelled `crate::Ident`, or bare under a root glob
   (`use super::*;`), a field, parameter or `let` typed this way named no type: the receiver counted as typed, the method call

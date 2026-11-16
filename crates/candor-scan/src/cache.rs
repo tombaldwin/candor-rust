@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev216 (rustagent-i1s2b, stage 2b part B2): the untyped-receiver floor's ARM-SET rule (`scan.rs`, `CANDOR_ARMSET_OFF`)
+    // hedges a call over same-named cfg arms when an arm is not provably pure; a rev215 entry may hold the old reading.
     // rev215 (rustagent-i1s2b, stage 2b part B): a ONE-segment type or path the crate ROOT re-exports by a local named `use`
     // resolves through the re-export table (`lang::qualified_alias`, `alias_expand_decls`); a rev214 entry may hold the old,
     // unresolved reading.
@@ -756,7 +758,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev215/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev216/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

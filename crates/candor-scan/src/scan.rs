@@ -9411,6 +9411,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     } else {
         propagate_str(&unresolved_ext, &calls, &all)
     };
+    // The transitive reach of every untyped-site candidate into code this scan cannot see (an unchained dependency's κ
+    // ledger, an external-looking call nothing handled): the ARM-SET rule below needs "not provably pure", which a pure
+    // `inferred` alone cannot establish.
+    let (arm_blind, arm_unres) = if untyped_contested.is_empty() || arm_set_off() {
+        (HashMap::new(), HashMap::new())
+    } else {
+        (propagate_str(&blind_direct, &calls, &all), propagate_str(&unresolved_ext, &calls, &all))
+    };
     let r1605_reach = if r1605_floored.is_empty() || untyped_contested.is_empty() {
         HashMap::new()
     } else {
@@ -9517,6 +9525,41 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if !std_name && !candor_report::env::switch("CANDOR_R1666_OFF") {
                         impure = unknown_only;
                     }
+                }
+            }
+            // THE ARM-SET RULE (I1 stage 2b part B2, Fable `fxmio2`). Two or more candidates that share their last two
+            // segments (`unix::selector::kqueue::Selector::id`, `…::epoll::Selector::id`, `wasip1::Selector::id`) are the
+            // SAME-NAMED type in several modules — the `#[cfg]` arms a receiver like mio's `registry.selector()` names, which
+            // the cross-file cfg lift makes visible together. One of them is the body that runs and no route can say which,
+            // so any arm that is not PROVABLY pure counts: an `Unknown`-only arm, an arm whose reach ends in an unchained
+            // dependency (`invisible`) or in a call nothing handled. Without it the lift turned a hedged call silent: with one
+            // arm visible the call edged that arm and inherited its hedge; with seven, the floor saw no concrete effect and
+            // said nothing, over an executed write behind a dependency (SPEC.md:5407). Bounded to arm sets, so the std-trait
+            // population the 5.95% measurement priced (distinct types sharing a method name) is not reopened.
+            // `CANDOR_ARMSET_OFF=1` restores the floor as it was.
+            if impure.is_empty() && !arm_set_off() {
+                let mut by_t2: HashMap<String, Vec<&String>> = HashMap::new();
+                for u in cands {
+                    let mut it = u.rsplit("::");
+                    if let (Some(m), Some(t)) = (it.next(), it.next()) {
+                        by_t2.entry(format!("{t}::{m}")).or_default().push(u);
+                    }
+                }
+                // ONE arm set and nothing else: every candidate is the same-named type's member, so the receiver can only be
+                // one of those arms. A leaf several distinct types share (`clone`, `write`, `get` over object's coff/elf/pe
+                // writers) is the std-trait population R1095 measured and declined, and stays with the concrete-only floor.
+                let arms: Vec<&String> = if by_t2.len() == 1 { by_t2.into_values().filter(|v| v.len() >= 2).flatten().collect() } else { Vec::new() };
+                impure = arms
+                    .into_iter()
+                    .filter(|u| {
+                        inferred.get(*u).is_some_and(|e| !e.is_empty())
+                            || arm_blind.get(*u).is_some_and(|b| !b.is_empty())
+                            || arm_unres.get(*u).is_some_and(|b| !b.is_empty())
+                    })
+                    .collect();
+                impure.sort();
+                if !impure.is_empty() && candor_report::env::trace("CANDOR_ARMSET_INSTR") {
+                    eprintln!("ARMSET\t{caller}\t{leaf}\t{}", impure.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")); // §E1 REACH
                 }
             }
             if impure.is_empty() {
@@ -13263,4 +13306,10 @@ fn r1484_own_arm(
         }
     }
     Some(arm)
+}
+
+/// I1 stage 2b part B2 — the kill switch for the untyped-receiver floor's ARM-SET rule (see the R1095 judge).
+pub(crate) fn arm_set_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_ARMSET_OFF"))
 }
