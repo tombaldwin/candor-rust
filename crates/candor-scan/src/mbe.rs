@@ -603,35 +603,38 @@ pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String
 /// - `CFGIF_MU_OTHER`: a `#[macro_use] extern crate x` for an `x` other than `cfg_if` (it may export a macro named `cfg_if`);
 /// - `CFGIF_MU_CFGIF`: `#[macro_use] extern crate cfg_if`.
 fn cfg_if_facts(items: &[syn::Item], v: &mut Vec<(String, Option<String>)>) {
-    let mut push = |k: &str| v.push((format!("{ALL_BODIES_KEY}{k}"), Some(String::from("1"))));
-    fn walk(items: &[syn::Item], push: &mut dyn FnMut(&str)) {
+    // a plain push, not a closure: the engine's own effect analysis reads a closure call as an indirect call (Self-guard)
+    fn push(v: &mut Vec<(String, Option<String>)>, k: &str) {
+        v.push((format!("{ALL_BODIES_KEY}{k}"), Some(String::from("1"))));
+    }
+    fn walk(items: &[syn::Item], v: &mut Vec<(String, Option<String>)>) {
         for it in items {
             match it {
                 syn::Item::Mod(m) => {
                     if m.ident == "cfg_if" && !matches!(m.vis, syn::Visibility::Inherited) {
-                        push(CFGIF_LOCAL);
+                        push(v, CFGIF_LOCAL);
                     }
                     if let Some((_, inner)) = &m.content {
-                        walk(inner, push);
+                        walk(inner, v);
                     }
                 }
                 syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") && m.ident.as_ref().is_some_and(|i| i == "cfg_if") => {
-                    push(CFGIF_LOCAL)
+                    push(v, CFGIF_LOCAL)
                 }
                 syn::Item::Use(u) if !matches!(u.vis, syn::Visibility::Inherited) && cfg_if_use_binds_other(&u.tree, None) => {
-                    push(CFGIF_LOCAL)
+                    push(v, CFGIF_LOCAL)
                 }
                 syn::Item::ExternCrate(e) => {
                     let bound = e.rename.as_ref().map(|r| r.1.to_string()).unwrap_or_else(|| e.ident.to_string());
                     if bound == "cfg_if" && e.ident != "cfg_if" {
-                        push(CFGIF_LOCAL);
+                        push(v, CFGIF_LOCAL);
                     }
                     if e.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
                         let n = e.ident.to_string();
                         if n == "cfg_if" {
-                            push(CFGIF_MU_CFGIF);
+                            push(v, CFGIF_MU_CFGIF);
                         } else if !matches!(n.as_str(), "std" | "core" | "alloc") {
-                            push(CFGIF_MU_OTHER);
+                            push(v, CFGIF_MU_OTHER);
                         }
                     }
                 }
@@ -639,7 +642,7 @@ fn cfg_if_facts(items: &[syn::Item], v: &mut Vec<(String, Option<String>)>) {
             }
         }
     }
-    walk(items, &mut push);
+    walk(items, v);
 }
 /// Does this `use` tree bind the NAME `cfg_if` to anything but the cfg-if crate's macro?
 fn cfg_if_use_binds_other(t: &syn::UseTree, root: Option<&str>) -> bool {
