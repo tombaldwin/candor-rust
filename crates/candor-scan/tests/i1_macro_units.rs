@@ -1234,3 +1234,65 @@ fn i1s2c_a_cross_module_impl_twin_keeps_a_hedge() {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "XMOD_OFF: {f} is main's silence again: {off:?}");
     }
 }
+
+/// UPDATE 2c-2 (Fable merge review 2c): three more ways a gated impl member's twin was missed, each executed in fixture
+/// `fxt`. (m) the impl pair sits inside PRODUCED cfg-gated modules: the module's cfg gates its members, which carry none of
+/// their own (`deny Unknown` 1 on 0.42.0 and on main, 0 on 2a: the module splice's own regression). (g) the hidden twin is
+/// a BLANKET impl `impl<T: Mk> Tr for T`, keyed under its parameter's name (1 on 0.42.0, 0 on main). (n) the trait is
+/// reached through a `use … as` rename hidden on both arms (1 on 0.42.0, 0 on main). Must NOT hold: a once-defined pair
+/// inside once-defined produced modules beside unrelated hidden text.
+#[test]
+fn i1s2c_gated_modules_blanket_impls_and_hidden_renames_keep_a_hedge() {
+    let d = tmpdir("s2c2");
+    let hdr = |s: &str| {
+        format!(
+            "#[cfg(feature = \"x\")]\nmacro_rules! hid_{s} {{ ($($t:tt)*) => {{ #[cfg(unix)] $($t)* }} }}\n\
+             #[cfg(not(feature = \"x\"))]\nmacro_rules! hid_{s} {{ ($($u:tt)*) => {{ #[cfg(unix)] $($u)* }} }}\n\
+             macro_rules! vis_{s} {{ ($($i:item)*) => {{ $( #[cfg(not(unix))] $i )* }} }}\n\
+             macro_rules! on_{s} {{ ($($i:item)*) => {{ $( #[cfg(unix)] $i )* }} }}\n"
+        )
+    };
+    let files: &[(&str, &str)] = &[
+        (
+            "m",
+            "hid_m! { pub trait TrM { fn go(&self) { EFF } } }\nvis_m! { pub trait TrM { fn go(&self); } }\npub struct SM;\n\
+             on_m! { pub mod imp { impl super::TrM for super::SM {} } }\nvis_m! { pub mod imp { impl super::TrM for super::SM { fn go(&self) {} } } }\n",
+        ),
+        (
+            "g",
+            "pub trait TrG { fn go(&self); }\npub trait MkG {}\npub struct SG;\nimpl MkG for SG {}\n\
+             hid_g! { impl<T: MkG> TrG for T { fn go(&self) { EFF } } }\nvis_g! { impl TrG for SG { fn go(&self) {} } }\n",
+        ),
+        ("n_t", "hid_n_t! { pub trait TrN { fn go(&self) { EFF } } }\nvis_n_t! { pub trait TrN { fn go(&self); } }\n"),
+        ("n_r", "hid_n_r! { pub use crate::n_t::TrN as TrNAlias; }\n"),
+        ("n_r2", "hid_n_r2! { pub use crate::n_t::TrN as TrNAlias2; }\n"),
+        ("n", "pub struct SN;\non_n! { impl crate::n_t::TrN for SN {} }\nvis_n! { impl crate::n_r::TrNAlias for SN { fn go(&self) {} } }\n"),
+        (
+            "x",
+            "pub trait TrX { fn go(&self); }\npub struct SX;\nhid_x! { pub trait TrOther { fn go(&self) {} } }\n\
+             on_x! { pub mod imp { impl super::TrX for super::SX { fn go(&self) { EFF } } } }\n\
+             vis_x! { pub mod imp { impl super::TrX for super::SX { fn go(&self) {} } } }\n",
+        ),
+    ];
+    let mut lib = String::new();
+    for (n, _) in files {
+        lib.push_str(&format!("pub mod {n};\n"));
+    }
+    lib.push_str(
+        "pub fn dm_e() { use crate::m::TrM; crate::m::SM.go() }\npub fn dg_e() { use crate::g::TrG; crate::g::SG.go() }\n\
+         pub fn dn_e() { use crate::n_t::TrN; crate::n::SN.go() }\npub fn dx_x() { use crate::x::TrX; crate::x::SX.go() }\n",
+    );
+    write_crate(&d, "s2c2", "[features]\nx = []\n", &lib);
+    for (n, body) in files {
+        write_file(&d, &format!("src/{n}.rs"), &(hdr(n) + body));
+    }
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["dm_e", "dg_e", "dn_e"] {
+        assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f} must disclose the hidden twin: {rows:?}");
+    }
+    assert_eq!(eff(&rows, "dx_x"), vec!["Fs".to_string()], "must not hold: {rows:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2C_XMOD_OFF", "1")]);
+    for f in ["dm_e", "dg_e"] {
+        assert!(!eff(&off, f).contains(&"Unknown".to_string()), "XMOD_OFF: {f} resolves to the visible arm alone: {off:?}");
+    }
+}

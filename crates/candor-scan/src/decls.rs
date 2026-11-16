@@ -274,7 +274,7 @@ pub(crate) fn scan_items(
                         info.mbe_prim_op = mbe_prim.is_some(); // R1157
                         info.mbe_op = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_OP_ATTR)); // R1180
                         // I1 stage 2c — a member of a cfg-gated impl is one arm; its twin may sit in any module of the crate.
-                        if crate::mbe::is_gated(&im.attrs) || crate::mbe::is_gated(&m.attrs) {
+                        if crate::mbe::is_gated(&im.attrs) || crate::mbe::is_gated(&m.attrs) || GatedModScope::active() {
                             let tr = im.trait_.as_ref().and_then(|(_, p, _)| p.segments.last()).map(|s| s.ident.to_string());
                             info.i1_cand = Some(format!("{}|{}|{n}", tr.unwrap_or_default(), crate::mbe::ty_key(&im.self_ty)));
                         }
@@ -369,6 +369,9 @@ pub(crate) fn scan_items(
                     }
                     // R167 -- an inline `mod` is in the SAME FILE, so it inherits this file's answer,
                     // which is exactly what `fn_locs`' own recursion does with its unchanged `file`.
+                    // I1 stage 2c — a cfg-gated module is one arm of everything in it: its impl members are gated
+                    // members (`i1_cand`) though none carries a cfg of its own (Fable merge review 2c `tmi_e`/`tmi2_e`).
+                    let _gm = GatedModScope::enter_if(crate::mbe::is_gated(&m.attrs));
                     scan_items(inner, &sub, locs, loc_idx, include_tests, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant, skip_test_fns, &mut subuses, out);
                     // SOUNDNESS R1156 — `#[macro_use] mod m { macro_rules! .. }`: the module's macros stay in
                     // textual scope after it.
@@ -8215,4 +8218,32 @@ pub(crate) fn dep_param_releases(
     out.sort();
     out.dedup();
     out
+}
+
+thread_local! {
+    static GATED_MOD_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// I1 stage 2c — open while `scan_items` walks the body of a cfg-gated inline module (see the `Item::Mod` arm).
+struct GatedModScope(bool);
+
+impl GatedModScope {
+    fn enter_if(gated: bool) -> Self {
+        if gated && !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
+            GATED_MOD_DEPTH.with(|c| c.set(c.get() + 1));
+            return GatedModScope(true);
+        }
+        GatedModScope(false)
+    }
+    fn active() -> bool {
+        GATED_MOD_DEPTH.with(|c| c.get() > 0)
+    }
+}
+
+impl Drop for GatedModScope {
+    fn drop(&mut self) {
+        if self.0 {
+            GATED_MOD_DEPTH.with(|c| c.set(c.get() - 1));
+        }
+    }
 }

@@ -902,13 +902,25 @@ impl Ctx<'_> {
                 // cover then has to stand a marked member where the hidden arm's override would be (`mark_hidden_twins`).
                 if let Some(t) = trait_key(im) {
                     let ik = format!("{owner} as {t}");
+                    // I1 stage 2c — a BLANKET impl (`impl<T: Mk> Tr for T`) is an arm for EVERY type it may cover, so it is
+                    // also keyed under the wildcard owner `*` (`* as Tr`, `* as Tr::m`), which every candidate of `Tr` asks
+                    // for (`twin_cand_keys`). Keyed under its parameter's name alone it matched nothing (Fable merge
+                    // review 2c `tg_e`/`tg2_e`, introduced on main by stage 1).
+                    let blanket = !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF")
+                        && im.generics.type_params().any(|p| p.ident == owner);
                     for ii in &im.items {
                         if let syn::ImplItem::Fn(f) = ii {
                             let mk = format!("{ik}::{}", f.sig.ident);
                             h.sigs.entry(mk.clone()).or_insert_with(|| f.sig.clone());
+                            if blanket {
+                                h.xkeys.insert(format!("* as {t}::{}", f.sig.ident));
+                            }
                             h.xkeys.insert(mk.clone());
                             h.keys.insert(mk);
                         }
+                    }
+                    if blanket {
+                        h.xkeys.insert(format!("* as {t}"));
                     }
                     h.xkeys.insert(ik.clone());
                     h.keys.insert(ik);
@@ -945,6 +957,14 @@ impl Ctx<'_> {
                     h.xkeys.extend(k.names.iter().cloned()); // `Tr`, `Tr::m`: a trait's items reach its impls crate-wide
                 }
                 if let syn::Item::Use(u) = it {
+                    // I1 stage 2c — a `use … as` the hidden text writes is a rename the crate-wide check must follow too
+                    // (Fable merge review 2c `tr2_e`: the rename was hidden on both arms, so the visible-only reading
+                    // never saw it). Exported as `=Alias=Orig`; `twin_facts` files it with the visible renames.
+                    if !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
+                        let mut rn = Vec::new();
+                        use_renames(&u.tree, &mut rn);
+                        h.xkeys.extend(rn.into_iter().map(|r| format!("={r}")));
+                    }
                     if candor_report::env::trace("CANDOR_I1_INSTR") {
                         let t = quote::ToTokens::to_token_stream(&u.tree).to_string();
                         if t.contains('{') {
@@ -1412,9 +1432,6 @@ impl Ctx<'_> {
             if !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
                 let mut ks: Vec<String> = item.xkeys.iter().chain(&member.xkeys).cloned().collect();
                 ks.extend(item.keys.iter().map(|k| format!("p:{k}")));
-                if item.opaque || member.opaque {
-                    ks.push("!opaque".to_string());
-                }
                 ks.sort();
                 ks.dedup();
                 if !ks.is_empty() {
@@ -1550,11 +1567,15 @@ fn cover_arm(it: &mut syn::Item) {
 /// impl of it for the same type, is in the hidden text. An ungated item cannot have a compiled twin in its module (a second
 /// definition is a rustc error).
 ///
-/// WHAT IT DOES NOT SEE, stated: the reader is per MODULE, so a twin in another module or inside a nested module of the hidden
-/// text is not seen (Fable merge review 2a `ra_e`/`rb_e`/`rc_e`; open on main since stage 1); the fallback arms are not shown
-/// to be supersets of what `item_keys` would have read (RC3.1; under the opt-in lift RC3-1..4 are open); a trait-item position
-/// and a member-gated hand-written impl beside trait twins (`rd_e`, `rm_e`) are silent on every build, 0.42.0 included. With
-/// the cross-file lift off (the default) the cover acts on same-file splices only. `CANDOR_I1S2_TWIN_OFF=1` drops the cover.
+/// SCOPE (stage 2c). This reader is per MODULE, which is the right unit for a path item (a fn, `use`, module or type: its cfg
+/// twin sits at the same path) and the wrong one for an impl or a trait. So each module also EXPORTS its impl-scoped keys
+/// (`Hidden::xkeys`, read through nested hidden modules, with blanket impls under `* as Tr` and the renames the hidden text
+/// writes), and pass B (`scan.rs`) checks every gated impl member, including one inside a cfg-gated module, against the
+/// crate-wide union. WHAT IT DOES NOT SEE, stated: the fallback arms are not shown to be supersets of what `item_keys` would
+/// have read (RC3.1; under the opt-in lift RC3-1..4 are open), and crate-wide matching reads `keys` only, not `loose`; an
+/// out-of-line module arm (`#[path] mod imp;`) is a module whose body the cover cannot mark (it holds today through R128 on
+/// the unresolved call, Fable merge review 2c `tpath_e`). With the cross-file lift off (the default) the cover acts on
+/// same-file splices only. `CANDOR_I1S2_TWIN_OFF=1` drops the cover.
 ///
 /// An impl block that still holds an unexpanded impl-item invocation is the same at member level: its cfg-gated methods are
 /// marked.
@@ -1919,9 +1940,10 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
             // disclosure instead of the trait's default. What the legs read: the trait leg reads `keys` (and `opaque`) only;
             // the impl leg reads the `S as Tr` key, or BOTH `Tr` and `S` among `loose` identifiers. Hidden text that reached
             // only `loose` with neither is caught here only through the member rule's bare-name leg (`covers_method`:
-            // `loose ∋ m`), which is what holds `rl_e`/`rl2_e`. The cover keys PER MODULE: a twin in another module or one
-            // nesting level down (Fable merge review 2a `ra_e`/`rb_e`/`rc_e`, introduced on main by stage 1) is not seen by
-            // this arm and is OPEN. `CANDOR_I1S2_TRAITARM_OFF=1` drops this arm.
+            // `loose ∋ m`), which is what holds `rl_e`/`rl2_e`. This arm reads THIS module's hidden text (nested hidden
+            // modules included, through `xkeys`); a twin in another module is answered at pass B from the keys every module
+            // exports (stage 2c, `scan.rs`). A hidden blanket impl reaches the impl leg through its `* as Tr` key.
+            // `CANDOR_I1S2_TRAITARM_OFF=1` drops this arm.
             let tr = trait_key(im);
             let ik = tr.as_ref().map(|t| format!("{owner} as {t}"));
             let hidden_trait =
@@ -1929,6 +1951,7 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
             let hidden_impl = |k: &str, t: &str| {
                 item.keys.contains(k)
                     || item.xkeys.contains(k)
+                    || item.xkeys.contains(&format!("* as {t}"))
                     || member.keys.contains(k)
                     || (item.loose.contains(t) && item.loose.contains(&owner))
             };
@@ -1982,21 +2005,14 @@ fn i1_refused(g: &syn::Item) -> bool {
     }
 }
 
-/// I1 stage 2c — the marker carrying one module's exported hidden keys (`Hidden::xkeys`, `p:`-prefixed path keys, `!opaque`).
+/// I1 stage 2c — the marker carrying one module's exported hidden keys (`Hidden::xkeys`, `p:`-prefixed path keys, and the
+/// renames the hidden text writes as `=Alias=Orig`).
 const XKEYS_MARK: &str = "__candor_i1_xkeys";
 
 /// I1 stage 2c — the crate-wide twin facts of one file: every module's exported hidden keys (`XKEYS_MARK`), the `use … as`
 /// renames it writes (`Alias=Orig`, last segments), and every cfg-gated trait impl block (`S as Tr|m1,m2`, the members it
 /// writes). Read into `cache::FileDecls`, unioned at the merge, consulted at pass B.
 pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<String>) {
-    fn renames(t: &syn::UseTree, out: &mut Vec<String>) {
-        match t {
-            syn::UseTree::Path(p) => renames(&p.tree, out),
-            syn::UseTree::Rename(r) => out.push(format!("{}={}", r.rename, r.ident)),
-            syn::UseTree::Group(g) => g.items.iter().for_each(|i| renames(i, out)),
-            _ => {}
-        }
-    }
     fn walk(items: &[syn::Item], x: &mut Vec<String>, r: &mut Vec<String>, g: &mut Vec<String>) {
         for it in items {
             match it {
@@ -2006,13 +2022,16 @@ pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<
                         for t in toks {
                             if let TokenTree::Literal(l) = t {
                                 if let Ok(syn::Lit::Str(s)) = syn::parse2::<syn::Lit>(TokenTree::Literal(l).into()) {
-                                    x.push(s.value());
+                                    match s.value().strip_prefix('=') {
+                                        Some(rn) => r.push(rn.to_string()),
+                                        None => x.push(s.value()),
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                syn::Item::Use(u) => renames(&u.tree, r),
+                syn::Item::Use(u) => use_renames(&u.tree, r),
                 syn::Item::Impl(im) if is_gated(&im.attrs) => {
                     if let Some(t) = trait_key(im) {
                         let ms: Vec<String> = im
@@ -2042,6 +2061,16 @@ pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<
         v.dedup();
     }
     (x, r, g)
+}
+
+/// The `Alias=Orig` pairs (last segments) a `use` tree's renames write.
+fn use_renames(t: &syn::UseTree, out: &mut Vec<String>) {
+    match t {
+        syn::UseTree::Path(p) => use_renames(&p.tree, out),
+        syn::UseTree::Rename(r) => out.push(format!("{}={}", r.rename, r.ident)),
+        syn::UseTree::Group(g) => g.items.iter().for_each(|i| use_renames(i, out)),
+        _ => {}
+    }
 }
 
 /// I1 stage 2c — the lookup keys of one gated impl member, `Tr|S|m` (`Tr` empty for an inherent impl), with the trait's
@@ -2074,6 +2103,8 @@ pub(crate) fn twin_cand_keys(cand: &str, renames: &std::collections::BTreeMap<St
     for t in &trs {
         out.push(t.clone());
         out.push(format!("{t}::{m}"));
+        out.push(format!("* as {t}")); // a hidden blanket impl of the trait
+        out.push(format!("* as {t}::{m}"));
         if !s.is_empty() {
             out.push(format!("{s} as {t}"));
             out.push(format!("{s} as {t}::{m}"));
