@@ -811,7 +811,13 @@ impl Ctx<'_> {
             h.note("opaque", &name);
             return;
         }
-        let scoped = (!candor_report::env::switch("CANDOR_I1S2D_SCOPEBODY_OFF")).then_some(&self.scope_bodies);
+        // Textual scope binds an UNQUALIFIED invocation only. A path invocation (`crate::m!`, `a::m!` through `pub(crate) use m;`,
+        // `$crate::m!` arriving as `crate::m`) is resolved by path in rustc, so it falls through to the file-wide and crate-wide
+        // bodies as before (Fable merge review 2d D-1: `qb_e`/`qc_e`/`qd_e` read the textual same-name body and dropped the one
+        // the path named).
+        let scoped = (mac.path.segments.len() == 1 && mac.path.leading_colon.is_none()
+            && !candor_report::env::switch("CANDOR_I1S2D_SCOPEBODY_OFF"))
+        .then_some(&self.scope_bodies);
         let table = BodyTable { scoped, bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
         // The toolchain's own item macros define no name of the crate's but what they DECLARE: `thread_local! { static X .. }`
         // binds `X`; `compile_error!`, `global_asm!` and the rest bind nothing. A local definition shadowing the name is read below.

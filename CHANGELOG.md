@@ -12,22 +12,25 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 ## Unreleased
 
 - ⚠ **A hidden blanket impl over a reference, pointer, tuple, slice or array of its parameter, and a visible gated impl
-  whose self type is a `type` alias, now keep the hidden-twin hedge; a same-named macro in a sibling module no longer
-  does** (SOUNDNESS R1541, I1 stage 2d). Two positions I1 stage 1 (`97c23112`, unreleased) introduced on main, each `deny
+  whose self type is a `type` alias, now keep the hidden-twin hedge; for an unqualified invocation, a same-named macro in a
+  sibling module no longer does** (SOUNDNESS R1541, I1 stage 2d). Two positions I1 stage 1 (`97c23112`, unreleased) introduced on main, each `deny
   Unknown` 1 on 0.42.0 and 0 on main, executed: `hid! { impl<T: Mk> Tr for &T { fn go() { write } } }` beside `vis! {
   impl Tr for &S { fn go() {} } }` keyed its self type as the text `& T`, which no candidate asked for; it is now a blanket
   over that SHAPE (`& as Tr`, likewise `&mut`, `*const`, `*mut`, tuples, `[T]`, `[T; N]`), asked for by every candidate
   whose self type has the shape. And `impl Tr for Alias` (`type Alias = S;`) beside a hidden `impl Tr for S`: `type`
   aliases, visible or hidden, are now followed like renames, both ways, for the self type as for the trait (the reverse
   orientation and an alias chain were introduced by stage 1 too). Also closed, silent on 0.42.0 too: the tuple and slice
-  blankets, and an alias declared in another module. And one over-hold removed (direction: a reason, not an effect): a
-  hidden invocation's macro bodies are now read from TEXTUAL scope, so tokio's `impl_traits!` in `#[cfg(unix)] mod sys` is no longer read as the body of the
+  blankets, and an alias declared in another module. Closed here, and introduced on this branch by stage 2c (the
+  entry below): a `type` alias declared inside a hidden module (`hid! { pub mod inner { pub type A = S; } }`) beside a visible
+  gated `impl Tr for inner::A` (`deny Unknown` 1 on 0.42.0 and main, 0 with 2c alone). And one over-hold removed
+  (direction: a reason, not an effect): an UNQUALIFIED hidden invocation's macro bodies are now read from TEXTUAL scope (a
+  path invocation, `crate::m!` or `a::m!`, is bound by path and still reads every body of the name), so tokio's `impl_traits!` in `#[cfg(unix)] mod sys` is no longer read as the body of the
   windows arm's refused `impl_traits!` in a sibling module; 9 tokio rows (`ChildStd{in,out,err}::{as_fd, as_raw_fd,
   into_owned_fd}`) lose the `macro:another cfg arm …` reason and keep `Unknown` from their callees. Cost: on 181 crates
   the check marks 113 units (palette 26, rand 36, syn 31, futures-util 8, mio 6, tokio 6) and 1 more row newly carries
   `Unknown` (palette `hues::into_iter`: a hidden `&`-shape impl over a type parameter is read as a blanket over every
   `&` self type, so it matches every gated `&`-shape impl of the same trait — the shape key's over-hold); 0 removed, 0 concrete or disclosure lost. Kill switches `CANDOR_I1S2D_REFBLANKET_OFF`,
-  `CANDOR_I1S2D_ALIAS_OFF`, `CANDOR_I1S2D_SCOPEBODY_OFF`. Cache rev 208.
+  `CANDOR_I1S2D_ALIAS_OFF`, `CANDOR_I1S2D_SCOPEBODY_OFF`. Cache rev 209.
 
 - ⚠ **A cfg-gated impl member whose twin is unexpanded macro text in ANOTHER module, or inside a module the hidden text
   declares, now carries `macro:another cfg arm of this fn is hidden by an unexpanded macro`** (SOUNDNESS R1541, I1 stage

@@ -1299,7 +1299,7 @@ fn i1s2c_gated_modules_blanket_impls_and_hidden_renames_keep_a_hedge() {
 
 /// I1 stage 2d (Fable re-check 2c-2 RC4-1/RC4-2/RC4.3, fixtures `fxu`/`fxw`/`fxv`, executed). (r) a hidden blanket over a
 /// NON-PATH self type (`impl<T: Mk> Tr for &T`) was keyed `& T`, which no candidate asked for (`deny Unknown` 1 on 0.42.0,
-/// 0 on main); now it is a blanket (`* as Tr`), as are `&mut T`, tuples and slices of `T`. (a) a visible gated impl whose
+/// 0 on main); now it is a blanket over that SHAPE (`& as Tr`), as are `&mut T`, tuples and slices of `T`. (a) a visible gated impl whose
 /// self type is a `type` alias of the type the hidden impl names (1 on 0.42.0, 0 on main), and the reverse orientation.
 /// (o) the OVER-HOLD removed: a same-named `macro_rules!` in a SIBLING cfg module was read as the hidden invocation's body,
 /// so a member that invocation never defines was marked; hidden bodies now come from textual scope. Must NOT hold: a hidden
@@ -1377,4 +1377,40 @@ fn i1s2d_ref_blankets_aliases_and_scoped_bodies() {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "switches off: {f} is main's silence again: {off:?}");
     }
     assert!(eff(&off, "eo_x").contains(&"Unknown".to_string()), "SCOPEBODY_OFF: the sibling body is bound again: {off:?}");
+}
+
+/// UPDATE 2d-2 (Fable merge review 2d D-1, fixture `fxx`, executed): textual scope binds an UNQUALIFIED invocation only. A
+/// hidden PATH invocation (`crate::q::defs::m!` through `pub(crate) use m;`, a `#[macro_export]` macro invoked as
+/// `crate::m!`) beside a textual same-name `macro_rules!` at the root read the textual body and dropped the one the path
+/// names (`deny Unknown` 1 on 2c, 0 on 2d). Must NOT hold: the unqualified invocation beside a sibling's same-named body.
+#[test]
+fn i1s2d_a_path_invocation_is_not_bound_by_textual_scope() {
+    let d = tmpdir("s2d2");
+    write_crate(
+        &d,
+        "s2d2",
+        "",
+        "pub mod b;\npub mod c;\n\
+         pub fn pb_e() { use crate::b::TrB; crate::b::SB.go() }\npub fn pc_e() { use crate::c::TrC; crate::c::SC.go() }\n",
+    );
+    write_file(
+        &d,
+        "src/b.rs",
+        "pub trait TrB { fn go(&self); }\npub struct SB;\nmacro_rules! mb { ($t:ty) => { impl $t { pub fn noop_b(&self) {} } } }\n\
+         pub mod defs {\n    macro_rules! mb { ($t:ty) => { impl crate::b::TrB for $t { fn go(&self) { EFF } } } }\n    pub(crate) use mb;\n}\n\
+         #[cfg(unix)]\nmod u { crate::b::defs::mb!(crate::b::SB); }\n\
+         #[cfg(windows)]\nmod w { impl crate::b::TrB for crate::b::SB { fn go(&self) {} } }\n",
+    );
+    write_file(
+        &d,
+        "src/c.rs",
+        "pub trait TrC { fn go(&self); }\npub struct SC;\nmacro_rules! mc { ($t:ty) => { impl $t { pub fn noop_c(&self) {} } } }\n\
+         pub mod defs {\n    #[macro_export]\n    macro_rules! mc { ($t:ty) => { impl crate::c::TrC for $t { fn go(&self) { EFF } } } }\n}\n\
+         #[cfg(unix)]\nmod u { crate::mc!(crate::c::SC); }\n\
+         #[cfg(windows)]\nmod w { impl crate::c::TrC for crate::c::SC { fn go(&self) {} } }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["pb_e", "pc_e"] {
+        assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f}: the path-named body must be read: {rows:?}");
+    }
 }
