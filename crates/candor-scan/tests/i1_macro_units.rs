@@ -1104,3 +1104,67 @@ fn i1s2_a_hidden_trait_arm_keeps_a_hedge() {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TRAITARM_OFF: {f} resolves to the visible arm alone: {off:?}");
     }
 }
+
+/// UPDATE 4a-3 (Fable merge review 2a `rp_e`/`rp2_e`/`rp3_e`): the twin is wrapped by ANOTHER crate's macro in the same
+/// module. Its input parses as items and was read, but filed under `loose` only, where no qualified lookup (`Tr`, `S as Tr`,
+/// `S::m`) finds it, so the produced gated arm resolved alone: `deny Unknown` 1 on 0.42.0 and 0 on main for the trait and
+/// trait-impl twins (stage 1), 0 everywhere for the inherent one. The items passed are now also read on the keys path.
+/// Must NOT hold: a once-defined gated pair beside a foreign wrapper whose items name something else.
+#[test]
+fn i1s2_a_twin_wrapped_by_another_crates_macro_keeps_a_hedge() {
+    let root = tmpdir("s2fw");
+    let dep = root.join("fwdep");
+    write_crate(&dep, "fwdep", "", "#[macro_export]\nmacro_rules! passthru { ($($i:item)*) => { $($i)* } }\n");
+    let d = root.join("app");
+    let hdr = |s: &str| {
+        format!(
+            "macro_rules! vis_{s} {{ ($($i:item)*) => {{ $( #[cfg(not(unix))] $i )* }} }}\n\
+             macro_rules! on_{s} {{ ($($i:item)*) => {{ $( #[cfg(unix)] $i )* }} }}\n"
+        )
+    };
+    write_crate(
+        &d,
+        "s2fw",
+        "[dependencies]\nfwdep = { path = \"../fwdep\" }\n",
+        "pub mod p;\npub mod p2;\npub mod p3;\npub mod px;\n\
+         pub fn fw_e() { use crate::p::TrP; crate::p::SP.go() }\n\
+         pub fn fw2_e() { use crate::p2::TrP2; crate::p2::SP2.go() }\n\
+         pub fn fw3_e() { crate::p3::SP3.go() }\n\
+         pub fn fwx_x() { use crate::px::TrPX; crate::px::SPX.go() }\n",
+    );
+    write_file(
+        &d,
+        "src/p.rs",
+        &(hdr("p")
+            + "fwdep::passthru! { #[cfg(unix)] pub trait TrP { fn go(&self) { EFF } } }\nvis_p! { pub trait TrP { fn go(&self); } }\n\
+               pub struct SP;\non_p! { impl TrP for SP {} }\nvis_p! { impl TrP for SP { fn go(&self) {} } }\n"),
+    );
+    write_file(
+        &d,
+        "src/p2.rs",
+        &(hdr("p2")
+            + "pub trait TrP2 { fn go(&self); }\npub struct SP2;\n\
+               fwdep::passthru! { #[cfg(unix)] impl TrP2 for SP2 { fn go(&self) { EFF } } }\nvis_p2! { impl TrP2 for SP2 { fn go(&self) {} } }\n"),
+    );
+    write_file(
+        &d,
+        "src/p3.rs",
+        &(hdr("p3")
+            + "pub struct SP3;\nfwdep::passthru! { #[cfg(unix)] impl SP3 { pub fn go(&self) { EFF } } }\n\
+               vis_p3! { impl SP3 { pub fn go(&self) {} } }\n"),
+    );
+    write_file(
+        &d,
+        "src/px.rs",
+        &(hdr("px")
+            + "pub trait TrPX { fn go(&self); }\npub struct SPX;\npub struct OPX;\n\
+               fwdep::passthru! { pub trait TrOther { fn go(&self) {} } impl TrOther for OPX {} }\n\
+               on_px! { impl TrPX for SPX { fn go(&self) { EFF } } }\nvis_px! { impl TrPX for SPX { fn go(&self) {} } }\n"),
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["fw_e", "fw2_e", "fw3_e"] {
+        assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the foreign-wrapped arm: {rows:?}");
+    }
+    assert_eq!(eff(&rows, "fwx_x"), vec!["Fs".to_string()], "must not hold: {rows:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}

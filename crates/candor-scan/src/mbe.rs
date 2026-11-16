@@ -812,9 +812,18 @@ impl Ctx<'_> {
                 // Another crate's macro: its expansion is not here. Where what it is passed parses as items (pin_project's
                 // struct, `loom::thread_local! { static X .. }`), the names those items declare, plus every identifier of
                 // their attributes (`#[project = ProjName]` names a type the macro defines); otherwise every identifier passed.
+                //
+                // The items passed are ALSO read exactly as a local expansion's items are (`read_hidden_item`), so their
+                // QUALIFIED keys land where the cover looks them up: `Tr` and `Tr::m` for a trait, `S as Tr` (+ `::m`, with
+                // the signature) for a trait impl, `S::m` for a member, and a nested invocation read in turn. Filed under
+                // `loose` alone they were invisible to every qualified lookup (`hidden_trait`, the `S as Tr` key,
+                // `covers_method`'s `S::m`): a same-module `fxpdep::passthru! { #[cfg(unix)] trait Tr { fn go { write } } }`
+                // beside a produced gated `impl Tr for S { fn go {} }` read silent (Fable merge review 2a, `rp_e`/`rp2_e`).
+                // This only ADDS keys: the `loose` reading below stays, so the arm reads a superset of what it read before.
                 match syn::parse2::<syn::File>(mac.tokens.clone()) {
                     Ok(f) if !f.items.is_empty() => {
                         for it in &f.items {
+                            self.read_hidden_item(it, out, h, depth + 1);
                             let k = item_keys(it, out);
                             h.loose.extend(k.names);
                             h.opaque |= k.opaque;
@@ -1474,24 +1483,33 @@ fn cover_arm(it: &mut syn::Item) {
 
 /// SOUNDNESS R1541 / I1 stage 2 — A CFG ARM THE SPLICE PRODUCED, BESIDE TEXT IT DID NOT EXPAND.
 ///
-/// THE EXPOSURE. Stage 2 lifts the cross-file cfg refusal and splices `use`s, so `cfg_not_unix! { .. }`'s stub arm is spliced.
-/// If its twin stays UNEXPANDED (its wrapper is defined twice, the budget ran out, no arm matches, the name is imported, it is
-/// another crate's macro…), the name RESOLVES to the stub and reads pure over a program that writes. Before stage 2 both
-/// invocations were refused, the name resolved to nothing and R128 disclosed `macro:`; the correct lift removed that cover.
+/// THE EXPOSURE. Each widening of the splice puts one more kind of cfg arm in the program: stage 1 macro-made trait impls and
+/// declarations, stage 2a modules and `use`s (and, opt-in, `CANDOR_I1S2_XCFG_ON`, another file's cfg-stamping macro). If the
+/// arm's twin stays UNEXPANDED (its wrapper is defined twice, the budget ran out, no arm matches, the name is imported, it is
+/// another crate's macro…), the name RESOLVES to the produced arm and reads pure over a program that writes. Before the splice
+/// reached that kind, the name resolved to nothing and R128 disclosed `macro:`; the widening removed that cover.
 ///
-/// THE MODEL: keyed on PROVENANCE, not on names. Three rounds keyed the cover on the names the hidden text defines (`fn x`,
-/// then `use` leaves and `mod x`), and each round a reviewer found a spelling the enumeration missed: a glob arm (which binds
-/// every name of its target, so no name can be read off it, in either orientation) and an identifier passed to a nested
-/// macro (`cfg_unix! { mk_w!(leaf) }` writes no `fn` token at all). Hidden text cannot be enumerated — that is what makes it
-/// hidden. So the cover keys on what the pre-stage-2 build keyed its disclosure on: THIS MODULE STILL HOLDS UNEXPANDED ITEM
-/// TEXT. In such a module every cfg-gated item the splice PRODUCED is one arm of a configuration whose other arms may be in
-/// that text, and it discloses instead of resolving alone (`cover_arm`). An item the splice did not produce (hand-written) is
-/// read as before; an ungated one cannot have a compiled twin (a second definition in one module is a rustc error).
+/// THE MODEL (stage 2a): keyed on the NAMES the module's hidden text may define, read by ONE reader. Each unexpanded
+/// invocation left in a module is expanded with every body its macro has and parsed by `syn` (`Ctx::read_hidden`), and its
+/// items are keyed by `item_keys`, the function that keys the visible arm; where expansion cannot finish the text falls to a
+/// fallback (`loose`, below). A cfg-gated item on the visible side is marked (`cover_arm`, `mark_fn_as`) when its key is one the
+/// hidden text may define: a PRODUCED fn, `use` or module; ANY gated method (its `Owner::m` or its owner type, where the visible
+/// arm declares that type as a produced cfg arm); a produced trait's default bodies; and a gated TRAIT impl whose trait, or an
+/// impl of it for the same type, is in the hidden text. An ungated item cannot have a compiled twin in its module (a second
+/// definition is a rustc error).
+///
+/// WHAT IT DOES NOT SEE, stated: the reader is per MODULE, so a twin in another module or inside a nested module of the hidden
+/// text is not seen (Fable merge review 2a `ra_e`/`rb_e`/`rc_e`; open on main since stage 1); the fallback arms are not shown
+/// to be supersets of what `item_keys` would have read (RC3.1; under the opt-in lift RC3-1..4 are open); a trait-item position
+/// and a member-gated hand-written impl beside trait twins (`rd_e`, `rm_e`) are silent on every build, 0.42.0 included. With
+/// the cross-file lift off (the default) the cover acts on same-file splices only. `CANDOR_I1S2_TWIN_OFF=1` drops the cover.
 ///
 /// An impl block that still holds an unexpanded impl-item invocation is the same at member level: its cfg-gated methods are
-/// marked. `CANDOR_I1S2_TWIN_OFF=1` drops the cover.
-/// What one module's hidden text may define (`Ctx::read_hidden`): `keys` read by `syn` from its expansions (`item_keys`),
-/// `loose` from a stated over-approximation (every identifier, where expansion could not finish), or `opaque`.
+/// marked.
+/// What one module's hidden text may define (`Ctx::read_hidden`): `keys` read by `syn` from its expansions (`item_keys`), and
+/// from the items another crate's macro is passed; `loose`, the fallback where expansion could not finish — the identifiers
+/// the invocation passes plus the names its bodies DECLARE (not every identifier of the bodies), or for another crate's macro
+/// the names its items declare and the identifiers of their attributes; or `opaque`.
 #[derive(Default)]
 struct Hidden {
     opaque: bool,
@@ -1814,8 +1832,12 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
             // it to the pure default, once stage 1 spliced macro-made trait impls. So: a member of this arm is marked where
             // the hidden text may define the trait (`Tr`, `Tr::m`), or an impl of `Tr` for `S`; and a member the hidden impl
             // writes that this arm lacks is STOOD HERE, marked, with the hidden member's signature, so the call lands on a
-            // disclosure instead of the trait's default. The trait name is matched loosely too (`loose` is every identifier of
-            // text that could not be expanded), which over-marks rather than misses. `CANDOR_I1S2_TRAITARM_OFF=1` drops this arm.
+            // disclosure instead of the trait's default. What the legs read: the trait leg reads `keys` (and `opaque`) only;
+            // the impl leg reads the `S as Tr` key, or BOTH `Tr` and `S` among `loose` identifiers. Hidden text that reached
+            // only `loose` with neither is caught here only through the member rule's bare-name leg (`covers_method`:
+            // `loose ∋ m`), which is what holds `rl_e`/`rl2_e`. The cover keys PER MODULE: a twin in another module or one
+            // nesting level down (Fable merge review 2a `ra_e`/`rb_e`/`rc_e`, introduced on main by stage 1) is not seen by
+            // this arm and is OPEN. `CANDOR_I1S2_TRAITARM_OFF=1` drops this arm.
             let tr = trait_key(im);
             let ik = tr.as_ref().map(|t| format!("{owner} as {t}"));
             let hidden_trait = |t: &str| item.keys.contains(t) || member.keys.contains(t) || item.opaque;
