@@ -819,8 +819,11 @@ impl Ctx<'_> {
             && !candor_report::env::switch("CANDOR_I1S2D_SCOPEBODY_OFF"))
         .then_some(&self.scope_bodies);
         let table = BodyTable { scoped, bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
-        // The toolchain's own item macros define no name of the crate's but what they DECLARE: `thread_local! { static X .. }`
-        // binds `X`; `compile_error!`, `global_asm!` and the rest bind nothing. A local definition shadowing the name is read below.
+        // FALLBACK ARM "toolchain". SUPERSET ARGUMENT: of `TOOLCHAIN_BANG_MACROS`, the only ones that emit ITEMS are
+        // `thread_local!` (a `static` per declaration it is passed) and `include!` (opaque above); `global_asm!`/`asm!` emit no
+        // named item, and the rest are expression or diagnostic macros. So the names an item-position invocation of one can
+        // bind are the names its input declares after an item keyword, which is what `declared_names` reads. A local definition
+        // shadowing the name is read below.
         let root_tc = mac.path.segments.len() == 1
             || matches!(mac.path.segments.first().map(|s| s.ident.to_string()).as_deref(), Some("std" | "core" | "alloc"));
         if root_tc && TOOLCHAIN_BANG_MACROS.contains(&name.as_str()) && table.get(&name).is_none() {
@@ -858,6 +861,15 @@ impl Ctx<'_> {
                         h.note("foreign", &name);
                     }
                 }
+                // FALLBACK ARMS "foreign-items" / "foreign". SUPERSET ARGUMENT: none of what is read above is one. Another
+                // crate's macro (a `macro_rules!` this scan has no body for, or a proc macro) can emit any item under any name,
+                // including a name written nowhere in what it is passed (Fable RC3-1 was a nested invocation in its input; a
+                // dependency's `mk!(S)` minting `impl S { fn go }` names `go` only in ITS body). The only superset is "anything":
+                // the reading stays (it feeds the qualified keys) and the text is OPAQUE. `CANDOR_I1S2B_FOREIGN_LOOSE=1` restores
+                // the narrower reading, for measurement.
+                if !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
+                    h.opaque = true;
+                }
                 return;
             }
             Some(None) => {
@@ -868,12 +880,13 @@ impl Ctx<'_> {
             Some(Some(bs)) => bs,
         };
         if depth >= HIDDEN_DEPTH || h.steps >= HIDDEN_STEP_BUDGET {
-            all_idents(&mac.tokens, &mut h.loose);
-            bodies.iter().for_each(|b| declared_names(b, &mut h.loose));
+            // FALLBACK ARM "limit". SUPERSET ARGUMENT: see `loose_closure` (every identifier rustc's expansion could emit).
+            self.loose_closure(&name, &mac.tokens, &table, h);
             h.note("limit", &name);
             return;
         }
         let mut any = false;
+        let mut unparsed = false;
         for b in &bodies {
             h.steps += 1;
             let Some(ts) = parse_arms(b).and_then(|arms| expand(&arms, &mac.tokens)) else { continue };
@@ -884,6 +897,8 @@ impl Ctx<'_> {
                         for it in &f.items {
                             self.read_hidden_item(it, out, h, depth + 1);
                         }
+                    } else {
+                        unparsed = true; // an arm expanded to text `syn` cannot read as items (Fable RC3.1 nit)
                     }
                 }
                 Some(owner) => {
@@ -901,14 +916,73 @@ impl Ctx<'_> {
                         for ii in &iis {
                             self.read_hidden_member(owner, ii, out, h, depth + 1);
                         }
+                    } else {
+                        unparsed = true;
                     }
                 }
             }
         }
-        if !any {
-            all_idents(&mac.tokens, &mut h.loose);
-            bodies.iter().for_each(|b| declared_names(b, &mut h.loose));
+        if !any || unparsed {
+            // FALLBACK ARM "noexpand" (no arm matched, or an arm's expansion did not parse). SUPERSET ARGUMENT: see
+            // `loose_closure`. Before, it read the invocation's identifiers and the names its bodies DECLARE, which missed a
+            // name written as a nested invocation's argument or a `use` leaf (Fable RC3-3 `noexpnest2_e`, RC3-4 `noexpuse_e`).
+            self.loose_closure(&name, &mac.tokens, &table, h);
             h.note("noexpand", &name);
+        }
+    }
+
+    /// I1 stage 2b — the `loose` reading of text whose expansion this pass could not finish (the "noexpand" and "limit" arms).
+    /// SUPERSET ARGUMENT: a `macro_rules!` expansion emits only tokens of its invocation and of the transcriber that matched,
+    /// and a nested invocation's tokens come from ITS invocation and transcriber in turn. So every identifier rustc's expansion
+    /// can contain is an identifier of this invocation, of any body of this macro, or of any body of a local macro named
+    /// (`name!`) anywhere in that set, transitively; that union is read here. Where the set names a macro with no body this
+    /// scan holds (another crate's, or an unreadable local one) or a token-pasting macro, the expansion can contain any name,
+    /// so the text is opaque. Toolchain macros other than `include!`/`concat_idents!` emit no new identifiers.
+    fn loose_closure(&self, name: &str, tokens: &TokenStream, table: &BodyTable<'_>, h: &mut Hidden) {
+        fn invoked(ts: &TokenStream, out: &mut Vec<String>) {
+            let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
+            for (i, tt) in toks.iter().enumerate() {
+                match tt {
+                    TokenTree::Group(g) => invoked(&g.stream(), out),
+                    TokenTree::Ident(id) => {
+                        if matches!(toks.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!') {
+                            let n = id.to_string();
+                            if n != "macro_rules" {
+                                out.push(n);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        all_idents(tokens, &mut h.loose);
+        let mut todo: Vec<String> = vec![name.to_string()];
+        invoked(tokens, &mut todo);
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(n) = todo.pop() {
+            if !seen.insert(n.clone()) || seen.len() > 4096 {
+                continue;
+            }
+            if n == "concat_idents" || n == "paste" || n == "include" {
+                h.opaque = true;
+                continue;
+            }
+            match table.get(&n) {
+                Some(Some(bs)) => {
+                    for b in &bs {
+                        all_idents(b, &mut h.loose);
+                        invoked(b, &mut todo);
+                    }
+                }
+                Some(None) => h.opaque = true,
+                None if TOOLCHAIN_BANG_MACROS.contains(&n.as_str()) => {}
+                None => {
+                    if !candor_report::env::switch("CANDOR_I1S2B_FOREIGN_LOOSE") {
+                        h.opaque = true; // another crate's macro inside the closure: it can emit any name
+                    }
+                }
+            }
         }
     }
 
@@ -1465,7 +1539,9 @@ impl Ctx<'_> {
                     _ => {}
                 }
             }
-            mark_hidden_twins(&mut out, &spliced, &item, &member);
+            // I1 stage 2b — does this module still hold unexpanded ITEM text at all (whatever its reading came to)?
+            let has_hidden = out.iter().any(|it| matches!(it, syn::Item::Macro(m) if is_hidden_text(m, &self.partial)));
+            mark_hidden_twins(&mut out, &spliced, &item, &member, has_hidden);
             // I1 stage 2c — export this module's impl-scoped hidden keys (and, for the measured `all` scope, its path keys)
             // for the crate-wide check at pass B (`cache::twin_facts`).
             if !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
@@ -1576,6 +1652,24 @@ fn cover_arm(it: &mut syn::Item) {
                 eprintln!("I1S2MARKUSE\t{}", quote::ToTokens::to_token_stream(&u.tree)); // §E1 REACH COUNTER, ADDED branch only
             }
             *it = use_as_hidden_text(u);
+        }
+        // I1 stage 2b — a `type` alias arm is put back as unexpanded text, as a `use` arm is: a call through it then resolves
+        // to nothing and R128 discloses the module (Fable RC3-7 `aliasty_e`: the alias resolved to a pure ungated impl).
+        syn::Item::Type(t) => {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("I1S2MARKTYPE\t{}", t.ident); // §E1 REACH COUNTER
+            }
+            *it = syn::Item::Macro(syn::ItemMacro {
+                attrs: Vec::new(),
+                ident: None,
+                mac: syn::Macro {
+                    path: syn::parse_quote!(__candor_i1_hidden_twin_use),
+                    bang_token: Default::default(),
+                    delimiter: syn::MacroDelimiter::Brace(Default::default()),
+                    tokens: quote::ToTokens::to_token_stream(&*t),
+                },
+                semi_token: None,
+            });
         }
         syn::Item::Mod(m) => {
             if candor_report::env::trace("CANDOR_I1_INSTR") {
@@ -1940,7 +2034,14 @@ fn cover_trait_marker(it: &mut syn::Item, h: &Hidden) {
 /// - ANY cfg-gated method (hand-written impl included — the impl-item splice keeps no provenance) whose `Owner::m` key, or
 ///   whose owner type, the hidden text may define.
 /// - a produced trait whose default bodies the hidden text may define (`cover_trait_marker`).
-fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, member: &Hidden) {
+fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, member: &Hidden, has_hidden: bool) {
+    // I1 stage 2b — THE TRIVIAL SUPERSET. Superset argument: a cfg twin of a PRODUCED gated item is either another produced
+    // item (both arms expanded; this module then reads the union and nothing is hidden), an item written by hand (not this
+    // pass's to cover; R1828), or text this pass did not expand. If ANY unexpanded item text remains in the module, the
+    // twin may be in it, and no reading of that text can be shown to bind fewer names than rustc's expansion would; so every
+    // produced gated item of the module carries the refusal, with no name matching at all. Where no unexpanded text remains,
+    // the module has no hidden twin to cover. MEASURED, NOT THE DEFAULT (STAGE2B-REPORT): `CANDOR_I1S2B_TRIVIAL=1` turns it on.
+    let trivial = has_hidden && candor_report::env::switch("CANDOR_I1S2B_TRIVIAL");
     // the types a produced, cfg-gated declaration of this list names: a hidden type of that name is its twin
     let type_twins: std::collections::HashSet<String> = out
         .iter()
@@ -1974,8 +2075,10 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
         .map(|(i, it)| {
             spliced.get(i).copied().unwrap_or(false)
                 && is_gated(crate::lang::item_attrs(it))
-                && matches!(it, syn::Item::Fn(_) | syn::Item::Use(_) | syn::Item::Mod(_))
-                && visible_twin(it, out)
+                && ((trivial
+                    && matches!(it, syn::Item::Fn(_) | syn::Item::Use(_) | syn::Item::Mod(_) | syn::Item::Impl(_) | syn::Item::Type(_)))
+                    || (matches!(it, syn::Item::Fn(_) | syn::Item::Use(_) | syn::Item::Mod(_) | syn::Item::Type(_))
+                        && visible_twin(it, out)))
         })
         .collect();
     let marked_mods: std::collections::HashSet<String> = out
@@ -1990,13 +2093,22 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
         if flags[i] {
             let keep_use = matches!(&*it, syn::Item::Use(u) if use_into(&u.tree, &marked_mods, true));
             if !keep_use {
+                if candor_report::env::trace("CANDOR_I1_INSTR") && trivial {
+                    eprintln!("I1S2BTRIVIAL\t{}", item_keys(it, &[]).names.first().cloned().unwrap_or_default()); // §E1 REACH COUNTER
+                }
                 cover_arm(it);
             }
             continue;
         }
         // a trait-body marker exists only for a trait an expansion declared (`mbe_trait_body_marker`): produced by construction
-        if mbe_trait_body_of(it).is_some() && !item.is_empty() {
-            cover_trait_marker(it, item);
+        if mbe_trait_body_of(it).is_some() && (!item.is_empty() || trivial) {
+            if trivial {
+                let mut all = Hidden::default();
+                all.opaque = true; // the trivial superset: every default body of a produced trait beside unexpanded text
+                cover_trait_marker(it, &all);
+            } else {
+                cover_trait_marker(it, item);
+            }
             continue;
         }
         // I1 stage 2c — a gated DEFAULT body beside the trait's own unexpanded trait-item text that may define it (`rd_e`).
@@ -2059,7 +2171,13 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
                 if let syn::ImplItem::Fn(f) = ii {
                     let n = f.sig.ident.to_string();
                     have.insert(n.clone());
-                    if (block || is_gated(&f.attrs)) && (both(&owner, &n) || trait_twin) {
+                    // I1 stage 2b — a PRODUCED gated impl block is an arm of its type's configuration even where the type
+                    // itself is written by hand: a hidden definition of the type's NAME (a glob `std::fs::*`, a hidden
+                    // `struct File`) may bring the other arm's methods (Fable RC3-6 `handty_e`).
+                    let produced_block = block && spliced.get(i).copied().unwrap_or(false);
+                    if (block || is_gated(&f.attrs))
+                        && (both(&owner, &n) || trait_twin || (produced_block && item.covers_method(&owner, &n, true)))
+                    {
                         mark_fn_as(&mut f.attrs, &format!("{owner}::{n}"), "I1S2MARKMETH");
                     }
                 }

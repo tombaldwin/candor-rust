@@ -1166,7 +1166,11 @@ fn i1s2_a_twin_wrapped_by_another_crates_macro_keeps_a_hedge() {
     for f in ["fw_e", "fw2_e", "fw3_e"] {
         assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the foreign-wrapped arm: {rows:?}");
     }
-    assert_eq!(eff(&rows, "fwx_x"), vec!["Fs".to_string()], "must not hold: {rows:?}");
+    // Stage 2b: another crate's macro is OPAQUE (it can emit any name), so the once-defined pair beside it keeps its `Fs` and now
+    // also carries the hedge, the stated cost of that superset. The narrower reading (`CANDOR_I1S2B_FOREIGN_LOOSE=1`) holds it.
+    assert!(eff(&rows, "fwx_x").contains(&"Fs".to_string()), "the pair is still charged: {rows:?}");
+    let (loose, _) = scan(&d, None, &[("CANDOR_I1S2B_FOREIGN_LOOSE", "1")]);
+    assert_eq!(eff(&loose, "fwx_x"), vec!["Fs".to_string()], "must not hold under the narrower reading: {loose:?}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1413,4 +1417,69 @@ fn i1s2d_a_path_invocation_is_not_bound_by_textual_scope() {
     for f in ["pb_e", "pc_e"] {
         assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f}: the path-named body must be read: {rows:?}");
     }
+}
+
+/// I1 stage 2b — every fallback arm of the hidden reader reads a SUPERSET of what the text can bind, each pinned by a probe whose
+/// name appears ONLY in the part of the text the arm used to skip (fixture `fxb`, executed: each probe wrote; `deny Unknown` 0
+/// on 0.42.0 and main for all four). "noexpand" (the matcher cannot take `'de`): the name is only in a NESTED macro's body.
+/// "limit" (deeper than the reader's depth): only in the base case's nested macro body. "foreign" / "foreign-items": only in
+/// another crate's macro body. Must NOT hold: an unrelated name in the nested body beside a once-defined pair.
+#[test]
+fn i1s2b_every_fallback_arm_reads_a_superset() {
+    let root = tmpdir("s2b");
+    let dep = root.join("bdep");
+    write_crate(
+        &dep,
+        "bdep",
+        "",
+        "#[macro_export]\nmacro_rules! mint { () => { #[cfg(unix)] pub fn leaf_f() { EFF } } }\n\
+         #[macro_export]\nmacro_rules! wrap_items { ($($i:item)*) => { $($i)* #[cfg(unix)] pub fn leaf_i() { EFF } } }\n",
+    );
+    let d = root.join("app");
+    let vis = |s: &str| format!("macro_rules! vis_{s} {{ ($($i:item)*) => {{ $( #[cfg(not(unix))] $i )* }} }}\n");
+    let a = vec!["a"; 140].join(" ");
+    write_crate(
+        &d,
+        "s2b",
+        "[dependencies]\nbdep = { path = \"../bdep\" }\n",
+        "#![recursion_limit = \"512\"]\npub mod n;\npub mod nx;\npub mod l;\npub mod f;\npub mod i;\n\
+         pub fn bn_e() { crate::n::leaf_n() }\npub fn bnx_x() { crate::nx::leaf_nx() }\npub fn bl_e() { crate::l::leaf_l() }\n\
+         pub fn bf_e() { crate::f::leaf_f() }\npub fn bi_e() { crate::i::leaf_i() }\n",
+    );
+    write_file(
+        &d,
+        "src/n.rs",
+        &(vis("n")
+            + "macro_rules! inner_n { () => { #[cfg(unix)] pub fn leaf_n() { EFF } } }\n\
+               macro_rules! outer_n { (go<$l:tt>) => { inner_n!{} } }\nouter_n!{ go<'de> }\nvis_n! { pub fn leaf_n() {} }\n"),
+    );
+    write_file(
+        &d,
+        "src/nx.rs",
+        &(vis("nx")
+            + "macro_rules! inner_nx { () => { #[cfg(unix)] pub fn other_nx() {} } }\n\
+               macro_rules! outer_nx { (go<$l:tt>) => { inner_nx!{} } }\nouter_nx!{ go<'de> }\n\
+               macro_rules! on_nx { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+               on_nx! { pub fn leaf_nx() { EFF } }\nvis_nx! { pub fn leaf_nx() {} }\n"),
+    );
+    write_file(
+        &d,
+        "src/l.rs",
+        &(vis("l")
+            + "macro_rules! base_l { () => { #[cfg(unix)] pub fn leaf_l() { EFF } } }\n\
+               macro_rules! rec_l { ($h:ident $($t:ident)*) => { rec_l!{ $($t)* } }; () => { base_l!{} } }\n"
+            + &format!("rec_l!{{ {a} }}\nvis_l! {{ pub fn leaf_l() {{}} }}\n")),
+    );
+    write_file(&d, "src/f.rs", &(vis("f") + "bdep::mint!();\nvis_f! { pub fn leaf_f() {} }\n"));
+    write_file(&d, "src/i.rs", &(vis("i") + "bdep::wrap_items! { pub fn passed_i() {} }\nvis_i! { pub fn leaf_i() {} }\n"));
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["bn_e", "bl_e", "bf_e", "bi_e"] {
+        assert!(eff(&rows, f).contains(&"Unknown".to_string()), "{f}: the arm must read the skipped text: {rows:?}");
+    }
+    assert_eq!(eff(&rows, "bnx_x"), vec!["Fs".to_string()], "must not hold: {rows:?}");
+    let (loose, _) = scan(&d, None, &[("CANDOR_I1S2B_FOREIGN_LOOSE", "1")]);
+    for f in ["bf_e", "bi_e"] {
+        assert!(!eff(&loose, f).contains(&"Unknown".to_string()), "FOREIGN_LOOSE: {f} is the narrower reading's silence: {loose:?}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
