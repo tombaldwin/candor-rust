@@ -11,6 +11,35 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **With `--deps`, an unclassified PATH call through a dependency type now walks that type as its method spelling does**
+  (SOUNDNESS R1814; a silent under-report, pre-existing on 0.42.0). `dep::d::Lone::tally_zz(x, p)`, where `tally_zz` is the
+  provided body of a trait `Lone` implements and writes a file, asked only `Lone::tally_zz` — a key no producer unit carries,
+  since a default is keyed under the trait — and, the crate being covered, read the miss as purity: the caller was ABSENT,
+  `deny Fs` and `deny Fs Unknown` both 0 over an executed write, while `r.tally_zz(p)` read `[Env, Fs]`. The same held for an
+  imported or renamed type, `<T>::m`, a turbofish, an associated fn with no receiver, a supertrait's default and a local type
+  alias. A path call (`T::m(..)`, with a type-shaped `T` and a member that is not a variant) now gets the method walk (the
+  type's trait defaults through its supertypes) and its in-scope-trait disclosure; an open `Deref` chain is not read for it,
+  because a path call never autoderefs. This is a resolution: it adds the provided body's effects. Precision cost, named, the
+  walk's own (SPEC §2 ⟨0.40⟩'s accepted fabrication): a type whose INHERENT pure member shadows an effectful default is charged
+  the default, as its method spelling always was; and a pure trait default reached by a path call beside an in-scope trait
+  publishing the member now reads `Unknown`, as the method spelling did. `CANDOR_R1814_OFF=1` restores the old answers.
+- ⚠ **With `--deps`, a classified call whose walk reaches a node the manifest does not key, or keys by kind only, now carries
+  `Unknown`** (SOUNDNESS R1816; a silent under-report, pre-existing on 0.42.0). A renamed re-export (`pub use crate::k::Kit as
+  CKit`) publishes no `types` key, so `r.fetch_all(p)` on a `CKit` whose `fetch_all` is a trait's provided body that writes a
+  file read the curated `[Db]` alone: `deny Fs Unknown` 0 over an executed write. The same held for a type whose crate holds an
+  expansion the producer cannot see (a kind-only key). The R1807 rule kept the walk's miss hedge off for classified calls; it
+  now fires where the walk was STRUCTURAL (SPEC §2 ⟨0.40⟩: every structural miss adds `Unknown`), with the reason
+  `dispatch:<Type>.<member>`, and stays off where every node was keyed and closed. This is a hedge, not a resolution: the
+  re-export's target is not on the wire. `CANDOR_R1816_OFF=1` restores the old answers.
+  Executed fixtures: 13 path spellings silent on 0.42.0 and main now read the provided body's effects (`deny Fs` 0 -> 1); 7
+  renamed-re-export and 4 kind-only classified cells silent on both now carry `Unknown` (`deny Fs Unknown` 0 -> 1); pure twins
+  unchanged; with both switches off the reports are byte-identical to main. Both changes add only: 0 rows removed and 0
+  effects, `invisible` or `dispatchesOn` elements lost on every corpus. Real consumers chained over their real lock (32
+  crates, 34,120 analysed units): 0 rows gain a concrete effect; 8 rows (0.023%; 5 newly reported) newly carry `Unknown`, each
+  a path call whose type's key is kind-only beside an in-scope trait publishing the member (`BigEndian::read_i32` with
+  `ByteOrder` in scope, `ChaCha12Rng::from_seed` with `SeedableRng`); one union row's representative `dispatch:` reason
+  changed (its reason classes did not). Generated chained consumers (73 libraries, 13,647 analysed): 37 rows (0.27%) newly
+  carry `Unknown`, all classified typed calls on kind-only keys (`fastrand::Rng`, `portable_pty::CommandBuilder`); 0 concrete. Cache rev 210.
 - ⚠ **A hidden blanket impl over a reference, pointer, tuple, slice or array of its parameter, and a visible gated impl
   whose self type is a `type` alias, now keep the hidden-twin hedge; for an unqualified invocation, a same-named macro in a
   sibling module no longer does** (SOUNDNESS R1541, I1 stage 2d). Two positions I1 stage 1 (`97c23112`, unreleased) introduced on main, each `deny
