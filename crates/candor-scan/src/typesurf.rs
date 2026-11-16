@@ -1283,6 +1283,21 @@ pub(crate) fn join_through<'a>(
     member: &str,
     forced_protocol: bool,
 ) -> (Vec<&'a crate::deps::DepFn>, Walk) {
+    join_through_exact(idx, start, member, forced_protocol, None)
+}
+
+/// [`join_through`], where the key `<no_tail>` (a `<type>::<member>` entry key) is asked EXACTLY: its 2-segment tail is
+/// not a fallback for it. SOUNDNESS R1807 — a classified call whose written type `T` is a published type, and whose tail
+/// `Leaf::m` belongs only to OTHER published types' rows (`r1807_classified_key` refused it), must still reach what `T`
+/// itself inherits — a trait's provided body through `T`'s supertypes, or `T`'s `Deref` target — which are exact-key hits
+/// on OTHER nodes. Only the start node's tail fallback is withheld, since that is the sibling's row.
+pub(crate) fn join_through_exact<'a>(
+    idx: &'a crate::deps::DepIndex,
+    start: &str,
+    member: &str,
+    forced_protocol: bool,
+    no_tail: Option<&str>,
+) -> (Vec<&'a crate::deps::DepFn>, Walk) {
     // THE WALK, then — where it reaches nothing — Rust's `Deref` edge (SPEC §2 ⟨0.40⟩'s permission, row 2):
     // the member is looked up on the target, recursively. A node whose manifest cannot say whether it has a
     // `Deref` (no key, kind-only) ends the chain OPEN, which the source-typed caller discloses (row 3).
@@ -1293,7 +1308,13 @@ pub(crate) fn join_through<'a>(
     loop {
         let kind = if forced_protocol && first { Some(KIND_PROTOCOL) } else { idx.surface.kind(&t) };
         let exact = matches!(kind, Some("value" | "final"));
-        let step = walk(&idx.surface, &t, member, exact, &|k, own| present(idx, k, own));
+        let step = walk(&idx.surface, &t, member, exact, &|k, own| {
+            if no_tail == Some(k) {
+                row(idx, k, own).is_some().then(|| k.to_string())
+            } else {
+                present(idx, k, own)
+            }
+        });
         w.structural |= step.structural;
         w.hits.extend(step.hits);
         if !w.hits.is_empty() || !chain.insert(t.clone()) || chain.len() > 16 {

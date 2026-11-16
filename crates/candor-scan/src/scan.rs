@@ -5004,11 +5004,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     let mut rows: Vec<&crate::deps::DepFn> = Vec::new();
                     if let Some(de) = key.as_ref().and_then(|k| deps_idx.by_key.get(k)) {
                         rows.push(de);
-                    } else if c.method && c.typed && (key.is_some() || !arm_classified) {
+                    } else if c.method && c.typed {
                         if let Some((tpath, member)) = rel.rsplit_once("::") {
                             let start = deps_idx.surface.type_key(acr_real, tpath)
                                 .unwrap_or_else(|| format!("{acr_real}#{tpath}"));
-                            rows = crate::typesurf::join_through(deps_idx, &start, member, false).0;
+                            // a refused (sibling) tail: the walk still runs, asking its start node exactly (see the typed join)
+                            let no_tail = (arm_classified && key.is_none()).then(|| format!("{start}::{member}"));
+                            rows = crate::typesurf::join_through_exact(deps_idx, &start, member, false, no_tail.as_deref()).0;
                         }
                     }
                     if !rows.is_empty() && candor_report::env::trace("CANDOR_V053_INSTR") {
@@ -7321,16 +7323,35 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // A closed, `Deref`-free key with no in-scope trait keeps the purity reading (PART 95
                 // `c8_closed_pure`). Supertype paths that end structurally are NOT a hedge here: a method
                 // a supertrait provides is callable only with that trait in scope, which is row 1.
-                // SOUNDNESS R1807 — for a CLASSIFIED call (now joining, above) the walk runs where its key was formed and
-                // missed, and adds what it reaches; it does not run where `r1807_classified_key` refused the tail as a sibling
-                // type's (the walk's own `present` would re-ask that tail and charge `a::Raw`'s `Fs` to `b::Raw::fetch_all`,
-                // fx/m2 `r07_cb_annot`), and its in-scope-trait MISS hedge stays off: the classifier answered, and a miss there
-                // adds nothing beyond its charge.
-                if hit.is_none() && c.method && c.typed && dep_default_path.is_none() && (!r1807_union || key.is_some()) {
+                // SOUNDNESS R1807 — for a CLASSIFIED call (now joining, above) the walk runs where its key missed, and adds
+                // what it reaches. Where `r1807_classified_key` refused the tail as another published type's, the walk still
+                // runs — the written type's own supertypes (a trait's PROVIDED body) and `Deref` target are exact-key hits on
+                // other nodes — but the START node is asked exactly (`join_through_exact`): its tail is the sibling's row,
+                // which would charge `a::Raw`'s `Fs` to `b::Raw::fetch_all` (fx/m2 `r07_cb_annot`). Refusing the walk too left
+                // `c::Raw`, whose `fetch_all` is `Fetch`'s default, and `dr::Raw: Deref<Target = a::Raw>` reading only the
+                // curated `Db` over an executed write (Fable's merge review, fx/m3 `r3_t_*`, `r3_deref_*`). A formed call
+                // with no row is not walked here: the `<untyped>` route it came from already walked its declared type. The
+                // in-scope-trait MISS hedge stays off for a classified call: the classifier answered, and a miss there adds
+                // nothing beyond its charge.
+                //
+                // …and for a classified PATH call through a published TYPE (`c::Raw::fetch_all(r, p)`, UFCS): Rust resolves
+                // `T::m` exactly as it resolves `r.m()` (an inherent, then a trait in scope, through `T`'s impls), so the same
+                // walk answers it. Confined to a classified call whose owner the producer publishes as a type, so a module
+                // path never walks; the unclassified path call is unchanged.
+                let r1807_refused = r1807_union && key.is_none() && r1807_formed_key.is_none();
+                let r1807_path_walk = r1807_union && !c.method && !c.is_macro && r1807_formed_key.is_none()
+                    && rel.rsplit_once("::").is_some_and(|(tp, _)| {
+                        tp.split("::").last().is_some_and(crate::lang::is_type_ident)
+                            && deps_idx.surface.type_key(cr_real, tp).is_some()
+                    });
+                if hit.is_none() && ((c.method && c.typed) || r1807_path_walk) && dep_default_path.is_none()
+                    && (!r1807_union || key.is_some() || r1807_refused)
+                {
                     if let Some((tpath, member)) = rel.rsplit_once("::") {
                         let ts = &deps_idx.surface;
                         let start = ts.type_key(cr_real, tpath).unwrap_or_else(|| format!("{cr_real}#{tpath}"));
-                        let (rows, w) = crate::typesurf::join_through(deps_idx, &start, member, false);
+                        let no_tail = r1807_refused.then(|| format!("{start}::{member}"));
+                        let (rows, w) = crate::typesurf::join_through_exact(deps_idx, &start, member, false, no_tail.as_deref());
                         let in_scope = if w.hits.is_empty() && w.deref_open {
                             Some("<deref chain open>".to_string())
                         } else if w.hits.is_empty() {

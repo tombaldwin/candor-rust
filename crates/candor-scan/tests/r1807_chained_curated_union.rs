@@ -46,7 +46,7 @@ fn pkg(root: &Path, name: &str, deps: &[&str], src: &str) -> PathBuf {
     d
 }
 
-const SWITCHES: [&str; 7] = [
+const SWITCHES: [&str; 8] = [
     "CANDOR_DEPS",
     "CANDOR_CONFIG",
     "CANDOR_POLICY",
@@ -54,6 +54,7 @@ const SWITCHES: [&str; 7] = [
     "CANDOR_R1807_OFF",
     "CANDOR_R1807_INSTR",
     "CANDOR_R1807_SEED_HEDGE",
+    "CANDOR_R1807_SEED_C3",
 ];
 
 fn scan_cmd(dir: &Path, deps: Option<&Path>, env: &[(&str, &str)]) -> Command {
@@ -108,6 +109,7 @@ fn world(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
         "sqlx_core",
         &[],
         "pub trait Sink { fn put(&self, p: &str); }\n\
+         pub trait Fetch: Sized { fn fetch_all(self, p: &str) { let v = std::env::var(\"R1807_MARK\").unwrap_or_default(); std::fs::write(format!(\"{p}.trait\"), v).unwrap(); } }\n\
          pub trait Sink2 { fn put2(&self, p: &str); }\n\
          pub mod raw_sql {\n\
           use crate::{Sink, Sink2};\n\
@@ -122,8 +124,14 @@ fn world(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
           impl RawV { pub fn fetch_all(self, k: &dyn Sink2, p: &str) { k.put2(p) } }\n\
           pub struct RawB(pub String);\n\
           impl RawB { pub fn new(s: &str) -> RawB { RawB(s.to_string()) } pub fn step(self) -> RawC { RawC(self.0) } pub fn fetch_all(self, p: &str) -> usize { self.0.len() + p.len() } }\n\
+          pub struct RawS;\n\
+          pub static RAWS: RawS = RawS;\n\
+          impl RawS { pub fn fetch_all(&self, p: &str) { std::fs::write(p, \"s\").unwrap(); } }\n\
          }\n\
-         pub mod a { pub struct Raw(pub String); pub fn raw_a(s: &str) -> Raw { Raw(s.to_string()) } impl Raw { pub fn fetch_all(self, p: &str) { std::fs::write(p, self.0).unwrap(); } } }\n\
+         pub mod a { pub struct Raw(pub String); pub fn raw_a(s: &str) -> Raw { Raw(s.to_string()) } impl Raw { pub fn fetch_all(&self, p: &str) { std::fs::write(p, &self.0).unwrap(); } } }\n\
+         pub mod c { pub struct Raw(pub String); pub fn make(s: &str) -> Raw { Raw(s.to_string()) } impl crate::Fetch for Raw {} }\n\
+         pub mod dr { pub struct Raw(pub crate::a::Raw); pub fn make(s: &str) -> Raw { Raw(crate::a::Raw(s.to_string())) }\n\
+          impl std::ops::Deref for Raw { type Target = crate::a::Raw; fn deref(&self) -> &crate::a::Raw { &self.0 } } }\n\
          pub mod b { pub struct Raw(pub String); pub fn raw_b(s: &str) -> Raw { Raw(s.to_string()) } impl Raw { pub fn fetch_all(self, p: &str) -> usize { self.0.len() + p.len() } } }\n",
     );
     let reps = root.join("reps");
@@ -148,7 +156,15 @@ fn world(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
          pub fn u_inline_zq(p: &str) { raw_u(\"q\").fetch_all(&WSink, p) }\n\
          pub fn v_param_zq(r: RawV, k: &dyn Sink2, p: &str) { r.fetch_all(k, p) }\n\
          pub fn v_inline_zq(k: &dyn Sink2, p: &str) { raw_v(\"q\").fetch_all(k, p) }\n\
-         pub fn ca_ufcs_zq(p: &str) { sqlx_core::a::Raw::fetch_all(sqlx_core::a::raw_a(\"q\"), p) }\n\
+         pub fn ca_ufcs_zq(p: &str) { sqlx_core::a::Raw::fetch_all(&sqlx_core::a::raw_a(\"q\"), p) }\n\
+         pub fn t_annot_zq(p: &str) { use sqlx_core::Fetch; let r: sqlx_core::c::Raw = sqlx_core::c::make(\"q\"); r.fetch_all(p) }\n\
+         pub fn t_ufcs_zq(p: &str) { use sqlx_core::Fetch; sqlx_core::c::Raw::fetch_all(sqlx_core::c::make(\"q\"), p) }\n\
+         pub fn t_param_zq(r: sqlx_core::c::Raw, p: &str) { use sqlx_core::Fetch; r.fetch_all(p) }\n\
+         pub fn deref_annot_zq(p: &str) { let r: sqlx_core::dr::Raw = sqlx_core::dr::make(\"q\"); r.fetch_all(p) }\n\
+         pub fn deref_param_zq(r: sqlx_core::dr::Raw, p: &str) { r.fetch_all(p) }\n\
+         pub fn s_value_zq(p: &str) { sqlx_core::raw_sql::RawS.fetch_all(p) }\n\
+         pub fn s_static_zq(p: &str) { sqlx_core::raw_sql::RAWS.fetch_all(p) }\n\
+         pub mod g { use sqlx_core::raw_sql::*; pub fn s_glob_zq(p: &str) { RawS.fetch_all(p) } }\n\
          pub fn cb_ufcs_zq(p: &str) -> usize { sqlx_core::b::Raw::fetch_all(sqlx_core::b::raw_b(\"q\"), p) }\n\
          pub fn cb_annot_zq(p: &str) -> usize { let r: sqlx_core::b::Raw = sqlx_core::b::raw_b(\"q\"); r.fetch_all(p) }\n\
          pub fn b_chain_zq(p: &str) { RawB::new(\"q\").step().fetch_all(p) }\n\
@@ -258,5 +274,55 @@ fn a_stale_chained_report_unions_its_downgrade_and_no_concrete_effect() {
         let (inf, why) = on.get(f).cloned().unwrap_or_default();
         assert_eq!(inf, set(&["Db", "Unknown"]), "{f}: the curated Db stays, the stale row adds only its downgrade");
         assert!(why.iter().any(|w| w == "dep-stale:sqlx_core"), "{f}: {why:?}");
+    }
+}
+
+#[test]
+fn a_refused_sibling_tail_still_walks_the_written_types_own_trait_default_and_deref() {
+    // Fable's merge review (fx/m3): `c::Raw` gets `fetch_all` from `Fetch`'s PROVIDED body ([Env, Fs]) and `dr::Raw` from its
+    // `Deref` target `a::Raw` ([Fs]); `a::Raw`/`b::Raw` make the tail `Raw::fetch_all` another type's, so the key refuses it.
+    // The refusal must withhold only the sibling's tail, never the walk; and `a::Raw`'s inherent row is never charged to
+    // `c::Raw` (it would add nothing new for `dr::Raw`, whose Fs IS `a::Raw`'s).
+    let (_root, app, reps) = world("refused");
+    let on = rows(&app, Some(&reps), &[]);
+    let off = rows(&app, Some(&reps), &[("CANDOR_R1807_OFF", "1")]);
+    let get = |m: &std::collections::HashMap<String, (Vec<String>, Vec<String>)>, f: &str| m.get(f).cloned().unwrap_or_default().0;
+    for f in ["t_annot_zq", "t_ufcs_zq", "t_param_zq"] {
+        assert_eq!(get(&on, f), set(&["Db", "Env", "Fs"]), "{f}: the curated Db and Fetch's provided body");
+        assert_eq!(get(&off, f), set(&["Db"]), "{f}: off is the curated-wins answer");
+    }
+    for f in ["deref_annot_zq", "deref_param_zq"] {
+        assert_eq!(get(&on, f), set(&["Db", "Fs"]), "{f}: the curated Db and the Deref target's Fs");
+        assert_eq!(get(&off, f), set(&["Db"]), "{f}: off");
+    }
+    for f in ["cb_ufcs_zq", "cb_annot_zq", "b_direct_zq"] {
+        assert_eq!(get(&on, f), set(&["Db"]), "{f}: still no sibling's Fs");
+    }
+    for f in ["t_annot_zq", "t_ufcs_zq", "t_param_zq", "deref_annot_zq", "deref_param_zq"] {
+        assert_eq!(deny(&app, "Fs", f, Some(&reps)), 1, "{f}: deny Fs fires over the executed write");
+    }
+}
+
+#[test]
+fn the_value_path_the_static_and_the_glob_carry_the_union() {
+    let (_root, app, reps) = world("c4");
+    let on = rows(&app, Some(&reps), &[]);
+    let off = rows(&app, Some(&reps), &[("CANDOR_R1807_OFF", "1")]);
+    let get = |m: &std::collections::HashMap<String, (Vec<String>, Vec<String>)>, f: &str| m.get(f).cloned().unwrap_or_default().0;
+    assert_eq!(get(&on, "s_value_zq"), set(&["Db", "Fs"]), "value path");
+    assert_eq!(get(&on, "s_glob_zq"), set(&["Db", "Fs"]), "glob");
+    assert_eq!(get(&on, "s_static_zq"), set(&["Db", "Fs", "Unknown"]), "static: the holds join, its disclosure, and the curated Db");
+    assert_eq!(get(&off, "s_value_zq"), set(&["Db"]), "value path, off");
+    assert_eq!(get(&off, "s_glob_zq"), set(&["Db"]), "glob, off");
+    assert_eq!(get(&off, "s_static_zq"), set(&["Fs", "Unknown"]), "static, off: the row wins");
+}
+
+#[test]
+fn a_seeded_curated_wins_rule_is_visible_to_the_content_assertion() {
+    // seed 1: "curated wins" on the untyped route too. The untyped spellings lose the row's Fs, which the union keeps.
+    let (_root, app, reps) = world("seed1");
+    let seeded = rows(&app, Some(&reps), &[("CANDOR_R1807_SEED_C3", "1")]);
+    for f in ["c_untyped_zq", "c_inline_zq"] {
+        assert_eq!(seeded.get(f).cloned().unwrap_or_default().0, set(&["Db"]), "seed 1: {f} loses the row's Fs");
     }
 }
