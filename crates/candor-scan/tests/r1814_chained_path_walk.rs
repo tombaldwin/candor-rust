@@ -42,7 +42,9 @@ fn pkg(root: &Path, name: &str, deps: &[&str], src: &str) -> PathBuf {
     d
 }
 
-const SWITCHES: [&str; 6] = ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1807_OFF", "CANDOR_R1814_OFF", "CANDOR_R1816_OFF"];
+const SWITCHES: [&str; 7] = [
+    "CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1807_OFF", "CANDOR_R1814_OFF", "CANDOR_R1816_OFF", "CANDOR_R1818_OFF",
+];
 
 fn scan_cmd(dir: &Path, deps: Option<&Path>, env: &[(&str, &str)]) -> Command {
     let mut cmd = Command::new(bin());
@@ -108,6 +110,8 @@ fn world(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
          pub mod re2 { pub use crate::k::Kit as CKit; pub fn mk(s: &str) -> CKit { crate::k::Kit(s.to_string()) } }\n\
          pub mod q { pub struct Calm(pub String); pub fn calm(s: &str) -> Calm { Calm(s.to_string()) } impl Calm { pub fn still_zz(&self, p: &str) -> usize { p.len() } } }\n\
          pub mod re4 { pub use crate::q::Calm as RCalm; }\n\
+         pub mod w { pub struct Wrong(pub String); impl Wrong { pub fn still_zz(&self, p: &str) -> usize { p.len() } } }\n\
+         pub mod re6 { pub use crate::k::Kit as Wrong; pub fn mk(s: &str) -> Wrong { crate::k::Kit(s.to_string()) } }\n\
          pub mod sh { pub struct Shade(pub String); pub fn shade(s: &str) -> Shade { Shade(s.to_string()) }\n\
           impl Shade { pub fn tally_zz(self, p: &str) -> usize { p.len() } } impl crate::Tally for Shade {} }\n",
     );
@@ -134,6 +138,8 @@ fn world(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
          pub fn r_ufcs_zq(p: &str) { sqlx_core::re2::CKit::fetch_all(sqlx_core::re2::mk(\"q\"), p) }\n\
          pub fn r_kit_zq(p: &str) { let r: sqlx_core::k::Kit = sqlx_core::k::kit(\"q\"); r.fetch_all(p) }\n\
          pub fn rz_ufcs_zq(p: &str) { sqlx_core::re2::CKit::tally_zz(sqlx_core::re2::mk(\"q\"), p) }\n\
+         pub fn w_cls_zq(p: &str) { sqlx_core::re6::Wrong::fetch_all(sqlx_core::re6::mk(\"q\"), p) }\n\
+         pub fn w_annot_zq(p: &str) { let r: sqlx_core::re6::Wrong = sqlx_core::re6::mk(\"q\"); r.fetch_all(p) }\n\
          pub fn rp_ufcs_zq(p: &str) -> usize { sqlx_core::re4::RCalm::still_zz(&sqlx_core::q::calm(\"q\"), p) }\n",
     );
     write(
@@ -198,8 +204,9 @@ fn a_classified_call_through_a_renamed_re_export_discloses() {
     assert_eq!(i, set(&["Unknown"]), "rz: disclosed");
     assert!(why.iter().any(|w| w == "dispatch:CKit.tally_zz"), "rz: {why:?}");
     assert_eq!(inf(&rows(&app, Some(&reps), &[("CANDOR_R1814_OFF", "1")]), "rz_ufcs_zq"), None, "rz, R1814 off: absent");
-    // pure renamed twin: no trait in scope carries `still_zz`, so the structural miss keeps the purity reading
-    assert_eq!(inf(&on, "rp_ufcs_zq"), None, "renamed pure twin stays absent");
+    // the renamed PURE twin: its start node is unkeyed, so the manifest cannot say what `RCalm` has — the structural miss
+    // discloses on the path spelling as it does on the method spelling (an over-disclosure over a pure body, never a charge)
+    assert_eq!(inf(&on, "rp_ufcs_zq"), Some(set(&["Unknown"])), "renamed pure twin: disclosed, not charged");
 }
 
 #[test]
@@ -211,7 +218,93 @@ fn the_gates_flip_over_the_executed_writes() {
     for f in ["r_annot_zq", "r_ufcs_zq", "rz_ufcs_zq"] {
         assert_eq!(deny(&app, "Fs Unknown", f, Some(&reps)), 1, "{f}: deny Fs Unknown fires");
     }
-    for f in ["p_still_zq", "rp_ufcs_zq"] {
-        assert_eq!(deny(&app, "Fs Unknown", f, Some(&reps)), 0, "{f}: pure twin stays green");
+    assert_eq!(deny(&app, "Fs Unknown", "p_still_zq", Some(&reps)), 0, "pure twin on a closed type stays green");
+    assert_eq!(deny(&app, "Fs", "rp_ufcs_zq", Some(&reps)), 0, "renamed pure twin: nothing concrete is fabricated");
+}
+
+/// Fable's R1814 merge review, fx/f2 `gl` and fx/f1 `wrong`: a dependency whose every type is KIND-ONLY (a macro-defined macro
+/// writes its impls), called from a CHILD module that sees the traits only through `use super::*` from the crate root — the
+/// in-scope-trait reading is per file, so it never sees them there — and a same-leaf rename (`pub use crate::k::Kit as Wrong`
+/// beside a pure `w::Wrong`) whose `type_key` leaf fallback lands on the wrong, closed node (SOUNDNESS R1818).
+fn world_gl(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = tmpdir(tag);
+    let dep = pkg(
+        &root,
+        "sqlx_core",
+        &[],
+        "pub trait Fetch: Sized { fn fetch_all(self, p: &str) { let v = std::env::var(\"R1814_MARK\").unwrap_or_default(); std::fs::write(format!(\"{p}.fetch\"), v).unwrap(); } }\n\
+         pub trait Tally: Sized { fn tally_zz(self, p: &str) { let v = std::env::var(\"R1814_MARK\").unwrap_or_default(); std::fs::write(format!(\"{p}.tally\"), v).unwrap(); } }\n\
+         pub trait Quiet: Sized { fn hush_zz(self, p: &str) -> usize { p.len() } }\n\
+         macro_rules! outer { ($n:ident) => { macro_rules! $n { ($t:ty) => { impl crate::Fetch for $t {} impl crate::Tally for $t {} impl crate::Quiet for $t {} impl $t { pub fn inh_zz(&self, p: &str) { std::fs::write(format!(\"{p}.inh\"), \"i\").unwrap(); } } }; } }; }\n\
+         outer!(gen_impls);\n\
+         pub mod km { pub struct Kmac(pub String); pub fn kmac(s: &str) -> Kmac { Kmac(s.to_string()) } gen_impls!(Kmac); }\n\
+         pub mod k { pub struct Kit(pub String); impl crate::Fetch for Kit {} impl crate::Tally for Kit {} impl crate::Quiet for Kit {} }\n\
+         pub mod re2 { pub use crate::k::Kit as CKit; pub fn mk(s: &str) -> CKit { crate::k::Kit(s.to_string()) } }\n\
+         pub mod d { pub struct Lone(pub String); pub fn lone(s: &str) -> Lone { Lone(s.to_string()) } impl crate::Tally for Lone {} impl crate::Fetch for Lone {} }\n",
+    );
+    let reps = root.join("reps");
+    std::fs::create_dir_all(&reps).unwrap();
+    let o = scan_cmd(&dep, None, &[]).arg("--out").arg(reps.join("sqlx_core")).output().unwrap();
+    assert!(o.status.code().is_some_and(|c| (0..=2).contains(&c)), "{}", String::from_utf8_lossy(&o.stderr));
+    let app = pkg(
+        &root,
+        "app",
+        &["sqlx_core"],
+        "#![allow(unused_imports)]\nuse sqlx_core::{Tally, Fetch, Quiet};\npub mod gl;\n",
+    );
+    write(
+        &app.join("src/gl.rs"),
+        "#![allow(unused_imports)]\nuse super::*;\n\
+         pub fn gl_ufcs_zq(p: &str) { sqlx_core::re2::CKit::tally_zz(sqlx_core::re2::mk(\"q\"), p) }\n\
+         pub fn gl_tannot_zq(p: &str) { let r: sqlx_core::re2::CKit = sqlx_core::re2::mk(\"q\"); r.tally_zz(p) }\n\
+         pub fn gl_cls_zq(p: &str) { sqlx_core::re2::CKit::fetch_all(sqlx_core::re2::mk(\"q\"), p) }\n\
+         pub fn gl_annot_zq(p: &str) { let r: sqlx_core::re2::CKit = sqlx_core::re2::mk(\"q\"); r.fetch_all(p) }\n\
+         pub fn gl_lone_zq(p: &str) { sqlx_core::d::Lone::tally_zz(sqlx_core::d::lone(\"q\"), p) }\n\
+         pub fn gl_kmac_ufcs_zq(p: &str) { sqlx_core::km::Kmac::tally_zz(sqlx_core::km::kmac(\"q\"), p) }\n\
+         pub fn gl_kmac_cls_zq(p: &str) { sqlx_core::km::Kmac::fetch_all(sqlx_core::km::kmac(\"q\"), p) }\n\
+         pub fn gl_kmac_annot_zq(p: &str) { let r: sqlx_core::km::Kmac = sqlx_core::km::kmac(\"q\"); r.fetch_all(p) }\n\
+         pub fn gl_inh_zq(p: &str) { sqlx_core::km::Kmac::inh_zz(&sqlx_core::km::kmac(\"q\"), p) }\n",
+    );
+    write(
+        &app.join("Cargo.lock"),
+        "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"sqlx_core\"]\n\n[[package]]\nname = \"sqlx_core\"\nversion = \"0.1.0\"\n",
+    );
+    (root, app, reps)
+}
+
+#[test]
+fn the_path_and_method_spellings_of_one_call_on_one_structural_node_disclose_alike() {
+    let (_root, app, reps) = world_gl("gl");
+    let on = rows(&app, Some(&reps), &[]);
+    // the METHOD spelling on the unkeyed node was always disclosed; the PATH spelling now is too (it was ABSENT on 0.42.0
+    // and main, and on the first R1814 cut, whose path carve-out dropped the structural-start hedge)
+    // `gl_inh_zq`: an INHERENT member the unexpanded macro writes; no producer unit carries it (so no chained unit "publishes"
+    // `inh_zz`), which is why the disclosure cannot be narrowed to members some chained unit names
+    for f in ["gl_ufcs_zq", "gl_tannot_zq", "gl_lone_zq", "gl_kmac_ufcs_zq", "gl_inh_zq"] {
+        let (i, _) = on.get(f).cloned().unwrap_or_default();
+        assert!(i.contains(&"Unknown".to_string()), "{f}: the structural start discloses: {i:?}");
+    }
+    for f in ["gl_cls_zq", "gl_annot_zq", "gl_kmac_cls_zq", "gl_kmac_annot_zq"] {
+        assert_eq!(inf(&on, f), Some(set(&["Db", "Unknown"])), "{f}: classified, structural start: the curated Db and the hedge");
+    }
+    let off = rows(&app, Some(&reps), &[("CANDOR_R1814_OFF", "1"), ("CANDOR_R1816_OFF", "1")]);
+    assert_eq!(inf(&off, "gl_ufcs_zq"), None, "calibration: both off, the path spelling is the old silence");
+    assert_eq!(inf(&off, "gl_cls_zq"), Some(set(&["Db"])), "calibration: both off, the curated Db alone");
+    for f in ["gl_ufcs_zq", "gl_cls_zq", "gl_kmac_cls_zq"] {
+        assert_eq!(deny(&app, "Fs Unknown", f, Some(&reps)), 1, "{f}: deny Fs Unknown fires over the executed write");
+    }
+}
+
+#[test]
+fn a_rename_onto_another_types_leaf_is_a_guessed_node_and_discloses() {
+    let (_root, app, reps) = world("wrong");
+    let on = rows(&app, Some(&reps), &[]);
+    let off = rows(&app, Some(&reps), &[("CANDOR_R1818_OFF", "1")]);
+    for f in ["w_cls_zq", "w_annot_zq"] {
+        let (i, why) = on.get(f).cloned().unwrap_or_default();
+        assert_eq!(i, set(&["Db", "Unknown"]), "{f}: the leaf fallback's node is a guess; its closed miss discloses");
+        assert!(why.iter().any(|w| w == "dispatch:Wrong.fetch_all"), "{f}: {why:?}");
+        assert_eq!(inf(&off, f), Some(set(&["Db"])), "{f}: R1818 off is the old silence");
+        assert_eq!(deny(&app, "Fs Unknown", f, Some(&reps)), 1, "{f}: deny Fs Unknown fires");
     }
 }

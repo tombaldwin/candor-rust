@@ -7404,12 +7404,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 // path, imported type, renamed import, `<T>::m`, a turbofish, an associated fn with no receiver, a supertrait's
                 // default), while the method spelling `r.tally_zz(p)` walked and read `[Env, Fs]` (EXECUTED rustagent-r1814
                 // fx/z1 `u_*`). A path call runs the same lookup a method call does minus autoref and autoderef (an inherent
-                // associated item, else a trait IN SCOPE that `T` implements), so it gets the same walk and the same in-scope
-                // disclosure. The owner segment must be a type-shaped ident and the member must not be (an enum variant or an
+                // associated item, else a trait IN SCOPE that `T` implements), so it gets the same walk and the same
+                // disclosures, the structural-start one included (see `deref_open` below). The owner segment must be a type-shaped ident and the member must not be (an enum variant or an
                 // associated const is not a body); an owner the manifest does not key (a renamed re-export, R1816) walks from an
                 // unkeyed node, which is a structural miss. `CANDOR_R1814_OFF=1`.
                 let r1814_off = candor_report::env::switch("CANDOR_R1814_OFF");
                 let r1816_off = candor_report::env::switch("CANDOR_R1816_OFF");
+                let r1818_off = candor_report::env::switch("CANDOR_R1818_OFF");
                 let path_owner = (!c.method && !c.is_macro && r1807_formed_key.is_none())
                     .then(|| rel.rsplit_once("::"))
                     .flatten()
@@ -7432,11 +7433,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         let start = ts.type_key(cr_real, tpath).unwrap_or_else(|| format!("{cr_real}#{tpath}"));
                         let no_tail = r1807_refused.then(|| format!("{start}::{member}"));
                         let (rows, w) = crate::typesurf::join_through_exact(deps_idx, &start, member, false, no_tail.as_deref());
-                        // A PATH call never autoderefs (`T::m` is looked up on `T` alone), so an open `Deref` chain says nothing
-                        // about it; what can still supply the body is a trait in scope (R1814).
-                        let is_path = !c.method && path_owner.is_some();
-                        let in_scope = if w.hits.is_empty() && w.deref_open && !is_path {
+                        // `deref_open` is set when the walk ENDED on a node the manifest cannot read — the start itself when
+                        // it is unkeyed (a renamed re-export) or kind-only (an expansion the producer cannot see), or a
+                        // `Deref` target that is. Either way the members of that node are unknown: a structural miss on
+                        // the written type (SPEC §2 ⟨0.40⟩), which discloses on the method AND the path spelling alike —
+                        // the in-scope-trait reading below is per FILE and misses a trait a parent module brings in
+                        // through `use super::*` (Fable's R1814 merge review, fx/f2 `gl`: the method spelling read
+                        // `Unknown`, the path spelling ABSENT, over one executed write).
+                        //
+                        // SOUNDNESS R1818 — a start the manifest keys only through `type_key`'s LEAF fallback (the written
+                        // path is not a declaring path, and exactly one type of the package has its leaf) is a GUESS at
+                        // the node: `pub use crate::k::Kit as Wrong` beside a pure `w::Wrong` resolves to `w::Wrong`, the
+                        // walk closes over the wrong node, and a classified `re6::Wrong::fetch_all(..)` read `[Db]` over
+                        // an executed write (Fable fx/f1 `wrong_*`). A guessed start whose walk reaches nothing discloses
+                        // as an unreadable one does; a HIT through it is kept (a hit adds).
+                        let start_guessed = !r1818_off && !ts.types.contains_key(&format!("{cr_real}#{tpath}")) && ts.types.contains_key(&start);
+                        let in_scope = if w.hits.is_empty() && w.deref_open {
                             Some("<deref chain open>".to_string())
+                        } else if w.hits.is_empty() && start_guessed {
+                            Some("<start identity guessed>".to_string())
                         } else if w.hits.is_empty() {
                             let fu = f.loc.split(':').next().and_then(|r| file_uses.get(r)).copied().unwrap_or(&[]);
                             crate::typesurf::in_scope_publishes(deps_idx, fu, &dep_renames, &local_trait_quals, member)
@@ -7469,16 +7484,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         // MISS (SPEC §2 ⟨0.40⟩, "every structural miss on the way still ADDS `Unknown`"). `pub use
                         // crate::k::Kit as CKit` publishes no key for `re2::CKit`, so `r.fetch_all(p)` on a `CKit` whose
                         // `fetch_all` is `Fetch`'s provided body (it writes a file) read the curated `[Db]` alone, `deny Fs
-                        // Unknown` 0 over an executed write, on 0.42.0 and 02d58c02 (EXECUTED fx/z1 `r_*`).
+                        // Unknown` 0 over an executed write, on 0.42.0 and 02d58c02 (EXECUTED fx/z1 `r_*`). A start node found
+                        // only by its leaf (R1818, `start_guessed` above) is treated as unreadable here too.
                         if r843_probe && in_scope.is_some() && r1807_union {
-                            eprintln!("R1816HEDGE\t{}\t{start}::{member}\tstructural={}\tpath={is_path}\tfires={}",
-                                f.qual, w.structural, w.structural && !r1816_off);
+                            eprintln!("R1816HEDGE\t{}\t{start}::{member}\tstructural={}\tguessed={start_guessed}\tfires={}",
+                                f.qual, w.structural, (w.structural || start_guessed) && !r1816_off);
                         }
                         if r843_probe && r1814_path_walk {
                             eprintln!("R1814WALK\t{}\t{start}::{member}\thits={}\tstructural={}\tinscope={}",
                                 f.qual, w.hits.len(), w.structural, in_scope.as_deref().unwrap_or("-"));
                         }
-                        if in_scope.is_some() && (!r1807_union || (w.structural && !r1816_off)) {
+                        // §E1 REACH COUNTER — every hedge this walk adds, by spelling, by why, and by whether ANY chained
+                        // unit carries the member's name at all (`members`: a trait-provided body vs a pure inherent).
+                        if r843_probe && in_scope.is_some() && (!r1807_union || ((w.structural || start_guessed) && !r1816_off)) {
+                            let published = deps_idx.members.get(member).is_some_and(|v| !v.is_empty());
+                            eprintln!("R1814HEDGE\t{}\t{start}::{member}\tspelling={}\tclassified={}\twhy={}\tpublished={published}",
+                                f.qual, if c.method { "method" } else { "path" }, r1807_union, in_scope.as_deref().unwrap_or("-"));
+                        }
+                        if in_scope.is_some() && (!r1807_union || ((w.structural || start_guessed) && !r1816_off)) {
                             let leaf = tpath.rsplit("::").next().unwrap_or(tpath);
                             direct.entry(f.qual.clone()).or_default().insert("Unknown");
                             unknown_why.entry(f.qual.clone()).or_default().insert(format!("dispatch:{leaf}.{member}"));
