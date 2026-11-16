@@ -11,6 +11,29 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **With `--deps`, a call the curated classifier answers now ALSO carries the chained dependency's row for it, on every
+  spelling** (SOUNDNESS R1807; silent under-reports, pre-existing on 0.42.0). A classified call into a chained, covered
+  dependency never read the row on the typed route: `sqlx_core::raw_sql::RawC::fetch_all(..)` over a dependency whose
+  `fetch_all` writes a file read `[Db]` and `deny Fs` exited 0 over code that writes, and the row's `Unknown` and its
+  `dispatchesOn` follow-on were dropped the same way (`deny Fs Unknown` 0 too). The untyped spelling of the same member did the
+  opposite (the row won, the curated charge was dropped; R1787 had patched only rows carrying `Unknown`), and the `#[cfg]`
+  alias arms and the builder-chain guess skipped the row for a classified call. Now one rule at every site: the UNION of the
+  curated charge and the row (its effects, `Unknown` and reasons, surfaces, and the obligation-3 `dispatchesOn` follow-on).
+  A classified call asks with the most specific key its spelling forms (full qual first; a same-tail sibling type's row is
+  not charged to it), and a classified call whose row is absent adds nothing beyond its curated charge. Adds only: 0 rows
+  removed, 0 effects or disclosures lost, in every corpus below. Precision cost, named: a complete row over a member whose
+  curated effect has a platform leaf now also carries the curated charge (over-approximation, never silence). A chained report
+  from a different producer version (§2.1 downgraded) now adds its `Unknown` + `dep-stale:` reason to classified calls into
+  that crate. `CANDOR_R1807_OFF=1` restores the old answers (byte-identical to the previous build on the fixture and the
+  generated corpus). Executed fixture (28 effectful cells, 6 spellings plus a value path, a static, a glob, a cfg alias, a
+  builder chain and a same-tail sibling): `deny Fs` 0 on 21 cells on 0.42.0 and main, 0 on the candidate; pure twins
+  unchanged. Generated chained consumers (73 libraries, 13,647 analysed): 924 rows gain a concrete effect, every one inside
+  the row the join reached by its full key (910) or that row's dispatch follow-on (14). Real consumers chained over their real
+  lock (32 crates): 0 rows added or removed, 0 elements of any field lost; 22 rows gain a
+  concrete effect (10 call sites in hickory-net, sqlx-postgres and tokio-rustls, e.g. `dotenvy::var` now carries the `Fs` of
+  reading `.env`), and 26 rows of 34,120 analysed units (0.076%, 11 crates) newly carry `Unknown`, each the dependency's own
+  published hedge for the member called.
+
 - ⚠ **With `--deps`, a dependency row that still carries `Unknown` no longer withdraws the curated charge on the path it
   answered** (SOUNDNESS R1787; the lost charge was disclosed by the `Unknown`, so `deny E Unknown` never moved). Unchained, a
   lock types `raw_sql(..).fetch_all(..)` and the classifier charges `Db`; chained over sqlx_core's real report the
