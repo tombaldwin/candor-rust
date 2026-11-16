@@ -13,22 +13,32 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 - ⚠ **A cfg-gated impl member whose twin is unexpanded macro text in ANOTHER module, or inside a module the hidden text
   declares, now carries `macro:another cfg arm of this fn is hidden by an unexpanded macro`** (SOUNDNESS R1541, I1 stage
-  2c; closes silent under-reports that I1 stage 1 introduced on main, unreleased, and five that 0.42.0 already had). Stage
-  1 splices macro-made trait impls crate-wide, and the hidden-twin cover read hidden text per module: right for a path item
-  (a fn, `use`, module or type, whose cfg twin sits at the same path), wrong for an impl, whose arms can sit in any module,
-  and for a trait, whose default reaches every impl of it. So `impl crate::t::Tr for S { fn go() {} }` gated in one module
-  beside `hid! { pub trait Tr { fn go() { write } } }` in another resolved to the pure member (`deny Unknown` 1 on 0.42.0, 0
-  on main, executed). Every module now exports the impl-scoped keys its hidden text may define (`Tr`, `Tr::m`, `S as Tr`,
-  `S as Tr::m`, `S::m`, read through nested hidden modules), and every gated impl member is checked against them crate-wide
-  by last path segment, following `use … as` renames; a hidden override whose visible gated impl lacks the member hedges the
-  trait's default. Also closed, all silent on 0.42.0 too: an inherent twin in a sibling module or in a nested hidden module,
-  a hidden default inside the trait body (a trait-item-position invocation), and a member-gated hand-written impl beside a
-  hidden trait. Executed fixtures (14 positions and 4 controls, plus the review's own three): 6 positions and the review's
-  three read `deny Unknown` 1 on 0.42.0 and 0 on main, 5 read 0 on both, 3 were already disclosed; all read 1 now. Cost,
-  named: matching by last segment over-holds where a DIFFERENT type or trait of the same name in another module has hidden
-  text (two controls read `Fs` plus `Unknown`); on 181 crates the check marks 91 units in 7
-  crates (rand 36, syn 31, futures-util 8, palette 6, mio 6, tokio 4) and 20 rows newly carry `Unknown` only (0.02%), 0
-  removed, 0 concrete or disclosure lost. `CANDOR_I1S2C_XMOD_OFF=1` restores the per-module cover. Cache rev 206.
+  2c). The hidden-twin cover read hidden text per module: right for a fn, `use` or type, whose cfg twin sits at the same
+  path, and wrong for an impl, whose arms can sit in any module, and for a trait, whose default reaches every impl of it.
+  Every module now exports the impl-scoped keys its hidden text may define (`Tr`, `Tr::m`, `S as Tr`, `S as Tr::m`, `S::m`,
+  read through nested hidden modules; a blanket `impl<T: Mk> Tr for T` also as `* as Tr`; the `use … as` renames it
+  writes), and every gated impl member is checked against them crate-wide by last path segment, following renames; a member
+  counts as gated where its impl, itself, or an enclosing inline module carries a cfg. A hidden override whose visible gated
+  impl lacks the member hedges the trait's default.
+  Closes, executed (each the visible arm resolved alone, `deny Unknown` 0, where the cell named reads 1):
+  - introduced on main by I1 stage 1 (`97c23112`, unreleased; 1 on 0.42.0, 0 on main): the trait twin or the trait-impl twin
+    in a sibling module (inline or file, `pub(crate)`, named through `super::`, a glob re-export or a `use … as` rename,
+    including a rename hidden on both arms), the hidden trait one or two modules down inside the hidden text, and a hidden
+    blanket impl in the same or a sibling module;
+  - introduced by the module splice in the entry below (1 on 0.42.0 and on main, 0 with that splice alone): the impl pair
+    inside produced cfg-gated modules (`on! { pub mod imp { impl Tr for S {} } }` beside `vis! { pub mod imp { impl Tr for S
+    { fn go() {} } } }`) with the trait twin hidden in the same or a sibling module;
+  - silent on 0.42.0 too: an inherent twin in a sibling module or in a nested hidden module, member-level hidden text in a
+    sibling module's impl, a hand-written gated impl pair in a hand-written module, a hidden default inside the trait body
+    (a trait-item-position invocation), and a member-gated hand-written impl beside a hidden trait.
+  Not covered, stated: crate-wide matching reads only the keys of text that expanded or parsed, not the identifier-only
+  fallbacks; an out-of-line module arm (`#[path] mod imp;`) has a body the cover cannot mark, and holds today only through
+  the call's own `macro:` disclosure. Cost, named: matching by last segment over-holds where a DIFFERENT type or trait of the
+  same name in another module has hidden text, and where two impls of one generic trait differ only in its arguments (two
+  controls read `Fs` plus `Unknown`); on 181 crates the check marks 102 units in 7 crates (rand 36, syn 31, tokio 15,
+  futures-util 8, palette 6, mio 6) and 22 rows newly carry `Unknown` only (0.02%), 0 removed, 0 concrete or disclosure
+  lost. Executed fixtures: 190 probes, none lower than main or 0.42.0. `CANDOR_I1S2C_XMOD_OFF=1` restores the per-module
+  cover. Cache rev 207.
 
 - ⚠ **Modules, `use`s and `extern crate`s that a crate's own `macro_rules!` generates are now spliced** (SOUNDNESS R1541,
   I1 stage 2a; closes R1535 and R1688, silent under-reports pre-existing on 0.42.0). The expander's allowlist and
