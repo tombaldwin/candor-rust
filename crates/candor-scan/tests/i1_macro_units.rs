@@ -1025,3 +1025,82 @@ fn i1s2_one_reader_covers_groups_std_globs_traits_and_item_impls() {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to one arm: {off:?}");
     }
 }
+
+/// UPDATE 4a-2: stage 1 (I1 step 2, `97c23112`) splices macro-made TRAIT impls, and with that a cfg-gated trait impl whose twin
+/// stays as unexpanded text in the same file resolved to its own pure member, or through it to the trait's pure default. Each
+/// shape read `deny Unknown` 1 on 0.42.0 and 0 on main (fixture `fxq`, executed): the twin is the hidden TRAIT's default (`a`),
+/// a hidden empty impl inheriting a visible default (`a2`), and a hidden impl overriding a default the visible arm inherits
+/// (`h`, where the cover stands a marked member). Must NOT hold: hidden text naming an unrelated trait and type, and a hidden
+/// impl of the same trait for ANOTHER type.
+#[test]
+fn i1s2_a_hidden_trait_arm_keeps_a_hedge() {
+    let d = tmpdir("s2ti");
+    let hdr = |s: &str| {
+        format!(
+            "#[cfg(feature = \"x\")]\nmacro_rules! hid_{s} {{ ($($i:item)*) => {{ $( #[cfg(unix)] $i )* }} }}\n\
+             #[cfg(not(feature = \"x\"))]\nmacro_rules! hid_{s} {{ ($($it:item)*) => {{ $( #[cfg(unix)] $it )* }} }}\n\
+             macro_rules! vis_{s} {{ ($($i:item)*) => {{ $( #[cfg(not(unix))] $i )* }} }}\n\
+             macro_rules! on_{s} {{ ($($i:item)*) => {{ $( #[cfg(unix)] $i )* }} }}\n"
+        )
+    };
+    write_crate(
+        &d,
+        "s2ti",
+        "[features]\nx = []\n",
+        "pub mod a;\npub mod a2;\npub mod h;\npub mod x1;\npub mod x2;\n\
+         pub fn ta_e() { use crate::a::TrA; crate::a::SA.go() }\n\
+         pub fn ta2_e() { use crate::a2::TrA2; crate::a2::SA2.go() }\n\
+         pub fn th_e() { use crate::h::TrH; crate::h::SH.go() }\n\
+         pub fn tx1_x() { use crate::x1::TrX1; crate::x1::SX1.go() }\n\
+         pub fn tx2_x() { use crate::x2::TrX2; crate::x2::SX2.go() }\n",
+    );
+    write_file(
+        &d,
+        "src/a.rs",
+        &(hdr("a")
+            + "hid_a! { pub trait TrA { fn go(&self) { EFF } } }\nvis_a! { pub trait TrA { fn go(&self); } }\npub struct SA;\n\
+               on_a! { impl TrA for SA {} }\nvis_a! { impl TrA for SA { fn go(&self) {} } }\n"),
+    );
+    write_file(
+        &d,
+        "src/a2.rs",
+        &(hdr("a2")
+            + "#[cfg(unix)] pub trait TrA2 { fn go(&self) { EFF } }\n#[cfg(not(unix))] pub trait TrA2 { fn go(&self); }\n\
+               pub struct SA2;\nhid_a2! { impl TrA2 for SA2 {} }\nvis_a2! { impl TrA2 for SA2 { fn go(&self) {} } }\n"),
+    );
+    write_file(
+        &d,
+        "src/h.rs",
+        &(hdr("h")
+            + "pub trait TrH { fn go(&self) {} }\npub struct SH;\nhid_h! { impl TrH for SH { fn go(&self) { EFF } } }\n\
+               vis_h! { impl TrH for SH {} }\n"),
+    );
+    write_file(
+        &d,
+        "src/x1.rs",
+        &(hdr("x1")
+            + "pub trait TrX1 { fn go(&self); }\npub struct SX1;\npub struct SZ1;\n\
+               hid_x1! { pub trait TrZ1 { fn go(&self) {} } impl TrZ1 for SZ1 { fn go(&self) {} } }\n\
+               on_x1! { impl TrX1 for SX1 { fn go(&self) { EFF } } }\nvis_x1! { impl TrX1 for SX1 { fn go(&self) {} } }\n"),
+    );
+    write_file(
+        &d,
+        "src/x2.rs",
+        &(hdr("x2")
+            + "pub trait TrX2 { fn go(&self) { EFF } }\npub struct SX2;\npub struct OX2;\n\
+               hid_x2! { impl TrX2 for OX2 { fn go(&self) {} } }\non_x2! { impl TrX2 for SX2 {} }\nvis_x2! { impl TrX2 for SX2 {} }\n"),
+    );
+    let (rows, units) = scan(&d, None, &[]);
+    for f in ["ta_e", "ta2_e", "th_e"] {
+        assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden trait arm: {rows:?}");
+    }
+    assert!(units.contains("h::SH::go"), "the hidden override's member is stood on the visible arm: {units:?}");
+    assert_eq!(rows["h::SH::go"].1, vec!["macro:another cfg arm of this fn is hidden by an unexpanded macro".to_string()]);
+    for f in ["tx1_x", "tx2_x"] {
+        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: must not hold: {rows:?}");
+    }
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TRAITARM_OFF", "1")]);
+    for f in ["ta_e", "ta2_e", "th_e"] {
+        assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TRAITARM_OFF: {f} resolves to the visible arm alone: {off:?}");
+    }
+}

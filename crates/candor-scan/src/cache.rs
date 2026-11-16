@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev204 (rustagent-i1s2 stage 2a, UPDATE 4a-2): a cfg-gated trait impl beside hidden text that may hold its trait or another
+    // impl of it for the same type is marked (and a member the hidden impl overrides is stood, marked); a rev203 entry holds the
+    // decls without those marks.
     // rev203 (rustagent-i1s2 stage 2a, Fable re-check 3): a cross-file expansion carrying `#[cfg]` is REFUSED again by default
     // (`CANDOR_I1S2_XCFG_ON=1` lifts it); a rev202 entry holds the lifted expansion's units. (rev199 was taken twice, by R1807
     // on main and by stage 2 on this branch; both are stale.)
@@ -728,7 +731,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev203/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev204/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

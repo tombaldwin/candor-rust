@@ -888,6 +888,20 @@ impl Ctx<'_> {
             syn::Item::Macro(m) if m.ident.is_none() => self.read_hidden(&m.mac, None, out, h, depth),
             syn::Item::Impl(im) => {
                 let owner = ty_key(&im.self_ty);
+                // A hidden TRAIT impl is keyed `Owner as Trait`, and each member it writes `Owner as Trait::m` with its
+                // signature kept: the visible arm of that impl may lack the member (it inherits the trait's default), and the
+                // cover then has to stand a marked member where the hidden arm's override would be (`mark_hidden_twins`).
+                if let Some(t) = trait_key(im) {
+                    let ik = format!("{owner} as {t}");
+                    for ii in &im.items {
+                        if let syn::ImplItem::Fn(f) = ii {
+                            let mk = format!("{ik}::{}", f.sig.ident);
+                            h.sigs.entry(mk.clone()).or_insert_with(|| f.sig.clone());
+                            h.keys.insert(mk);
+                        }
+                    }
+                    h.keys.insert(ik);
+                }
                 for ii in &im.items {
                     self.read_hidden_member(&owner, ii, out, h, depth);
                 }
@@ -1331,6 +1345,9 @@ impl Ctx<'_> {
                         item.opaque |= h.opaque;
                         item.keys.extend(h.keys);
                         item.loose.extend(h.loose);
+                        for (k, v) in h.sigs {
+                            item.sigs.entry(k).or_insert(v);
+                        }
                     }
                     syn::Item::Impl(im) => {
                         let owner = ty_key(&im.self_ty);
@@ -1481,6 +1498,8 @@ struct Hidden {
     keys: std::collections::HashSet<String>,
     loose: std::collections::HashSet<String>,
     steps: usize,
+    /// the signature of each hidden trait-impl member, keyed `Owner as Trait::m` (see `read_hidden_item`)
+    sigs: std::collections::HashMap<String, syn::Signature>,
 }
 
 /// Expansions one hidden invocation's reading may attempt before it falls to `loose`.
@@ -1557,6 +1576,11 @@ fn ty_key(t: &syn::Type) -> String {
         syn::Type::Paren(p) => ty_key(&p.elem),
         other => quote::ToTokens::to_token_stream(other).to_string(),
     }
+}
+
+/// The trait an impl implements, as both readers key it: its last path segment.
+fn trait_key(im: &syn::ItemImpl) -> Option<String> {
+    im.trait_.as_ref().and_then(|(_, p, _)| p.segments.last()).map(|s| s.ident.to_string())
 }
 
 /// The names an item binds in its module, read by `syn` — THE reader of both arms.
@@ -1783,12 +1807,42 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
             }
             let owner = ty_key(&im.self_ty);
             let block = is_gated(&im.attrs);
+            // THE TRAIT-IMPL ARM (UPDATE 4a-2; SOUNDNESS R1541 stage 1 exposed it, Fable RC3-5 named its cross-file form). A
+            // cfg-gated `impl Tr for S` is one arm; its twin may be hidden as (a) the trait itself, whose default body the other
+            // arm's impl inherits, or (b) another `impl Tr for S`, which overrides what this arm inherits or writes. Measured
+            // (`fxq`, executed): `S.go()` read `Unknown macro:` on 0.42.0, and resolved to this arm's pure member, or through
+            // it to the pure default, once stage 1 spliced macro-made trait impls. So: a member of this arm is marked where
+            // the hidden text may define the trait (`Tr`, `Tr::m`), or an impl of `Tr` for `S`; and a member the hidden impl
+            // writes that this arm lacks is STOOD HERE, marked, with the hidden member's signature, so the call lands on a
+            // disclosure instead of the trait's default. The trait name is matched loosely too (`loose` is every identifier of
+            // text that could not be expanded), which over-marks rather than misses. `CANDOR_I1S2_TRAITARM_OFF=1` drops this arm.
+            let tr = trait_key(im);
+            let ik = tr.as_ref().map(|t| format!("{owner} as {t}"));
+            let hidden_trait = |t: &str| item.keys.contains(t) || member.keys.contains(t) || item.opaque;
+            let hidden_impl = |k: &str, t: &str| {
+                item.keys.contains(k) || member.keys.contains(k) || (item.loose.contains(t) && item.loose.contains(&owner))
+            };
+            let arm_on = block && tr.is_some() && !candor_report::env::switch("CANDOR_I1S2_TRAITARM_OFF");
+            let trait_twin = arm_on && tr.as_ref().is_some_and(|t| hidden_trait(t) || hidden_impl(ik.as_deref().unwrap_or(""), t));
+            let mut have: std::collections::HashSet<String> = std::collections::HashSet::new();
             for ii in im.items.iter_mut() {
                 if let syn::ImplItem::Fn(f) = ii {
                     let n = f.sig.ident.to_string();
-                    if (block || is_gated(&f.attrs)) && both(&owner, &n) {
+                    have.insert(n.clone());
+                    if (block || is_gated(&f.attrs)) && (both(&owner, &n) || trait_twin) {
                         mark_fn_as(&mut f.attrs, &format!("{owner}::{n}"), "I1S2MARKMETH");
                     }
+                }
+            }
+            if let (true, Some(ik)) = (arm_on, ik.as_ref()) {
+                let pre = format!("{ik}::");
+                let mut extra: Vec<(&String, &syn::Signature)> =
+                    item.sigs.iter().filter(|(k, _)| k.starts_with(&pre) && !have.contains(&k[pre.len()..])).collect();
+                extra.sort_by(|a, b| a.0.cmp(b.0));
+                for (k, sig) in extra {
+                    let mut f: syn::ImplItemFn = syn::parse_quote!(#sig {});
+                    mark_fn_as(&mut f.attrs, &format!("{owner}::{}", &k[pre.len()..]), "I1S2MARKSTOOD");
+                    im.items.push(syn::ImplItem::Fn(f));
                 }
             }
         }
