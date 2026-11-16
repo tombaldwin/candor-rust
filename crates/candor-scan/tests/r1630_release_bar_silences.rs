@@ -169,15 +169,16 @@ impl Other { pub fn other_zq(&self) { self.s.quiet() } }\n";
 #[test]
 fn r1636_a_receiver_type_declared_only_in_macro_text_discloses() {
     let d = fixture("macro", "mh", "", &[("lib.rs", MACRO_LIB), ("macros.rs", MACRO_DEFS), ("drv.rs", MACRO_DRV)]);
-    // I1 stage 2 — the cross-file `cfg_io!`/`cfg_not_io!` pair is now expanded, so `Stack` is declared in both arms and the
-    // call is charged through the union (the `io` arm sends). R1636's hedge is exercised with the stage-1 refusal restored.
-    let resolved = scan(&d, None, &[]);
+    // I1 stage 2 — with the lift opted in (`CANDOR_I1S2_XCFG_ON`) the cross-file `cfg_io!`/`cfg_not_io!` pair is expanded, so
+    // `Stack` is declared in both arms and the call is charged through the union (the `io` arm sends). By default (stage 2a)
+    // the refusal stands and R1636's hedge is what answers.
+    let resolved = scan(&d, None, &["CANDOR_I1S2_XCFG_ON"]);
     assert_eq!(inferred(&resolved, "drv::Driver::drv_park_zq"), vec!["Net"]);
-    let on = scan(&d, None, &["CANDOR_I1S2_XCFG_OFF"]);
+    let on = scan(&d, None, &[]);
     assert_eq!(inferred(&on, "drv::Driver::drv_park_zq"), vec!["Unknown"]);
     assert!(why(&on, "drv::Driver::drv_park_zq").iter().any(|w| w.starts_with("macro:")));
     assert!(inferred(&on, "drv::Other::other_zq").is_empty(), "a type candor read stays pure (twin)");
-    let off = scan(&d, None, &["CANDOR_I1S2_XCFG_OFF", "CANDOR_R1636_OFF"]);
+    let off = scan(&d, None, &["CANDOR_R1636_OFF"]);
     assert!(inferred(&off, "drv::Driver::drv_park_zq").is_empty(), "the switch restores the silence");
     let _ = std::fs::remove_dir_all(&d);
 }

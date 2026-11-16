@@ -1029,15 +1029,18 @@ impl Ctx<'_> {
         // answers with the UNION (SPEC §4). Measured on the first cut's corpus A/B: tokio lost `Log` on 86
         // rows that way. Refused, the invocation reads exactly as before (R128's `macro:` evidence).
         //
-        // I1 stage 2 — LIFTED. The refusal existed because the splice dropped `use`s: with modules and `use`s spliced, the
-        // twin arm (`cfg_taskdump! { use …::trace_leaf; }`) stands beside the stub and the union is whole, exactly as for a
-        // hand-written pair. palette's `impl_eq!` (`#[cfg(feature = "approx")]` on what it stamps) was the measured cost of
-        // keeping it. `CANDOR_I1S2_XCFG_OFF=1` refuses again.
+        // I1 stage 2a — STILL REFUSED by default. Stage 2 lifted it, on the argument that with modules and `use`s spliced the
+        // twin arm (`cfg_taskdump! { use …::trace_leaf; }`) stands beside the stub and the union is whole. That holds only
+        // where the twin arm's text EXPANDS; where it does not (another crate's macro, a nested invocation, an arm the matcher
+        // cannot take) the lift turns the call site's `macro:` disclosure into a lone stub, and five review rounds of
+        // hidden-twin holes were all restored by refusing here (Fable stage-2 RC3, `fxp`). The lift and its cover
+        // (`mark_hidden_twins`) stay behind the opt-in `CANDOR_I1S2_XCFG_ON=1` until every fallback arm is shown a superset;
+        // palette's `impl_eq!` (`#[cfg(feature = "approx")]` on what it stamps) is the measured cost of refusing.
         let xcfg = cross_file
             && file.items.iter().any(|it| {
                 crate::lang::item_attrs(it).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
             });
-        if xcfg && candor_report::env::switch("CANDOR_I1S2_XCFG_OFF") {
+        if xcfg && !candor_report::env::switch("CANDOR_I1S2_XCFG_ON") {
             if candor_report::env::trace("CANDOR_R1004_INSTR") {
                 eprintln!("R1004XCFG\t{name}");
             }
@@ -1070,8 +1073,8 @@ impl Ctx<'_> {
         .ok()?;
         let xcfg = cross_file
             && gen.iter().any(|ii| impl_item_attrs(ii).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr")));
-        if xcfg && candor_report::env::switch("CANDOR_I1S2_XCFG_OFF") {
-            return None; // I1 stage 2 — lifted, as for item position
+        if xcfg && !candor_report::env::switch("CANDOR_I1S2_XCFG_ON") {
+            return None; // I1 stage 2a — refused by default, as for item position (`CANDOR_I1S2_XCFG_ON=1` lifts it)
         }
         if xcfg && candor_report::env::trace("CANDOR_I1_INSTR") {
             eprintln!("I1S2XCFG\timpl-item"); // §E1 REACH COUNTER, on the CHANGED branch only
