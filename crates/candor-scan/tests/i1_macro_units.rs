@@ -915,3 +915,88 @@ fn i1s2_glob_and_nested_name_twins_keep_a_hedge() {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to one arm: {off:?}");
     }
 }
+
+/// Fable's stage-2 re-check 2: the hidden side was read by a hand token scanner that disagreed with `syn` about `use` groups,
+/// toolchain globs, traits and item-level impls. Both sides are now read by ONE reader (`item_keys` over `syn`-parsed
+/// expansions). Executed (fixture `fxo`): each shape below read `deny Unknown` 1 on 0.42.0 and main and 0 on the cut before
+/// this one. Must NOT hold: a hidden `std::fs` glob beside a produced arm whose name `std::fs` does not export, a glob pair
+/// beside hidden text whose names its target does not hold, and a hand-written gated pair beside forwarding impls whose
+/// expansion is long.
+#[test]
+fn i1s2_one_reader_covers_groups_std_globs_traits_and_item_impls() {
+    let d = tmpdir("s2one");
+    write_crate(
+        &d,
+        "s2one",
+        "[features]\nx = []\n",
+        "#[macro_use]\nmod macros;\npub mod m_hg;\npub mod m_gg;\npub mod m_sg;\npub mod m_sf;\npub mod m_td;\npub mod m_im;\n\
+         pub mod m_sgc;\npub mod m_gn;\npub mod m_bu;\nuse m_td::TrD;\n\
+         pub fn hidgroup_e() { m_hg::leaf_hg() }\npub fn hidgroupglob_e() { m_gg::leaf_gg() }\n\
+         pub fn stdglob_e() { let _ = m_sg::write(\"/tmp/i1-never-run\", b\"x\"); }\n\
+         pub fn stdglobty_e() { let _ = m_sf::File::create(\"/tmp/i1-never-run\"); }\n\
+         pub fn traitdef_e() { m_td::SD.go() }\npub fn implmix_e() { m_im::SM::go() }\n\
+         pub fn stdglobctl_x() { m_sgc::leaf_sgc() }\npub fn globnamedctl_x() { m_gn::leaf_gn() }\n\
+         pub fn budgetctl_x() { m_bu::SB.go() }\n",
+    );
+    write_file(
+        &d,
+        "src/macros.rs",
+        "#[cfg(feature = \"x\")]\nmacro_rules! cfg_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         #[cfg(not(feature = \"x\"))]\nmacro_rules! cfg_unix { ($($it:item)*) => { $( #[cfg(unix)] $it )* } }\n\
+         macro_rules! cfg_not_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n\
+         macro_rules! on_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         macro_rules! off_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n\
+         #[cfg(feature = \"x\")]\nmacro_rules! fwd { ($($f:ident)*) => { $( fwd_h!{$f} )* } }\n\
+         #[cfg(not(feature = \"x\"))]\nmacro_rules! fwd { ($($g:ident)*) => { $( fwd_h!{$g} )* } }\n\
+         macro_rules! fwd_h { ($f:ident) => { fwd_m!{$f} } }\nmacro_rules! fwd_m { ($f:ident) => { pub fn $f(&self) {} } }\n",
+    );
+    write_file(
+        &d,
+        "src/m_hg.rs",
+        "pub mod real_hg { pub fn leaf_hg() { EFF } pub fn other_hg() {} }\n\
+         cfg_unix! { pub use self::real_hg::{leaf_hg, other_hg}; }\ncfg_not_unix! { pub fn leaf_hg() {} pub fn other_hg() {} }\n",
+    );
+    write_file(&d, "src/m_gg.rs", "pub mod real_gg { pub fn leaf_gg() { EFF } }\ncfg_unix! { pub use self::{real_gg::*}; }\ncfg_not_unix! { pub fn leaf_gg() {} }\n");
+    write_file(
+        &d,
+        "src/m_sg.rs",
+        "cfg_unix! { pub use std::fs::*; }\n\
+         cfg_not_unix! { pub fn write<P: AsRef<std::path::Path>, C: AsRef<[u8]>>(_p: P, _c: C) -> std::io::Result<()> { Ok(()) } }\n",
+    );
+    write_file(
+        &d,
+        "src/m_sf.rs",
+        "cfg_unix! { pub use std::fs::*; }\n\
+         cfg_not_unix! { pub struct File; impl File { pub fn create<P: AsRef<std::path::Path>>(_p: P) -> std::io::Result<File> { Ok(File) } } }\n",
+    );
+    write_file(
+        &d,
+        "src/m_td.rs",
+        "cfg_unix! { pub trait TrD { fn go(&self) { EFF } } }\ncfg_not_unix! { pub trait TrD { fn go(&self) {} } }\npub struct SD;\nimpl TrD for SD {}\n",
+    );
+    write_file(&d, "src/m_im.rs", "pub struct SM;\ncfg_unix! { impl SM { pub fn go() { EFF } } }\nimpl SM { cfg_not_unix! { pub fn go() {} } }\n");
+    write_file(&d, "src/m_sgc.rs", "cfg_unix! { pub use std::fs::*; }\non_unix! { pub fn leaf_sgc() { EFF } }\n");
+    write_file(
+        &d,
+        "src/m_gn.rs",
+        "pub mod real_gn { pub fn leaf_gn() { EFF } }\npub mod stub_gn { pub fn leaf_gn() {} }\n\
+         on_unix! { pub use self::real_gn::*; }\noff_unix! { pub use self::stub_gn::*; }\ncfg_unix! { pub fn unrelated_gn() {} }\n",
+    );
+    write_file(
+        &d,
+        "src/m_bu.rs",
+        "pub struct SB;\nimpl SB {\n    #[cfg(unix)]\n    pub fn go(&self) { EFF }\n    #[cfg(not(unix))]\n    pub fn go(&self) {}\n}\n\
+         pub struct SB1;\nimpl SB1 { fwd!{ a1 a2 a3 a4 a5 a6 a7 a8 } }\npub struct SB2;\nimpl SB2 { fwd!{ a1 a2 a3 a4 a5 a6 a7 a8 } }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["hidgroup_e", "hidgroupglob_e", "stdglob_e", "stdglobty_e", "traitdef_e", "implmix_e"] {
+        assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden arm: {rows:?}");
+    }
+    for f in ["stdglobctl_x", "globnamedctl_x", "budgetctl_x"] {
+        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: must not hold: {rows:?}");
+    }
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
+    for f in ["hidgroup_e", "hidgroupglob_e", "stdglob_e", "stdglobty_e", "traitdef_e", "implmix_e"] {
+        assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to one arm: {off:?}");
+    }
+}

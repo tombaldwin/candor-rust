@@ -571,7 +571,7 @@ pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String
     collect_defs(items, &imported, &mut defs);
     let mut v: Vec<(String, Option<String>)> = defs.into_iter().map(|(k, v)| (k, v.map(|t| t.to_string()))).collect();
     // I1 stage 2 — EVERY body of every definition, cfg twins included, under `ALL_BODIES_KEY` + name: never expanded from,
-    // read only to say what hidden text MAY define (`Ctx::may_define`), where a twice-defined wrapper's bodies are both real.
+    // read only to say what hidden text MAY define (`Ctx::read_hidden`), where a twice-defined wrapper's bodies are both real.
     fn walk(items: &[syn::Item], v: &mut Vec<(String, Option<String>)>) {
         for it in items {
             match it {
@@ -593,7 +593,7 @@ pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String
     v
 }
 
-/// The macro bodies `MayDefine` may follow: this file's (`Ctx::bodies`) and the crate's (`CrateMacros`, all bodies under
+/// The macro bodies `Ctx::read_hidden` may expand with: this file's (`Ctx::bodies`) and the crate's (`CrateMacros`, all bodies under
 /// `ALL_BODIES_KEY`). A plain lookup rather than a closure, so the reading makes no indirect call.
 #[derive(Default)]
 struct BodyTable<'a> {
@@ -717,7 +717,7 @@ struct Ctx<'x> {
     /// is kept in the OUTER output): their spliced items stand in the module, so their text is not hidden-twin evidence
     /// (`mark_hidden_twins`); what they did not splice is kept as its own item or marker.
     partial: std::collections::HashSet<String>,
-    /// I1 stage 2 — EVERY `macro_rules!` body this file writes, by name, cfg twins included (`may_define`).
+    /// I1 stage 2 — EVERY `macro_rules!` body this file writes, by name, cfg twins included (`read_hidden`).
     bodies: HashMap<String, Vec<TokenStream>>,
 }
 
@@ -785,15 +785,140 @@ fn imported_names(items: &[syn::Item], out: &mut std::collections::HashSet<Strin
 }
 
 impl Ctx<'_> {
-    /// I1 stage 2 — what an unexpanded invocation may define (`MayDefine`): its own tokens, and the body of every local
-    /// definition its name could bind; a local name whose body this pass cannot read makes it opaque.
-    fn may_define(&self, mac: &syn::Macro, out: &mut MayDefine) {
-        let body = BodyTable { bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
-        // The invocation is read as what it expands to (`MayDefine::nested`); its own tokens too, for the item declarations a
-        // passthrough wrapper (`$($i:item)*`) carries, which the expansion also holds.
-        out.read(&mac.tokens, &body, 0);
+    /// I1 stage 2 — ONE READER for hidden text: an unexpanded invocation is EXPANDED with every body its macro has (cfg twins
+    /// included, crate-wide through `ALL_BODIES_KEY`) and the expansion is parsed by `syn` and read with `item_keys`, the same
+    /// function that reads the visible arm. Nested invocations are read the same way. `member` is the impl's self type for an
+    /// impl-item-position invocation (its expansion is parsed as impl items). Where expansion cannot finish — the depth or step
+    /// limit, no arm matching, another crate's macro — the text falls to a STATED over-approximation, `loose`: every identifier
+    /// of the invocation and of its bodies. Where it is unreadable (a local macro with no readable body, `concat_idents!`), opaque.
+    fn read_hidden(&self, mac: &syn::Macro, member: Option<&str>, out: &[syn::Item], h: &mut Hidden, depth: usize) {
         let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
-        out.nested(&name, &mac.tokens, &body, 0);
+        if name == "concat_idents" || name == "include" {
+            h.opaque = true;
+            h.note("opaque", &name);
+            return;
+        }
+        let table = BodyTable { bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
+        // The toolchain's own item macros define no name of the crate's but what they DECLARE: `thread_local! { static X .. }`
+        // binds `X`; `compile_error!`, `global_asm!` and the rest bind nothing. A local definition shadowing the name is read below.
+        let root_tc = mac.path.segments.len() == 1
+            || matches!(mac.path.segments.first().map(|s| s.ident.to_string()).as_deref(), Some("std" | "core" | "alloc"));
+        if root_tc && TOOLCHAIN_BANG_MACROS.contains(&name.as_str()) && table.get(&name).is_none() {
+            declared_names(&mac.tokens, &mut h.loose);
+            return;
+        }
+        let bodies = match table.get(&name) {
+            None => {
+                // Another crate's macro: its expansion is not here. Where what it is passed parses as items (pin_project's
+                // struct, `loom::thread_local! { static X .. }`), the names those items declare, plus every identifier of
+                // their attributes (`#[project = ProjName]` names a type the macro defines); otherwise every identifier passed.
+                match syn::parse2::<syn::File>(mac.tokens.clone()) {
+                    Ok(f) if !f.items.is_empty() => {
+                        for it in &f.items {
+                            let k = item_keys(it, out);
+                            h.loose.extend(k.names);
+                            h.opaque |= k.opaque;
+                            for a in crate::lang::item_attrs(it) {
+                                all_idents(&quote::ToTokens::to_token_stream(a), &mut h.loose);
+                            }
+                        }
+                        h.note("foreign-items", &name);
+                    }
+                    _ => {
+                        all_idents(&mac.tokens, &mut h.loose);
+                        h.note("foreign", &name);
+                    }
+                }
+                return;
+            }
+            Some(None) => {
+                h.opaque = true;
+                h.note("opaque", &name);
+                return;
+            }
+            Some(Some(bs)) => bs,
+        };
+        if depth >= HIDDEN_DEPTH || h.steps >= HIDDEN_STEP_BUDGET {
+            all_idents(&mac.tokens, &mut h.loose);
+            bodies.iter().for_each(|b| declared_names(b, &mut h.loose));
+            h.note("limit", &name);
+            return;
+        }
+        let mut any = false;
+        for b in &bodies {
+            h.steps += 1;
+            let Some(ts) = parse_arms(b).and_then(|arms| expand(&arms, &mac.tokens)) else { continue };
+            match member {
+                None => {
+                    if let Ok(f) = syn::parse2::<syn::File>(ts) {
+                        any = true;
+                        for it in &f.items {
+                            self.read_hidden_item(it, out, h, depth + 1);
+                        }
+                    }
+                }
+                Some(owner) => {
+                    use syn::parse::Parser;
+                    let parsed = (|input: syn::parse::ParseStream| {
+                        let mut v = Vec::new();
+                        while !input.is_empty() {
+                            v.push(input.parse::<syn::ImplItem>()?);
+                        }
+                        Ok(v)
+                    })
+                    .parse2(ts);
+                    if let Ok(iis) = parsed {
+                        any = true;
+                        for ii in &iis {
+                            self.read_hidden_member(owner, ii, out, h, depth + 1);
+                        }
+                    }
+                }
+            }
+        }
+        if !any {
+            all_idents(&mac.tokens, &mut h.loose);
+            bodies.iter().for_each(|b| declared_names(b, &mut h.loose));
+            h.note("noexpand", &name);
+        }
+    }
+
+    fn read_hidden_item(&self, it: &syn::Item, out: &[syn::Item], h: &mut Hidden, depth: usize) {
+        match it {
+            syn::Item::Macro(m) if m.ident.is_none() => self.read_hidden(&m.mac, None, out, h, depth),
+            syn::Item::Impl(im) => {
+                let owner = ty_key(&im.self_ty);
+                for ii in &im.items {
+                    self.read_hidden_member(&owner, ii, out, h, depth);
+                }
+            }
+            _ => {
+                let k = item_keys(it, out);
+                if let syn::Item::Use(u) = it {
+                    if candor_report::env::trace("CANDOR_I1_INSTR") {
+                        let t = quote::ToTokens::to_token_stream(&u.tree).to_string();
+                        if t.contains('{') {
+                            eprintln!("I1S2HIDUSEGROUP\t{t}"); // §E1 REACH COUNTER: a hidden grouped `use`
+                        }
+                        if t.contains('*') && (t.starts_with("std") || t.starts_with("core") || t.starts_with("alloc")) {
+                            eprintln!("I1S2HIDSTDGLOB\t{t}"); // §E1 REACH COUNTER: a hidden toolchain glob
+                        }
+                    }
+                }
+                h.opaque |= k.opaque;
+                h.keys.extend(k.names);
+            }
+        }
+    }
+
+    fn read_hidden_member(&self, owner: &str, ii: &syn::ImplItem, out: &[syn::Item], h: &mut Hidden, depth: usize) {
+        match ii {
+            syn::ImplItem::Fn(f) => {
+                h.keys.insert(format!("{owner}::{}", f.sig.ident));
+            }
+            syn::ImplItem::Macro(m) => self.read_hidden(&m.mac, Some(owner), out, h, depth),
+            _ => {}
+        }
     }
 
     /// R1156 — the definition in textual scope for a name this FILE defines more than once.
@@ -1191,31 +1316,35 @@ impl Ctx<'_> {
         }
         if !candor_report::env::switch("CANDOR_I1S2_TWIN_OFF") {
             spliced.resize(out.len(), false);
-            let (mut item_text, mut member_text, mut hidden, mut members) = (MayDefine::default(), MayDefine::default(), false, false);
+            let (mut item, mut member) = (Hidden::default(), Hidden::default());
             for it in out.iter() {
                 match it {
                     syn::Item::Macro(m) if is_hidden_text(m, &self.partial) => {
-                        hidden = true;
-                        let was = item_text.opaque;
-                        self.may_define(&m.mac, &mut item_text);
+                        let mut h = Hidden::default();
+                        self.read_hidden(&m.mac, None, &out, &mut h, 0);
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
-                            let k = invocation_key(&m.mac);
-                            let opq = if item_text.opaque && !was { "opaque" } else { "named" };
-                            eprintln!("I1S2HIDBY\t{}\t{opq}", k.split('!').next().unwrap_or("")); // §E1 REACH COUNTER
+                            eprintln!("I1S2HIDBY\t{}", invocation_key(&m.mac).split('!').next().unwrap_or("")); // §E1 REACH COUNTER
                         }
+                        item.opaque |= h.opaque;
+                        item.keys.extend(h.keys);
+                        item.loose.extend(h.loose);
                     }
                     syn::Item::Impl(im) => {
+                        let owner = ty_key(&im.self_ty);
                         for ii in &im.items {
                             if let syn::ImplItem::Macro(m) = ii {
-                                members = true;
-                                self.may_define(&m.mac, &mut member_text);
+                                let mut h = Hidden::default();
+                                self.read_hidden(&m.mac, Some(&owner), &out, &mut h, 0);
+                                member.opaque |= h.opaque;
+                                member.keys.extend(h.keys);
+                                member.loose.extend(h.loose);
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            mark_hidden_twins(&mut out, &spliced, &item_text, members.then_some(&member_text), hidden);
+            mark_hidden_twins(&mut out, &spliced, &item, &member);
         }
         *items = out;
     }
@@ -1275,11 +1404,16 @@ fn use_as_hidden_text(u: &syn::ItemUse) -> syn::Item {
 }
 
 fn mark_fn(attrs: &mut Vec<syn::Attribute>, n: &str) {
+    mark_fn_as(attrs, n, "I1S2MARKFN");
+}
+
+/// `counter`: the §E1 reach counter the mark is counted under (fn, method, trait default).
+fn mark_fn_as(attrs: &mut Vec<syn::Attribute>, n: &str, counter: &str) {
     if !attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
         let id = syn::Ident::new(crate::model::MBE_TWIN_ATTR, proc_macro2::Span::call_site());
         attrs.push(syn::parse_quote!(#[#id]));
         if candor_report::env::trace("CANDOR_I1_INSTR") {
-            eprintln!("I1S2MARKFN\t{n}"); // §E1 REACH COUNTER, on the ADDED branch only
+            eprintln!("{counter}\t{n}"); // §E1 REACH COUNTER, on the ADDED branch only
         }
     }
 }
@@ -1336,43 +1470,68 @@ fn cover_arm(it: &mut syn::Item) {
 ///
 /// An impl block that still holds an unexpanded impl-item invocation is the same at member level: its cfg-gated methods are
 /// marked. `CANDOR_I1S2_TWIN_OFF=1` drops the cover.
-/// What a piece of hidden text MAY define. Read from the text as items are written: the name after an item keyword (`fn`,
-/// `mod`, `struct`, `enum`, `union`, `type`, `trait`, `const`, `static`), and every name a `use` run binds (a leaf, or the name
-/// after `as`). Beyond that it is OPAQUE — it can define a name this reading cannot list — when it holds a glob `use` (it binds
-/// every name of its target), or invokes a local macro whose body this pass cannot read (defined twice, or differently in
-/// two files: the twin wrappers themselves), `include!` or `concat_idents!`. Another crate's macro counts every identifier it
-/// is passed as a name it may define. A nested LOCAL macro whose body is readable is followed: where its
-/// body defines an item through a fragment (`pub fn $n`), every identifier the invocation passes may be that name
-/// (`mk_w!(leaf_dn)`). Fable's stage-2 re-check 1 found the two spellings a fn/`use`-leaf reading missed (a glob arm, a name
-/// passed to a nested macro); a reading of EVERY identifier (the first attempt at this model) over-read tokio's
-/// `tokio_thread_local!` text and put back `use`s that resolve, so the reading stays keyed on what an item declaration writes.
+/// What one module's hidden text may define (`Ctx::read_hidden`): `keys` read by `syn` from its expansions (`item_keys`),
+/// `loose` from a stated over-approximation (every identifier, where expansion could not finish), or `opaque`.
 #[derive(Default)]
-struct MayDefine {
+struct Hidden {
     opaque: bool,
-    names: std::collections::HashSet<String>,
-    /// local macros whose bodies could not expand an invocation and define an item through a fragment (instrument)
-    seen: std::collections::HashSet<String>,
-    /// expansions attempted while reading one module's hidden text
-    budget: usize,
+    keys: std::collections::HashSet<String>,
+    loose: std::collections::HashSet<String>,
+    steps: usize,
 }
 
-/// Expansions one module's hidden-text reading may attempt before it is called opaque.
-const MAY_DEFINE_BUDGET: usize = 512;
+/// Expansions one hidden invocation's reading may attempt before it falls to `loose`.
+const HIDDEN_STEP_BUDGET: usize = 2048;
+/// How deep the reading follows nested invocations. Deeper than the splice's `MAX_DEPTH`: a recursive tower past that limit
+/// (syn's `generate_to_tokens!`, one level per enum variant) is often WHY the text stayed hidden, and reading it to the end
+/// is what keeps its names precise instead of `loose`.
+const HIDDEN_DEPTH: usize = 128;
 
-const ITEM_KEYWORDS: &[&str] = &["fn", "mod", "struct", "enum", "union", "type", "trait", "const", "static"];
-
-/// Does a macro BODY define an item whose name is a fragment (`fn $n`, `struct $t`, `use … as $a`)?
-fn body_defines_by_fragment(ts: &TokenStream) -> bool {
-    let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
-    toks.iter().enumerate().any(|(i, tt)| match tt {
-        TokenTree::Group(g) => body_defines_by_fragment(&g.stream()),
-        TokenTree::Ident(id) => {
-            let n = id.to_string();
-            (ITEM_KEYWORDS.contains(&n.as_str()) || n == "as" || n == "use")
-                && matches!(toks.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '$')
+impl Hidden {
+    fn note(&self, how: &str, name: &str) {
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("I1S2HIDREAD\t{how}\t{name}"); // §E1 REACH COUNTER: how hidden text was read (opaque/foreign/limit/noexpand)
         }
-        _ => false,
-    })
+    }
+    fn covers(&self, name: &str) -> bool {
+        self.opaque || self.keys.contains(name) || self.loose.contains(name)
+    }
+    /// A method `Owner::m`: its key, or the loose method name; or — only where the VISIBLE arm itself declares the type as a
+    /// produced cfg arm (`type_twin`) — a hidden type of that name, whose methods are then unknown (`std::fs::*` beside a stub
+    /// `struct File`). A hidden type with no visible twin (pin_project's struct) is that type's only declaration, not an arm.
+    fn covers_method(&self, owner: &str, m: &str, type_twin: bool) -> bool {
+        self.opaque
+            || self.keys.contains(&format!("{owner}::{m}"))
+            || self.loose.contains(m)
+            || (type_twin && (self.keys.contains(owner) || self.loose.contains(owner)))
+    }
+    fn is_empty(&self) -> bool {
+        !self.opaque && self.keys.is_empty() && self.loose.is_empty()
+    }
+}
+
+/// The names a macro BODY declares as written (the identifier after `fn`/`mod`/`struct`/`enum`/`union`/`type`/`trait`/
+/// `const`/`static`, or a `macro_rules!` name) — what a body the expander could not run may define besides the identifiers its
+/// invocation passes (`all_idents`): the `loose` over-approximation's second half.
+fn declared_names(ts: &TokenStream, out: &mut std::collections::HashSet<String>) {
+    let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
+    for (i, tt) in toks.iter().enumerate() {
+        match tt {
+            TokenTree::Group(g) => declared_names(&g.stream(), out),
+            TokenTree::Ident(id) => {
+                let n = id.to_string();
+                let kw = matches!(n.as_str(), "fn" | "mod" | "struct" | "enum" | "union" | "type" | "trait" | "const" | "static");
+                let mr = n == "macro_rules" && matches!(toks.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!');
+                let at = if mr { i + 2 } else { i + 1 };
+                if kw || mr {
+                    if let Some(TokenTree::Ident(nm)) = toks.get(at) {
+                        out.insert(nm.to_string().trim_start_matches("r#").to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn all_idents(ts: &TokenStream, out: &mut std::collections::HashSet<String>) {
@@ -1387,194 +1546,131 @@ fn all_idents(ts: &TokenStream, out: &mut std::collections::HashSet<String>) {
     }
 }
 
-impl MayDefine {
-    /// `body` answers a local macro name with its readable bodies (`None`: not local; `Some(None)`: local, unreadable).
-    fn read(&mut self, ts: &TokenStream, body: &BodyTable<'_>, depth: usize) {
-        self.read_in(ts, body, depth, None)
-    }
-
-    /// `owner`: inside an `impl` block, the self type's last segment — a method is recorded as `Owner::name`, because two
-    /// blocks' same-named methods of DIFFERENT types are not arms of one another.
-    fn read_in(&mut self, ts: &TokenStream, body: &BodyTable<'_>, depth: usize, owner: Option<&str>) {
-        let toks: Vec<TokenTree> = ts.clone().into_iter().collect();
-        let mut in_use = false;
-        // the first segment of the current `use` path: a glob of the toolchain's own crates binds no name of this crate's
-        let mut use_root: Option<String> = None;
-        let mut i = 0;
-        while i < toks.len() {
-            match &toks[i] {
-                TokenTree::Group(g) => self.read_in(&g.stream(), body, depth, owner),
-                TokenTree::Ident(id) => {
-                    let n = id.to_string();
-                    let next = toks.get(i + 1);
-                    if n == "impl" {
-                        // the block's self type, then its body read under it
-                        if let Some(j) = (i + 1..toks.len()).find(|&k| matches!(&toks[k], TokenTree::Group(g) if g.delimiter() == Delimiter::Brace)) {
-                            let (mut angle, mut path) = (0i32, Vec::new());
-                            for t in &toks[i + 1..j] {
-                                match t {
-                                    TokenTree::Punct(p) if p.as_char() == '<' => angle += 1,
-                                    TokenTree::Punct(p) if p.as_char() == '>' => angle -= 1,
-                                    TokenTree::Ident(x) if angle == 0 && x == "for" => path.clear(),
-                                    TokenTree::Ident(x) if angle == 0 && x != "where" && x != "dyn" && x != "unsafe" => path.push(x.to_string()),
-                                    _ => {}
-                                }
-                            }
-                            if let TokenTree::Group(g) = &toks[j] {
-                                let ty = path.last().cloned().unwrap_or_default();
-                                self.read_in(&g.stream(), body, depth, Some(&ty));
-                            }
-                            i = j + 1;
-                            continue;
-                        }
-                    }
-                    if n == "use" {
-                        in_use = true;
-                        use_root = None;
-                    } else if in_use && use_root.is_none() {
-                        use_root = Some(n.clone());
-                    }
-                    if n == "use" {
-                    } else if ITEM_KEYWORDS.contains(&n.as_str()) {
-                        if let Some(TokenTree::Ident(nm)) = next {
-                            let nm = nm.to_string().trim_start_matches("r#").to_string();
-                            match owner {
-                                Some(o) if n == "fn" => {
-                                    self.names.insert(format!("{o}::{nm}"));
-                                }
-                                _ => {
-                                    self.names.insert(nm);
-                                }
-                            }
-                        }
-                    } else if in_use {
-                        // a `use` leaf: followed by `,` `;` or the end of its group, or the name after `as`
-                        let leaf = next.is_none() || matches!(next, Some(TokenTree::Punct(p)) if p.as_char() == ',' || p.as_char() == ';');
-                        let after_as = i > 0 && matches!(&toks[i - 1], TokenTree::Ident(x) if x == "as");
-                        if leaf || after_as {
-                            self.names.insert(n.clone());
-                        }
-                    }
-                    if matches!(next, Some(TokenTree::Punct(p)) if p.as_char() == '!') && n != "macro_rules" {
-                        let tool = TOOLCHAIN_BANG_MACROS.contains(&n.as_str()) && !matches!(n.as_str(), "include" | "concat_idents");
-                        if !tool {
-                            let args = match toks.get(i + 2) {
-                                Some(TokenTree::Group(g)) => g.stream(),
-                                _ => TokenStream::new(),
-                            };
-                            self.nested(&n, &args, body, depth);
-                            i += 3;
-                            continue;
-                        }
-                    }
-                }
-                TokenTree::Punct(p) => {
-                    if p.as_char() == ';' {
-                        in_use = false;
-                    }
-                    if p.as_char() == '*' && in_use && !matches!(use_root.as_deref(), Some("std" | "core" | "alloc")) {
-                        self.opaque = true;
-                    }
-                }
-                TokenTree::Literal(_) => {}
-            }
-            i += 1;
-        }
-    }
-
-    /// An invocation of `name` with `args`. A LOCAL macro is EXPANDED with each of its bodies (cfg twins included) and the
-    /// expansion read — the names it defines are what it defines, a fragment-passed name included (`mk_w!(leaf)`). Where no
-    /// body expands it, every identifier it is passed and every name its bodies declare may be defined. Another crate's macro:
-    /// every identifier it is passed. A local macro with no readable body, an `include!`, a `concat_idents!`, or the budget
-    /// running out: opaque.
-    fn nested(&mut self, name: &str, args: &TokenStream, body: &BodyTable<'_>, depth: usize) {
-        if matches!(name, "include" | "concat_idents") {
-            self.opaque = true; // an unread file, or a name minted from parts
-            return;
-        }
-        match body.get(name) {
-            // A recursive tower deeper than the expander follows (the very reason this text stayed unexpanded, e.g. syn's
-            // `generate_to_tokens!`): the names it is passed and the names its bodies declare.
-            Some(Some(bs)) if depth >= MAX_DEPTH => {
-                all_idents(args, &mut self.names);
-                for b in &bs {
-                    let mut sub = MayDefine::default();
-                    sub.read(b, &BodyTable::default(), MAX_DEPTH);
-                    self.names.extend(sub.names);
-                    self.opaque |= sub.opaque;
-                }
-            }
-            Some(Some(bs)) => {
-                let mut any = false;
-                for b in &bs {
-                    if self.budget >= MAY_DEFINE_BUDGET {
-                        self.opaque = true;
-                        return;
-                    }
-                    self.budget += 1;
-                    if let Some(ts) = parse_arms(b).and_then(|arms| expand(&arms, args)) {
-                        any = true;
-                        self.read(&ts, body, depth + 1);
-                    }
-                }
-                if !any {
-                    all_idents(args, &mut self.names);
-                    for b in &bs {
-                        if body_defines_by_fragment(b) {
-                            self.seen.insert(name.to_string());
-                        }
-                        let mut sub = MayDefine::default();
-                        sub.read(b, &BodyTable::default(), MAX_DEPTH); // the body's own declared names, nested calls not followed
-                        self.names.extend(sub.names);
-                        self.opaque |= sub.opaque;
-                    }
-                }
-            }
-            // Another crate's macro (or a path this pass does not bind): its body is not here, so every identifier it is
-            // passed may be a name it defines. A name it mints that its invocation does not write (a proc macro's `paste`)
-            // is R1804/R1806's class, not this cover's.
-            None => all_idents(args, &mut self.names),
-            Some(None) => self.opaque = true,
-        }
-    }
-
-    fn covers(&self, names: &[String]) -> bool {
-        self.opaque || names.iter().any(|n| self.names.contains(n))
+/// An impl's self type as both readers key it: the last path segment, or the type's text for a non-path type.
+fn ty_key(t: &syn::Type) -> String {
+    match t {
+        syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
+        syn::Type::Group(g) => ty_key(&g.elem),
+        syn::Type::Paren(p) => ty_key(&p.elem),
+        other => quote::ToTokens::to_token_stream(other).to_string(),
     }
 }
 
-/// The names an item BINDS in its module, and whether it binds names this pass cannot list (a glob).
-fn bound_names(it: &syn::Item) -> (Vec<String>, bool) {
-    fn use_names(t: &syn::UseTree, out: &mut Vec<String>, glob: &mut bool) {
-        match t {
-            syn::UseTree::Path(p) => use_names(&p.tree, out, glob),
-            syn::UseTree::Name(n) if n.ident != "self" => out.push(n.ident.to_string()),
-            syn::UseTree::Name(_) => {}
-            syn::UseTree::Rename(r) => out.push(r.rename.to_string()),
-            syn::UseTree::Glob(_) => *glob = true,
-            syn::UseTree::Group(g) => g.items.iter().for_each(|i| use_names(i, out, glob)),
-        }
-    }
-    let mut v = Vec::new();
-    let mut glob = false;
-    match it {
-        syn::Item::Fn(f) => v.push(f.sig.ident.to_string()),
-        syn::Item::Use(u) => use_names(&u.tree, &mut v, &mut glob),
-        syn::Item::Mod(m) => v.push(m.ident.to_string()),
-        syn::Item::Impl(im) => {
-            let ty = match &*im.self_ty {
-                syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(),
-                _ => String::new(),
-            };
-            for ii in &im.items {
-                if let syn::ImplItem::Fn(f) = ii {
-                    v.push(format!("{ty}::{}", f.sig.ident));
+/// The names an item binds in its module, read by `syn` — THE reader of both arms.
+struct ItemKeys {
+    names: Vec<String>,
+    /// a glob whose names cannot be enumerated here
+    opaque: bool,
+}
+
+/// What a glob `use <path>::*` binds: the item names of an inline module of this list it names (`self::m::*`, `m::*`), the
+/// curated `std::fs` / `std::env` name tables, or — anything else — names this pass cannot list.
+fn glob_names(path: &[String], out: &[syn::Item]) -> Option<Vec<String>> {
+    let p: Vec<&str> = path.iter().map(String::as_str).filter(|s| *s != "self").collect();
+    match p.as_slice() {
+        ["std" | "core", "fs"] => return Some(crate::lang::STD_FS_NAMES.iter().map(|s| s.to_string()).collect()),
+        ["std", "env"] => return Some(crate::lang::STD_ENV_NAMES.iter().map(|s| s.to_string()).collect()),
+        [m] => {
+            for it in out {
+                if let syn::Item::Mod(md) = it {
+                    if md.ident == m {
+                        if let Some((_, inner)) = &md.content {
+                            let mut v = Vec::new();
+                            for x in inner {
+                                let k = item_keys(x, inner);
+                                if k.opaque {
+                                    return None;
+                                }
+                                v.extend(k.names);
+                            }
+                            return Some(v);
+                        }
+                    }
                 }
             }
         }
         _ => {}
     }
-    (v, glob)
+    None
+}
+
+fn item_keys(it: &syn::Item, out: &[syn::Item]) -> ItemKeys {
+    fn use_keys(t: &syn::UseTree, prefix: &mut Vec<String>, out: &[syn::Item], k: &mut ItemKeys) {
+        match t {
+            syn::UseTree::Path(p) => {
+                prefix.push(p.ident.to_string());
+                use_keys(&p.tree, prefix, out, k);
+                prefix.pop();
+            }
+            syn::UseTree::Name(n) if n.ident == "self" => {
+                if let Some(last) = prefix.last() {
+                    k.names.push(last.clone());
+                }
+            }
+            syn::UseTree::Name(n) => k.names.push(n.ident.to_string()),
+            syn::UseTree::Rename(r) => k.names.push(r.rename.to_string()),
+            syn::UseTree::Glob(_) => match glob_names(prefix, out) {
+                Some(v) => k.names.extend(v),
+                None => k.opaque = true,
+            },
+            syn::UseTree::Group(g) => g.items.iter().for_each(|i| use_keys(i, prefix, out, k)),
+        }
+    }
+    let mut k = ItemKeys { names: Vec::new(), opaque: false };
+    let decoded;
+    let it = match mbe_trait_body_of(it) {
+        Some(t) => {
+            decoded = syn::Item::Trait(t);
+            &decoded
+        }
+        None => it,
+    };
+    match it {
+        syn::Item::Fn(f) => k.names.push(f.sig.ident.to_string()),
+        syn::Item::Use(u) => use_keys(&u.tree, &mut Vec::new(), out, &mut k),
+        syn::Item::Mod(m) => k.names.push(m.ident.to_string()),
+        syn::Item::Impl(im) => {
+            let owner = ty_key(&im.self_ty);
+            for ii in &im.items {
+                if let syn::ImplItem::Fn(f) = ii {
+                    k.names.push(format!("{owner}::{}", f.sig.ident));
+                }
+            }
+        }
+        syn::Item::Trait(t) => {
+            k.names.push(t.ident.to_string());
+            for ti in &t.items {
+                if let syn::TraitItem::Fn(f) = ti {
+                    k.names.push(format!("{}::{}", t.ident, f.sig.ident));
+                }
+            }
+        }
+        syn::Item::Struct(x) => k.names.push(x.ident.to_string()),
+        syn::Item::Enum(x) => k.names.push(x.ident.to_string()),
+        syn::Item::Union(x) => k.names.push(x.ident.to_string()),
+        syn::Item::Type(x) => k.names.push(x.ident.to_string()),
+        syn::Item::Const(x) => k.names.push(x.ident.to_string()),
+        syn::Item::Static(x) => k.names.push(x.ident.to_string()),
+        syn::Item::TraitAlias(x) => k.names.push(x.ident.to_string()),
+        syn::Item::Macro(m) => {
+            if let Some(i) = &m.ident {
+                k.names.push(i.to_string());
+            }
+        }
+        syn::Item::ExternCrate(e) => k.names.push(e.rename.as_ref().map(|r| r.1.to_string()).unwrap_or_else(|| e.ident.to_string())),
+        syn::Item::ForeignMod(fm) => {
+            for fi in &fm.items {
+                match fi {
+                    syn::ForeignItem::Fn(f) => k.names.push(f.sig.ident.to_string()),
+                    syn::ForeignItem::Static(s) => k.names.push(s.ident.to_string()),
+                    syn::ForeignItem::Type(t) => k.names.push(t.ident.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    k
 }
 
 /// Does every path this `use` binds lead into one of `mods` (modules of this list the cover marks), so the names keep
@@ -1589,41 +1685,106 @@ fn use_into(t: &syn::UseTree, mods: &std::collections::HashSet<String>, first: b
     }
 }
 
-fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item_text: &MayDefine, member_text: Option<&MayDefine>, hidden: bool) {
-    // The modules of this list the cover will mark (produced, gated, a twin): a `use` into one keeps resolving to marked units.
-    let marked_mods: std::collections::HashSet<String> = out
-        .iter()
-        .enumerate()
-        .filter(|(i, it)| {
-            hidden
-                && spliced.get(*i).copied().unwrap_or(false)
-                && matches!(it, syn::Item::Mod(m) if m.content.is_some())
-                && is_gated(crate::lang::item_attrs(it))
-                && item_text.covers(&bound_names(it).0)
-        })
-        .filter_map(|(_, it)| if let syn::Item::Mod(m) = it { Some(m.ident.to_string()) } else { None })
-        .collect();
-    for (i, it) in out.iter_mut().enumerate() {
-        let produced = spliced.get(i).copied().unwrap_or(false);
-        if hidden && is_gated(crate::lang::item_attrs(it)) {
-            let (names, glob) = bound_names(it);
-            let twin = glob || item_text.covers(&names);
-            let resolves_marked = matches!(&*it, syn::Item::Use(u) if use_into(&u.tree, &marked_mods, true));
-            if produced && twin && !resolves_marked {
-                cover_arm(it);
-            } else if !produced && twin && candor_report::env::trace("CANDOR_I1_INSTR") {
-                eprintln!("I1S2HANDPROBE\t{}", names.join(",")); // §E1 COST PROBE of the wider (hand-written) model, never applied
+/// Mark a trait-body marker's default methods (the visible arm of a hidden trait twin).
+fn cover_trait_marker(it: &mut syn::Item, h: &Hidden) {
+    let Some(mut t) = mbe_trait_body_of(it) else { return };
+    let tn = t.ident.to_string();
+    let mut hit = false;
+    for ti in t.items.iter_mut() {
+        if let syn::TraitItem::Fn(f) = ti {
+            if f.default.is_some() && (h.covers(&tn) || h.covers_method(&tn, &f.sig.ident.to_string(), true)) {
+                let n = format!("{tn}::{}", f.sig.ident);
+                mark_fn_as(&mut f.attrs, &n, "I1S2MARKTRAIT");
+                hit = true;
             }
         }
-        // An impl-item-position invocation left unexpanded (`default! { fn clone_from_spec .. }`, a twice-defined wrapper)
-        // may hold another arm of a gated method in ANY impl block of this module (specialisation arms live in two blocks).
-        if let (Some(mt), syn::Item::Impl(im)) = (member_text, it) {
+    }
+    if hit {
+        let mut ts = TokenStream::new();
+        ts.extend([TokenTree::Ident(Ident::new(MBE_TRAIT_BODY_MARK, proc_macro2::Span::call_site()))]);
+        ts.extend(syn::__private::ToTokens::to_token_stream(&t));
+        *it = syn::Item::Verbatim(ts);
+    }
+}
+
+/// THE VISIBLE SIDE, read with the same `item_keys`. `item` is what this module's hidden ITEM text may define, `member` what
+/// its hidden IMPL-ITEM text may define (each keyed `Owner::m`). Cover, by kind:
+/// - a PRODUCED (spliced) cfg-gated fn, `use` or module whose bound names the hidden text may define: the fn is marked, the
+///   module's fns are marked, the `use` is put back as hidden text unless it leads into a module the cover marks. A produced
+///   glob whose target is an inline module here is a twin only where those names meet the hidden ones; any other glob is.
+/// - ANY cfg-gated method (hand-written impl included — the impl-item splice keeps no provenance) whose `Owner::m` key, or
+///   whose owner type, the hidden text may define.
+/// - a produced trait whose default bodies the hidden text may define (`cover_trait_marker`).
+fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, member: &Hidden) {
+    // the types a produced, cfg-gated declaration of this list names: a hidden type of that name is its twin
+    let type_twins: std::collections::HashSet<String> = out
+        .iter()
+        .enumerate()
+        .filter(|(i, it)| spliced.get(*i).copied().unwrap_or(false) && is_gated(crate::lang::item_attrs(it)))
+        .filter_map(|(_, it)| match it {
+            syn::Item::Struct(x) => Some(x.ident.to_string()),
+            syn::Item::Enum(x) => Some(x.ident.to_string()),
+            syn::Item::Union(x) => Some(x.ident.to_string()),
+            syn::Item::Type(x) => Some(x.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let both = |owner: &str, m: &str| {
+        let tt = type_twins.contains(owner);
+        item.covers_method(owner, m, tt) || member.covers_method(owner, m, tt)
+    };
+    let visible_twin = |it: &syn::Item, out: &[syn::Item]| -> bool {
+        if item.is_empty() {
+            return false;
+        }
+        let k = item_keys(it, out);
+        if k.opaque {
+            return true; // a glob this pass cannot enumerate, beside hidden text
+        }
+        k.names.iter().any(|n| item.covers(n))
+    };
+    let flags: Vec<bool> = out
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            spliced.get(i).copied().unwrap_or(false)
+                && is_gated(crate::lang::item_attrs(it))
+                && matches!(it, syn::Item::Fn(_) | syn::Item::Use(_) | syn::Item::Mod(_))
+                && visible_twin(it, out)
+        })
+        .collect();
+    let marked_mods: std::collections::HashSet<String> = out
+        .iter()
+        .zip(&flags)
+        .filter_map(|(it, f)| match it {
+            syn::Item::Mod(m) if *f && m.content.is_some() => Some(m.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    for (i, it) in out.iter_mut().enumerate() {
+        if flags[i] {
+            let keep_use = matches!(&*it, syn::Item::Use(u) if use_into(&u.tree, &marked_mods, true));
+            if !keep_use {
+                cover_arm(it);
+            }
+            continue;
+        }
+        // a trait-body marker exists only for a trait an expansion declared (`mbe_trait_body_marker`): produced by construction
+        if mbe_trait_body_of(it).is_some() && !item.is_empty() {
+            cover_trait_marker(it, item);
+            continue;
+        }
+        if let syn::Item::Impl(im) = it {
+            if item.is_empty() && member.is_empty() {
+                continue;
+            }
+            let owner = ty_key(&im.self_ty);
             let block = is_gated(&im.attrs);
             for ii in im.items.iter_mut() {
                 if let syn::ImplItem::Fn(f) = ii {
                     let n = f.sig.ident.to_string();
-                    if (block || is_gated(&f.attrs)) && mt.covers(std::slice::from_ref(&n)) {
-                        mark_fn(&mut f.attrs, &n);
+                    if (block || is_gated(&f.attrs)) && both(&owner, &n) {
+                        mark_fn_as(&mut f.attrs, &format!("{owner}::{n}"), "I1S2MARKMETH");
                     }
                 }
             }

@@ -408,11 +408,15 @@ pub(crate) fn scan_items(
                         let loc = next_loc(locs, loc_idx);
                         // `self` is `Self` (the implementor) — type it as the trait so calls on `self`
                         // resolve through the trait's CHA, exactly like an impl method's `self`.
-                        out.push(fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
+                        let mut info = fninfo(&n, &qual(&format!("{tname}::{n}")), modpath, &loc, &m.sig, block,
                             Some(&tname),
                             None, // R549 impl_generics — a trait-DEFAULT body has no impl block
                             None, // R1024 impl_self — nor a written self type
-                            include_tests, tr_gen.as_ref().unwrap_or(uses), &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                            include_tests, tr_gen.as_ref().unwrap_or(uses), &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
+                        if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
+                            info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
+                        }
+                        out.push(info);
                     }
                 }
                 uses.remove(SELF_KEY); // scoped to THIS trait, exactly as in the impl arm

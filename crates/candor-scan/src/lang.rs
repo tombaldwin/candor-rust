@@ -3729,13 +3729,13 @@ const PRIMS_MORE: [&str; 5] = ["i128", "isize", "f32", "f64", "Self"];
 /// name the module really exports; a name missing here keeps today's unresolved answer (an
 /// under-resolution, never a fabrication). Every other std/core/alloc glob is classified by exact or
 /// type-anchored rules, where a wrong attribution names nothing and charges nothing.
-const STD_FS_NAMES: [&str; 29] = [
+pub(crate) const STD_FS_NAMES: [&str; 29] = [
     "File", "OpenOptions", "Metadata", "DirEntry", "ReadDir", "Permissions", "FileType", "DirBuilder",
     "FileTimes", "canonicalize", "copy", "create_dir", "create_dir_all", "exists", "hard_link",
     "metadata", "read", "read_dir", "read_link", "read_to_string", "remove_dir", "remove_dir_all",
     "remove_file", "rename", "set_permissions", "soft_link", "symlink_metadata", "write", "TryLockError",
 ];
-const STD_ENV_NAMES: [&str; 22] = [
+pub(crate) const STD_ENV_NAMES: [&str; 22] = [
     "args", "args_os", "current_dir", "current_exe", "home_dir", "join_paths", "remove_var",
     "set_current_dir", "set_var", "split_paths", "temp_dir", "var", "var_os", "vars", "vars_os",
     "consts", "Args", "ArgsOs", "JoinPathsError", "SplitPaths", "VarError", "Vars",
