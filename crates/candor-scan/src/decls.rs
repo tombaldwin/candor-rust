@@ -189,7 +189,8 @@ pub(crate) fn scan_items(
                     Some((_, referent)) => Some(referent),
                     None => tyname.clone(),
                 };
-                let self_alias = self_name.as_deref().map(|t| crate::lang::expand_noalias(t, uses)); // VEIN A — the impl's OWN written type: its units are keyed under it, so an alias it names (`impl TzifOwned`) must not be followed here; a path through `Self` is still followed by `expand`, and the call site keeps the unfollowed reading beside it
+                // SOUNDNESS R1832 — a path-written self type binds its written path (`impl_self_binding`).
+                let self_alias = self_name.as_deref().map(|t| crate::lang::impl_self_binding(&im.self_ty, t, uses, false)); // VEIN A — the impl's OWN written type: its units are keyed under it, so an alias it names (`impl TzifOwned`) must not be followed here; a path through `Self` is still followed by `expand`, and the call site keeps the unfollowed reading beside it
                 if let Some(alias) = &self_alias {
                     let prev = uses.insert(SELF_KEY.to_string(), alias.clone());
                     debug_assert!(prev.is_none(), "`Self` is a reserved word: nothing else can bind it");

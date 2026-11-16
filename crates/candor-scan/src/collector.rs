@@ -13748,7 +13748,35 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             saved_vars.push((n.clone(), self.vars.remove(&n), self.trait_vars.remove(&n)));
             self.vars.insert(n, t);
         }
+        // SOUNDNESS R1833 — a nested fn's CALLABLE parameters (`f: F` with `F: FnOnce(&str)`, `f: fn(&str)`, `f: &dyn
+        // Fn(&str)`) are hedged exactly as a top-level fn's are (`lang::seed_fn_typed_vars` → `fn_typed_vars`), so
+        // `f(p)` in the body is the `callback:` disclosure rather than a phantom call to a free fn `f` that resolves to
+        // nothing. They were not: `{ fn app<F: FnOnce(&str)>(f: F, p: &str) { f(p) } app(dep::wr_zz, p) }` read ABSENT
+        // chained and unchained over an executed write, and so did the same shape with a LOCAL effectful fn passed in,
+        // while the identical helper written at the top level read `Unknown` (EXECUTED, rustagent-r1814 fx/z1
+        // `u_fnarg*`, rustagent-r1832 fx/g4 `n_*`). A hedge, not a resolution: the top-level helper is not resolved to
+        // its argument either. Restored on exit, as a closure's parameters are. `CANDOR_R1833_OFF=1`.
+        let mut saved_fn_typed: Vec<(String, bool)> = Vec::new();
+        if !candor_report::env::switch("CANDOR_R1833_OFF") {
+            for arg in &node.sig.inputs {
+                let syn::FnArg::Typed(pt) = arg else { continue };
+                let syn::Pat::Ident(id) = &*pt.pat else { continue };
+                if is_callable_type(&pt.ty, &self.generic_bounds, self.callable_aliases) {
+                    let n = id.ident.to_string();
+                    let was = !self.fn_typed_vars.insert(n.clone());
+                    if candor_report::env::trace("CANDOR_R1833_INSTR") {
+                        eprintln!("R1833NESTED\t{}\t{n}", node.sig.ident); // §E1 REACH COUNTER
+                    }
+                    saved_fn_typed.push((n, was));
+                }
+            }
+        }
         syn::visit::visit_item_fn(self, node);
+        for (n, was) in saved_fn_typed {
+            if !was {
+                self.fn_typed_vars.remove(&n);
+            }
+        }
         for (n, v, tv) in saved_vars {
             self.vars.remove(&n);
             self.trait_vars.remove(&n);
@@ -13795,7 +13823,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let outer_q = std::mem::take(&mut self.trait_quals);
         let outer_p = std::mem::take(&mut self.trait_quals_by_param);
         // SOUNDNESS R175 — …and `Self`, which is the one binding in this list that is NOT empty on entry.
-        let bound = crate::lang::impl_type_name(&node.self_ty).map(|t| crate::lang::expand(&t, &self.uses));
+        // SOUNDNESS R1832 — a path-written self type binds its written path (`impl_self_binding`).
+        let bound = crate::lang::impl_type_name(&node.self_ty).map(|t| crate::lang::impl_self_binding(&node.self_ty, &t, &self.uses, true));
         let outer_self = self.rebind_self(bound);
         // R570/R576(a) — a nested impl's methods are not the enclosing trait's default bodies, and its
         // own generics are already installed in `generic_bounds` above.

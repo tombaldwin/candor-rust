@@ -5463,6 +5463,52 @@ pub(crate) fn impl_type_name(ty: &syn::Type) -> Option<String> {
     None
 }
 
+/// SOUNDNESS R1832 — what `Self` names inside an impl, for the `use` map's `SELF_KEY` (R160, R175).
+///
+/// R160 bound `Self` to `expand(<the self type's LEAF>)`. That is the written type only when the leaf is how the
+/// module names it (`use dep::d::Lone; impl Go for Lone`). An impl written ON A PATH (`impl Go for dep::d::Lone`,
+/// `impl Go for d::Lone`) has a leaf no `use` binds, so `Self` expanded to the bare `Lone`, and `Self::tally_zz(self,
+/// p)` became `Lone::tally_zz`: a path naming no unit and no dependency, which reached neither the in-crate
+/// resolver nor the dependency-call block. The call vanished, and so did the unit when nothing else charged it
+/// (EXECUTED, fable-r1814merge f3 and rustagent-r1832 g2: every `Self::` position read `[]` on 0.42.0 and main,
+/// while the same body written `dep::d::Lone::tally_zz(..)` read `Env,Fs`).
+///
+/// So a multi-segment written path is expanded AS WRITTEN — exactly what the `use`-import spelling of the same
+/// impl already produced, which is R160's own stated rule (`Self::…` resolves "byte-identically to the same code
+/// written `<Type>::…`"). A one-segment self type, a qualified self type, and a non-path self type keep the leaf
+/// reading `leaf` (the caller's). `follow` selects `expand` or `expand_noalias`, matching each caller's existing
+/// choice. Switch `CANDOR_R1832_OFF=1`.
+pub(crate) fn impl_self_binding(
+    ty: &syn::Type,
+    leaf: &str,
+    uses: &HashMap<String, String>,
+    follow: bool,
+) -> String {
+    let ex = |s: &str| if follow { expand(s, uses) } else { expand_noalias(s, uses) };
+    if let syn::Type::Path(tp) = ty {
+        if tp.qself.is_none()
+            && tp.path.segments.len() >= 2
+            && tp.path.segments.last().is_some_and(|s| s.ident == leaf)
+            && !r1832_off()
+        {
+            let written = ex(&path_to_string_lc(&tp.path));
+            if candor_report::env::trace("CANDOR_R1832_INSTR") {
+                let old = ex(leaf);
+                if old != written {
+                    eprintln!("R1832SELF\t{old}\t{written}"); // §E1 REACH COUNTER — only where the binding moved
+                }
+            }
+            return written;
+        }
+    }
+    ex(leaf)
+}
+
+fn r1832_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1832_OFF"))
+}
+
 /// A NON-NOMINAL type: one with no user-definable inherent/trait impl that a local `Alias::method()` call
 /// could resolve to — an array/slice/tuple/pointer/reference/fn type, or a bare built-in primitive path
 /// (`u8`/`usize`/`bool`/…). A `type Alias = <non-nominal>` therefore can't legitimately link a

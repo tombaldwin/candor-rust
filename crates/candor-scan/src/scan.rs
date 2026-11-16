@@ -1225,23 +1225,30 @@ fn r1807_classified_key(deps_idx: &DepIndex, cr_real: &str, rel: &str) -> Option
         return Some(exact);
     }
     let t2 = tail2(rel).map(|t| format!("{cr_real}#{t}"))?;
-    let (owner, leaf) = rel.rsplit_once("::")?;
+    if tail_is_siblings(deps_idx, cr_real, rel) {
+        if candor_report::env::trace("CANDOR_R1807_INSTR") {
+            eprintln!("R1807SIBLING\t{cr_real}#{rel}\t{t2}"); // §E1 — the tail is another published type's row
+        }
+        return None;
+    }
+    Some(t2)
+}
+
+/// SOUNDNESS R1807 / R1835 — is EVERY producer row under `rel`'s 2-segment tail provably ANOTHER published type's? The written
+/// owner is a multi-segment path the producer's trusted surface publishes as a type (`types` holds declaring paths only, so a
+/// re-export spelling never qualifies), and every effectful unit of that leaf whose owner has the same leaf is owned by a
+/// DIFFERENT published type (`a::Raw::tally_zz` beside a written `c::Raw::tally_zz`). Asked only after the full qual missed.
+fn tail_is_siblings(deps_idx: &DepIndex, cr_real: &str, rel: &str) -> bool {
+    let Some((owner, leaf)) = rel.rsplit_once("::") else { return false };
     let ts = &deps_idx.surface;
     if owner.contains("::") && !ts.distrusted.contains(cr_real) && ts.types.contains_key(&format!("{cr_real}#{owner}")) {
         let owner_leaf = owner.rsplit("::").next().unwrap_or(owner);
         let mut sibs = deps_idx.members.get(leaf).into_iter().flatten()
             .filter(|(k, o)| k == cr_real && (o == owner_leaf || o.ends_with(&format!("::{owner_leaf}"))))
             .peekable();
-        if sibs.peek().is_some()
-            && sibs.all(|(_, o)| o != owner && ts.types.contains_key(&format!("{cr_real}#{o}")))
-        {
-            if candor_report::env::trace("CANDOR_R1807_INSTR") {
-                eprintln!("R1807SIBLING\t{cr_real}#{rel}\t{t2}"); // §E1 — the tail is another published type's row
-            }
-            return None;
-        }
+        return sibs.peek().is_some() && sibs.all(|(_, o)| o != owner && ts.types.contains_key(&format!("{cr_real}#{o}")));
     }
-    Some(t2)
+    false
 }
 
 /// SOUNDNESS R1605 — a BUILDER STEP on a typed `R1605_TRAITS`-crate value. The collector types `post::Entity::find()` (and
@@ -6946,13 +6953,32 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && jpath.contains("::") && (covered_owner || r1349_union_only || !r1715_extra.is_empty())
             {
                 let rel = jpath.strip_prefix(&format!("{cr}::")).unwrap_or(jpath);
+                let r1835_off = candor_report::env::switch("CANDOR_R1835_OFF");
+                let mut r1835_refused = false;
                 let key = if r1807_union {
                     match r1807_formed_key {
                         Some(k) => k.clone(),
                         None => r1807_classified_key(deps_idx, cr_real, rel),
                     }
                 } else if rel.contains("::") {
-                    tail2(rel).map(|t2| format!("{cr_real}#{t2}"))
+                    // SOUNDNESS R1835 — the UNCLASSIFIED join asks the 2-segment tail, and where every row under that tail is
+                    // provably ANOTHER published type's (`tail_is_siblings`, R1807's own rule) the tail is the sibling's row:
+                    // `sqlx_core::c::Raw::tally_zz(..)`, `tally_zz` `Tally`'s provided body on `c::Raw` (it reads the
+                    // environment and writes a file), joined `a::Raw::tally_zz` (an inherent that only writes) by `Raw::tally_zz`
+                    // and read `[Fs]`, so `deny Env` exited 0 over an executed read, on 0.42.0 and main, path and method
+                    // spelling alike (EXECUTED rustagent-r1814 fx/z1 `u_c`, fable-r1814merge fx/m3 `r3_tz_*`). Asked nothing
+                    // there, the walk below starts from the written type and reaches the trait's default (or discloses). A full
+                    // qual the producer carries keeps the tail exactly as before. `CANDOR_R1835_OFF=1`.
+                    let exact = format!("{cr_real}#{rel}");
+                    if !r1835_off && !deps_idx.by_key.contains_key(&exact) && tail_is_siblings(deps_idx, cr_real, rel) {
+                        if candor_report::env::trace("CANDOR_R1807_INSTR") || r843_probe {
+                            eprintln!("R1835SIBLING\t{}\t{exact}", f.qual); // §E1 REACH COUNTER
+                        }
+                        r1835_refused = true;
+                        None
+                    } else {
+                        tail2(rel).map(|t2| format!("{cr_real}#{t2}"))
+                    }
                 } else {
                     Some(format!("{cr_real}#{rel}"))
                 };
@@ -7418,7 +7444,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         tp.split("::").last().is_some_and(crate::lang::is_type_ident)
                             && m.chars().next().is_some_and(|ch| ch.is_ascii_lowercase() || ch == '_')
                     });
-                let r1807_refused = r1807_union && key.is_none() && r1807_formed_key.is_none();
+                let r1807_refused = (r1807_union || r1835_refused) && key.is_none() && r1807_formed_key.is_none();
                 // SOUNDNESS R1816 — a classified path call whose owner the manifest does not key (`re2::CKit` for `pub use
                 // crate::k::Kit as CKit`) walks too, from the unkeyed node, so the structural miss below can disclose it.
                 let r1807_path_walk = r1807_union && path_owner.is_some_and(|(tp, _)| {
