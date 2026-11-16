@@ -20,13 +20,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   whose self type has the shape. And `impl Tr for Alias` (`type Alias = S;`) beside a hidden `impl Tr for S`: `type`
   aliases, visible or hidden, are now followed like renames, both ways, for the self type as for the trait (the reverse
   orientation and an alias chain were introduced by stage 1 too). Also closed, silent on 0.42.0 too: the tuple and slice
-  blankets, and an alias declared in another module. And one over-hold removed (direction: a reason, not an effect): a hidden invocation's macro bodies are
-  now read from TEXTUAL scope, so tokio's `impl_traits!` in `#[cfg(unix)] mod sys` is no longer read as the body of the
+  blankets, and an alias declared in another module. And one over-hold removed (direction: a reason, not an effect): a
+  hidden invocation's macro bodies are now read from TEXTUAL scope, so tokio's `impl_traits!` in `#[cfg(unix)] mod sys` is no longer read as the body of the
   windows arm's refused `impl_traits!` in a sibling module; 9 tokio rows (`ChildStd{in,out,err}::{as_fd, as_raw_fd,
   into_owned_fd}`) lose the `macro:another cfg arm …` reason and keep `Unknown` from their callees. Cost: on 181 crates
   the check marks 113 units (palette 26, rand 36, syn 31, futures-util 8, mio 6, tokio 6) and 1 more row newly carries
-  `Unknown` (palette `hues::into_iter`: a `&`-shape blanket over `&'a Hue<T>` matches every `&`-shape impl of
-  `IntoIterator`); 0 removed, 0 concrete or disclosure lost. Kill switches `CANDOR_I1S2D_REFBLANKET_OFF`,
+  `Unknown` (palette `hues::into_iter`: a hidden `&`-shape impl over a type parameter is read as a blanket over every
+  `&` self type, so it matches every gated `&`-shape impl of the same trait — the shape key's over-hold); 0 removed, 0 concrete or disclosure lost. Kill switches `CANDOR_I1S2D_REFBLANKET_OFF`,
   `CANDOR_I1S2D_ALIAS_OFF`, `CANDOR_I1S2D_SCOPEBODY_OFF`. Cache rev 208.
 
 - ⚠ **A cfg-gated impl member whose twin is unexpanded macro text in ANOTHER module, or inside a module the hidden text
