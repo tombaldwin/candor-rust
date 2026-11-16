@@ -46,7 +46,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   - a path call through `type Cursor = u32;` to a local trait impl for `u32`, x11rb-protocol. This is disclosed.
 
   Where a crate also holds a non-std derive, an attribute macro or an unexpanded item invocation, the macro-implementor
-  hedge on its traits is kept: one of those may add an implementor the scan cannot see (R1804).
+  hedge on its traits is kept: one of those may add an implementor the scan cannot see (R1804). Every position is read:
+  items at any depth (modules, `extern` blocks and their foreign items, const, static, type alias, impl and trait items,
+  items inside fn bodies, the branches of `cfg_if!`), with `#[cfg_attr(..)]` read recursively.
+
+  A glob `use dep::*` or a `#[macro_use] extern crate dep` counts as importing any macro name, so a `#[cfg]`-gated
+  `macro_rules!` stub beside one is not bound (pre-existing on 0.42.0). Globs of `std`, `core` and `alloc` do not count.
+
+  Some macro-made impls push a trait past the SPEC §4 fan-out bound (12 implementors, R576(b)). A call site that crosses
+  it keeps its `dispatch:` hedge but no longer edges to the implementors, so their `dispatchesOn` keys leave the callers'
+  rows. A chained consumer's `deny E` over such a caller can go 1 → 0; its `deny E Unknown` does not move. Measured on
+  181 crates: 78 rows (rand 0.9.4 29, plotters 20, rand 0.10.3 15, palette 9, tracing-core 3, time-macros 2), plus 44
+  rows in wasm-bindgen 0.2.130 (cut at `rt::wbg_cast` and `convert::slices::into_abi`). Every one keeps `Unknown`.
 
   Corpus A/B main → this, 181 crates:
   - 0 concrete effects lost;
