@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev199 (rustagent-r1807): SOUNDNESS R1807 — a classified call into a chained crate now joins its row. No cached field moves
+    // (the change is in `scan_one`'s join, downstream of every cached fact); bumped so no warm entry from before the rule is
+    // replayed beside it, as the lane brief asks.
     // rev198 (rustagent-i1, Fable re-check 3, RC3-2): `i1_foreign_macros` gained the `*glob` entry (a rev197 entry lacks it and
     // would not see a parent glob's names reach a child through `use super::*`).
     // rev197 (rustagent-i1, Fable re-check 2, RC2-1/RC2-2): `i1_foreign_macros` now carries the unparsed-text reading (argument
@@ -711,7 +714,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev198/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev199/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
