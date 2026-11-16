@@ -45,7 +45,7 @@ fn scan(dir: &Path, deps: Option<&Path>, env: &[(&str, &str)]) -> (Rows, BTreeSe
     let _ = std::fs::remove_dir_all(&out);
     let mut cmd = Command::new(bin());
     cmd.arg(dir.to_string_lossy().as_ref()).arg("--out").arg(out.join("r"));
-    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_I1_OFF", "CANDOR_I1_BIND_OFF", "CANDOR_I1_RESPAN_OFF"] {
+    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_I1_SEED_DROP", "CANDOR_I1_BIND_OFF", "CANDOR_I1_RESPAN_OFF", "CANDOR_I1S2_MODUSE_OFF", "CANDOR_I1S2_XCFG_OFF"] {
         cmd.env_remove(k);
     }
     if let Some(d) = deps {
@@ -155,7 +155,8 @@ fn i1_step2_macro_made_trait_impl_is_a_unit_in_crate() {
         assert!(eff(&rows, f).is_empty(), "pure twin {f} must read pure: {:?}", rows.get(f));
     }
     assert!(units.contains("AtomicU32::load_it") && units.contains("Loc::load_it"), "{units:?}");
-    let (off, _) = scan(&d, None, &[("CANDOR_I1_OFF", "1")]);
+    // OFF arm (stage 2 deleted the allowlist and its switch): the oracle seed leaves `impl_load!` unexpanded.
+    let (off, _) = scan(&d, None, &[("CANDOR_I1_SEED_DROP", "impl_load")]);
     assert!(eff(&off, "s_ufcs").is_empty(), "OFF: s_ufcs is the R1541 silence again");
     assert_eq!(eff(&off, "s_dyn"), vec!["Unknown".to_string()], "OFF: the R828 hedge is back");
 }
@@ -185,7 +186,7 @@ fn i1_step2_chained_consumer_joins_the_macro_made_impl() {
          pub fn c_l_ufcs(a: &Loc) -> u32 { <Loc as LoadIt>::load_it(a) }\n",
     );
     let deps = root.join("deps");
-    for (arm, env) in [("on", vec![]), ("off", vec![("CANDOR_I1_OFF", "1")])] {
+    for (arm, env) in [("on", vec![]), ("off", vec![("CANDOR_I1_SEED_DROP", "impl_load")])] {
         let _ = std::fs::remove_dir_all(&deps);
         let o = Command::new(bin())
             .arg(lib.to_string_lossy().as_ref())
@@ -210,8 +211,10 @@ fn i1_step2_chained_consumer_joins_the_macro_made_impl() {
 
 /// Step 2 — ONE "expanded" fact. A fully expanded invocation no longer counts as hidden module text, so R128's
 /// `macro:` hedge on a path into that module is retired (`via_a` names a fn the module does not declare; it is the probe
-/// that the module's evidence is gone, and OFF restores the hedge). A PARTIAL expansion — it also emits a `mod`, a
-/// stage-2 kind — keeps the invocation and with it the hedge (`via_b2`).
+/// that the module's evidence is gone, and the OFF arm — the invocation left unexpanded — restores the hedge). A PARTIAL
+/// expansion — it also emits a nested `macro_rules!` definition, which stays refused until R1784's stage — keeps the
+/// invocation and with it the hedge (`via_b2`). Stage 2: an expansion that emits a MODULE is now full, and the module's
+/// fn is a unit (`via_c` is charged through it).
 #[test]
 fn i1_step2_expanded_fact_retires_module_evidence_partial_keeps_it() {
     let d = tmpdir("partial");
@@ -220,15 +223,21 @@ fn i1_step2_expanded_fact_retires_module_evidence_partial_keeps_it() {
         "partial",
         "",
         "pub mod a { macro_rules! full { () => { pub struct Fa; impl Fa { pub fn fa(&self) {} } }; } full!(); }\n\
-         pub mod b { macro_rules! part { () => { pub mod inner { pub fn hid() { EFF } } pub fn pb() {} }; } part!(); }\n\
-         pub fn via_a() { crate::a::nope() }\npub fn via_b2() { crate::b::hid2() }\n",
+         pub mod b { macro_rules! part { () => { macro_rules! inner_m { () => {} } pub fn pb() {} }; } part!(); }\n\
+         pub mod c { macro_rules! modm { () => { pub mod inner { pub fn hid() { EFF } } pub fn pc() {} }; } modm!(); }\n\
+         pub fn via_a() { crate::a::nope() }\npub fn via_b2() { crate::b::hid2() }\npub fn via_c() { crate::c::inner::hid() }\n",
     );
     let (rows, units) = scan(&d, None, &[]);
-    assert!(units.contains("a::Fa::fa") && units.contains("b::pb"), "{units:?}");
+    assert!(units.contains("a::Fa::fa") && units.contains("b::pb") && units.contains("c::inner::hid"), "{units:?}");
     assert!(!rows.contains_key("via_a"), "module `a` was expanded in full; its R128 evidence is retired: {rows:?}");
     assert_eq!(eff(&rows, "via_b2"), vec!["Unknown".to_string()], "a partial expansion keeps R128's disclosure: {rows:?}");
-    let (off, _) = scan(&d, None, &[("CANDOR_I1_OFF", "1")]);
+    assert_eq!(eff(&rows, "via_c"), vec!["Fs".to_string()], "a macro-made module is a module: {rows:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_I1_SEED_DROP", "full")]);
     assert_eq!(eff(&off, "via_a"), vec!["Unknown".to_string()], "OFF: the kept invocation is evidence again");
+    // The stage-1 arm: the module is refused, and a call into a module NESTED in the invocation's module names a module R128
+    // never marked, so it read ABSENT (R1535's class) — the silence stage 2 closes.
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_MODUSE_OFF", "1")]);
+    assert!(!eff(&off, "via_c").contains(&"Fs".to_string()), "MODUSE_OFF: the module is refused again: {off:?}");
 }
 
 /// Step 2 — a declaration the macro makes is spliced WITH its impls (Fable §7.3): the impl's units are keyed under the
@@ -591,4 +600,200 @@ fn i1_rc3_a_parent_glob_reaches_a_child_beside_a_gated_stub() {
         let (off, _) = scan(&d, None, &[("CANDOR_I1_HIDDEN_OFF", "1")]);
         assert!(eff(&off, "d").is_empty(), "{name}: OFF retires it: {off:?}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// I1 STAGE 2 — modules, `use`s and `extern crate`s an expansion yields are spliced (the allowlist is gone), the cross-file
+// cfg refusal is lifted, and a cfg-gated fn whose twin stayed in unexpanded macro text keeps a hedge.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn write_file(dir: &Path, rel: &str, body: &str) {
+    let p = dir.join(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, body.replace("EFF", W)).unwrap();
+}
+
+/// R1535 (a macro-made module named like a type that implements a local trait), R1688 (a `use` arm a macro makes, cfg
+/// paired), a glob re-export a macro makes, and an aliased std module: each read ABSENT or `[]` over a write on published
+/// 0.42.0 and main. Pure twins have unique names and stay pure; the MODUSE_OFF arm (the stage-1 refusal list) re-silences.
+#[test]
+fn i1s2_macro_made_modules_and_uses_are_spliced() {
+    let d = tmpdir("s2mod");
+    write_crate(
+        &d,
+        "s2mod",
+        "",
+        "pub trait Tr { fn act(&self); fn go(&self) { self.act() } }\nimpl Tr for bool { fn act(&self) {} }\n\
+         macro_rules! mk { ($n:ident) => { pub mod $n { pub fn go(_b: &$n) { EFF } } } }\nmk!(bool);\n\
+         pub fn r1535_e() { bool::go(&true) }\n\
+         pub mod tu { pub fn f() { EFF } }\npub mod tw { pub fn f() {} }\npub mod tq { pub fn g() {} }\n\
+         macro_rules! sys { ($m:ident) => { use crate::$m as sys; } }\n#[cfg(unix)] sys!(tu);\n#[cfg(windows)] sys!(tw);\n\
+         macro_rules! sysq { ($m:ident) => { use crate::$m as sysq_alias; } }\nsysq!(tq);\n\
+         pub fn usearm_e() { sys::f() }\npub fn usearmq_x() { sysq_alias::g() }\n\
+         pub mod impl1 { pub fn w2() { EFF } }\nmacro_rules! reexp { ($m:ident) => { pub use crate::$m::*; } }\n\
+         pub mod facade { reexp!(impl1); }\npub fn glob_e() { facade::w2() }\n\
+         macro_rules! alias_fs { () => { use std::fs as ffm; } }\nalias_fs!();\n\
+         pub fn usestd_e() { let _ = ffm::write(\"/tmp/i1-never-run\", b\"x\"); }\n",
+    );
+    let (rows, units) = scan(&d, None, &[]);
+    for f in ["r1535_e", "usearm_e", "glob_e", "usestd_e"] {
+        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f} must be charged through the macro-made item: {rows:?}");
+    }
+    assert!(eff(&rows, "usearmq_x").is_empty() && units.contains("usearmq_x"), "the pure twin stays pure: {rows:?}");
+    assert!(units.contains("bool::go") && units.contains("tq::g"), "{units:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_MODUSE_OFF", "1")]);
+    for f in ["r1535_e", "usearm_e", "usestd_e"] {
+        assert!(!eff(&off, f).contains(&"Fs".to_string()), "MODUSE_OFF: {f} is the stage-1 silence again: {off:?}");
+    }
+}
+
+/// The cross-file cfg refusal is lifted: a configuration macro defined in another file (tokio's `cfg_rt!` shape) stamps
+/// `#[cfg]` on what it wraps, and with `use`s spliced the twin arm (`cfg_unix! { pub use crate::real::leaf2; }`) stands
+/// beside the stub, so the union is whole. XCFG_OFF refuses again and the call discloses (R128) instead of charging.
+#[test]
+fn i1s2_cross_file_cfg_expansion_is_spliced() {
+    let d = tmpdir("s2xcfg");
+    write_crate(
+        &d,
+        "s2xcfg",
+        "",
+        "#[macro_use]\nmod macros;\npub mod a;\npub mod b;\npub mod real { pub fn leaf2() { EFF } }\n\
+         pub fn xcfg_e() { a::leaf() }\npub fn xcfguse_e() { b::leaf2() }\npub fn xcfgq_x() { a::leafq() }\n",
+    );
+    write_file(
+        &d,
+        "src/macros.rs",
+        "macro_rules! cfg_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         macro_rules! cfg_not_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n",
+    );
+    write_file(
+        &d,
+        "src/a.rs",
+        "cfg_unix! { pub fn leaf() { EFF } }\ncfg_not_unix! { pub fn leaf() {} }\n\
+         cfg_unix! { pub fn leafq() {} }\ncfg_not_unix! { pub fn leafq() {} }\n",
+    );
+    write_file(&d, "src/b.rs", "cfg_unix! { pub use crate::real::leaf2; }\ncfg_not_unix! { pub fn leaf2() {} }\n");
+    let (rows, units) = scan(&d, None, &[]);
+    for f in ["xcfg_e", "xcfguse_e"] {
+        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: {rows:?}");
+    }
+    assert!(eff(&rows, "xcfgq_x").is_empty() && units.contains("a::leafq"), "the pure twin stays pure: {rows:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_OFF", "1")]);
+    for f in ["xcfg_e", "xcfguse_e"] {
+        assert_eq!(eff(&off, f), vec!["Unknown".to_string()], "XCFG_OFF: {f} is R128's disclosure again: {off:?}");
+    }
+}
+
+/// The exposure the lift made, and its cover. A cfg twin whose wrapper this pass will not expand (defined twice, here
+/// with different text) stays as unexpanded text while the other arm's stub is spliced, so the call RESOLVES to the stub.
+/// Executed (fixture `s2tw`): every effectful probe wrote its file; `deny Unknown` was 1 on published 0.42.0 and main for
+/// the cross-file shapes and 0 on the lift alone. The visible stub now carries a hedge with a true reason: free fn
+/// (cross-file and same-file), a `use` arm, an impl-item arm and a whole hidden `impl` arm. Must NOT hold: a once-defined
+/// pair (both arms spliced, `twctl_e` charged), and an UNGATED fn whose name the unexpanded text also writes.
+#[test]
+fn i1s2_a_hidden_cfg_twin_keeps_a_hedge() {
+    let d = tmpdir("s2tw");
+    write_crate(
+        &d,
+        "s2tw",
+        "[features]\nx = []\n",
+        "#[macro_use]\nmod macros;\npub mod a;\npub mod b;\npub mod d;\npub mod e;\npub mod f;\n\
+         pub trait Go { fn go(&self); }\npub struct PureGo;\nimpl Go for PureGo { fn go(&self) {} }\n\
+         pub fn tw_e() { a::leaf() }\npub fn twctl_e() { b::leafb() }\npub fn twii_e(s: &d::S) { s.m() }\n\
+         pub fn twuse_e() { e::leafe() }\npub fn twty_e(s: &f::S2) { s.go() }\npub fn ungated_x() { a::plain() }\n\
+         pub mod c {\n\
+         #[cfg(feature = \"x\")]\nmacro_rules! s_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         #[cfg(not(feature = \"x\"))]\nmacro_rules! s_unix { ($($it:item)*) => { $( #[cfg(unix)] $it )* } }\n\
+         macro_rules! s_not_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n\
+         s_unix! { pub fn leafc() { EFF } }\ns_not_unix! { pub fn leafc() {} }\n}\npub fn twsame_e() { c::leafc() }\n",
+    );
+    write_file(
+        &d,
+        "src/macros.rs",
+        "#[cfg(feature = \"x\")]\nmacro_rules! cfg_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         #[cfg(not(feature = \"x\"))]\nmacro_rules! cfg_unix { ($($it:item)*) => { $( #[cfg(unix)] $it )* } }\n\
+         macro_rules! cfg_not_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n\
+         macro_rules! on_unix { ($($i:item)*) => { $( #[cfg(unix)] $i )* } }\n\
+         macro_rules! off_unix { ($($i:item)*) => { $( #[cfg(not(unix))] $i )* } }\n\
+         #[cfg(feature = \"x\")]\nmacro_rules! ii_unix { ($($t:tt)*) => { #[cfg(unix)] $($t)* } }\n\
+         #[cfg(not(feature = \"x\"))]\nmacro_rules! ii_unix { ($($tt:tt)*) => { #[cfg(unix)] $($tt)* } }\n\
+         macro_rules! ii_not_unix { ($($t:tt)*) => { #[cfg(not(unix))] $($t)* } }\n",
+    );
+    write_file(
+        &d,
+        "src/a.rs",
+        "cfg_unix! { pub fn leaf() { EFF } pub fn plain() { EFF } }\ncfg_not_unix! { pub fn leaf() {} }\npub fn plain() {}\n",
+    );
+    write_file(&d, "src/b.rs", "on_unix! { pub fn leafb() { EFF } }\noff_unix! { pub fn leafb() {} }\n");
+    write_file(
+        &d,
+        "src/d.rs",
+        "pub struct S;\nimpl S {\n    ii_unix! { pub fn m(&self) { EFF } }\n    ii_not_unix! { pub fn m(&self) {} }\n}\n",
+    );
+    write_file(
+        &d,
+        "src/e.rs",
+        "pub mod real { pub fn leafe() { EFF } }\ncfg_unix! { pub use self::real::leafe; }\ncfg_not_unix! { pub fn leafe() {} }\n",
+    );
+    write_file(
+        &d,
+        "src/f.rs",
+        "pub struct S2;\ncfg_unix! { impl crate::Go for S2 { fn go(&self) { EFF } } }\n\
+         cfg_not_unix! { impl crate::Go for S2 { fn go(&self) {} } }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    for f in ["tw_e", "twsame_e", "twii_e", "twuse_e", "twty_e"] {
+        assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden arm: {rows:?}");
+    }
+    assert_eq!(eff(&rows, "twctl_e"), vec!["Fs".to_string()], "a once-defined pair is spliced whole and charged: {rows:?}");
+    assert!(!eff(&rows, "ungated_x").contains(&"Unknown".to_string()), "an ungated fn is the only one: {rows:?}");
+    assert_eq!(rows["a::leaf"].1, vec!["macro:another cfg arm of this fn is hidden by an unexpanded macro".to_string()]);
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
+    for f in ["tw_e", "twsame_e", "twii_e", "twuse_e", "twty_e"] {
+        assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to the stub alone: {off:?}");
+    }
+}
+
+/// Stage 2 exposed a pre-existing resolver hole: `use ::dep::prelude::*;` (a LEADING `::`, the extern crate) beside a module
+/// the crate also names `dep` resolved the glob against the LOCAL module, so a bare call through it named nothing and lost
+/// `invisible:[dep]`. time-0.3.55's benchmarks declare `mod rand09;` inside `mods![..]`, which stage 2 splices, and 129 rows
+/// lost `invisible:[rand09]` that way. The hand-written shape below read ABSENT on main. LCGLOB_OFF restores that reading.
+#[test]
+fn i1s2_a_leading_colon_glob_names_the_extern_crate() {
+    let root = tmpdir("s2lc");
+    let dep = root.join("dep1");
+    let app = root.join("app");
+    write_crate(&dep, "dep1", "", "pub mod prelude { pub fn g() { EFF } }\n");
+    write_crate(
+        &app,
+        "app",
+        "[dependencies]\ndep1 = { path = \"../dep1\" }\n",
+        "mod dep1;\npub fn lc_glob() { use ::dep1::prelude::*; g() }\n",
+    );
+    write_file(&app, "src/dep1.rs", "pub fn local() {}\n");
+    let inv = |dir: &Path, env: &[(&str, &str)]| -> Vec<String> {
+        let out = dir.join("out2");
+        let _ = std::fs::remove_dir_all(&out);
+        let mut cmd = Command::new(bin());
+        cmd.arg(dir.to_string_lossy().as_ref()).arg("--out").arg(out.join("r")).env_remove("CANDOR_DEPS");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        assert!(cmd.output().unwrap().status.code().is_some_and(|c| c == 0 || c == 1));
+        for e in std::fs::read_dir(&out).unwrap() {
+            let p = e.unwrap().path();
+            let n = p.file_name().unwrap().to_string_lossy().to_string();
+            if n.ends_with(".scan.json") {
+                let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+                for f in v["functions"].as_array().unwrap() {
+                    if f["fn"] == "lc_glob" {
+                        return f["invisible"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                    }
+                }
+            }
+        }
+        Vec::new()
+    };
+    assert_eq!(inv(&app, &[]), vec!["dep1".to_string()], "the glob names the extern crate");
+    assert!(inv(&app, &[("CANDOR_I1S2_LCGLOB_OFF", "1")]).is_empty(), "LCGLOB_OFF: the local module answers, nothing named");
 }

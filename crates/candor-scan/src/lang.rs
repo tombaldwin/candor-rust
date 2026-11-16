@@ -3811,17 +3811,19 @@ pub(crate) fn glob_candidates_ext(
     let mut external: Vec<String> = Vec::new();
     for g in globs.split('\u{1}').filter(|g| !g.is_empty()) {
         let groot = g.split("::").next().unwrap_or(g);
-        if matches!(groot, "crate" | "self" | "super")
+        // I1 stage 2 — `use ::dep::x::*;` names the extern crate `dep` even beside a module `dep` (`collect_use_item`).
+        let extern_lc = uses.get(LCGLOB_KEY).is_some_and(|l| l.split('\u{1}').any(|x| x == g));
+        if !extern_lc && (matches!(groot, "crate" | "self" | "super")
             || module_declares(uses, groot) == Some(true)
             || uses.get(groot).is_some_and(|v| {
                 v.starts_with("crate::") || v.starts_with("self::") || v.starts_with("super::")
-            })
+            }))
         {
             local += 1; // a crate-local glob: its names are local, and `by_leaf`/`by_tail2` own them
             continue;
         }
         // A glob whose head is bound by a `use` (`use x::prelude; use prelude::*;`) is spelled through it.
-        let g = match uses.get(groot) {
+        let g = match uses.get(groot).filter(|_| !extern_lc) {
             Some(v) if !v.is_empty() => alias_join(v, &g.split("::").skip(1).collect::<Vec<_>>()),
             _ => g.to_string(),
         };
@@ -6523,6 +6525,53 @@ fn note_use_collision(
 /// `seen` is the set of names ALREADY BOUND BY THIS ITEM LIST — the arm-set test. See
 /// `note_use_collision`'s R370 paragraph. It is per-SCOPE, so it is threaded through the `Path`/`Group`
 /// recursion and accumulated across the sibling `use` items of one list.
+/// SOUNDNESS R1541 / I1 stage 2 — `collect_use` for a whole `use` ITEM, keeping a LEADING `::` on the globs it records.
+/// `use ::dep::prelude::*;` names the extern crate `dep` even where the crate also has a module `dep`; `collect_use` sees
+/// only the tree, so the glob was stored as `dep::prelude` and a bare call through it resolved against the LOCAL module,
+/// naming nothing — the `invisible:[dep]` disclosure was lost (hand-written: `mod dep1;` + `use ::dep1::prelude::*; g()`
+/// read ABSENT on main). Stage 2 exposed it: time's benchmarks declare `mod rand09;` inside `mods![..]`, which is now
+/// spliced, and `shuffle`'s `use ::rand09::prelude::*;` lost `invisible:[rand09]` on 129 rows. The glob is now stored
+/// `::dep::prelude`, which `expand` already reads as an extern path (R1697). `CANDOR_I1S2_LCGLOB_OFF=1` restores the old
+/// spelling.
+pub(crate) fn collect_use_item(
+    u: &syn::ItemUse,
+    out: &mut HashMap<String, String>,
+    alts: &mut HashMap<String, Vec<String>>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    if u.leading_colon.is_none() || candor_report::env::switch("CANDOR_I1S2_LCGLOB_OFF") {
+        collect_use(&u.tree, String::new(), out, alts, seen);
+        return;
+    }
+    collect_use(&u.tree, String::new(), out, alts, seen);
+    // Every glob this item records, spelled as `collect_use` stored it, is listed under `LCGLOB_KEY`.
+    fn globs(t: &syn::UseTree, prefix: String, v: &mut Vec<String>) {
+        let join = |p: &str, s: &str| if p.is_empty() { s.to_string() } else { format!("{p}::{s}") };
+        match t {
+            syn::UseTree::Path(p) => globs(&p.tree, join(&prefix, &p.ident.to_string()), v),
+            syn::UseTree::Group(g) => g.items.iter().for_each(|i| globs(i, prefix.clone(), v)),
+            syn::UseTree::Glob(_) if !prefix.is_empty() => v.push(prefix),
+            _ => {}
+        }
+    }
+    let mut v = Vec::new();
+    globs(&u.tree, String::new(), &mut v);
+    if !v.is_empty() {
+        let e = out.entry(LCGLOB_KEY.to_string()).or_default();
+        for g in v {
+            if !e.split('\u{1}').any(|x| x == g) {
+                if !e.is_empty() {
+                    e.push('\u{1}');
+                }
+                e.push_str(&g);
+            }
+        }
+    }
+}
+
+/// I1 stage 2 — the globs a `use ::…::*` (leading `::`) recorded: their head is the extern crate, never a local module.
+pub(crate) const LCGLOB_KEY: &str = "*lcglobs";
+
 pub(crate) fn collect_use(
     tree: &syn::UseTree,
     prefix: String,
@@ -6965,7 +7014,7 @@ pub(crate) fn collect_item_uses(
                     collect_use(&u.tree, String::new(), &mut scratch, &mut a2, &mut s2);
                     ungated.extend(scratch.into_keys());
                 }
-                collect_use(&u.tree, String::new(), out, alts, &mut seen);
+                collect_use_item(u, out, alts, &mut seen);
             } else if (include_tests || !is_cfg_test(&u.attrs)) && is_cfg_inactive(&u.attrs) {
                 // R982 — kept aside, under `CFG_OFF_USE_PREFIX`, for `expand` inside a `CfgOffScope`.
                 let mut a2 = HashMap::new();
@@ -7706,7 +7755,7 @@ pub(crate) fn collect_macro_hidden_decls(
                             // I1 stage 1 — a `macro_rules!` BODY's names are tagged with the macro, so the merge can retire
                             // them once every invocation of it was expanded (`cache::retire_expanded`); an invocation's own
                             // tokens are evidence only while it stays unexpanded, which is all an `Item::Macro` here is.
-                            Some(name) if !candor_report::env::switch("CANDOR_I1_OFF") => {
+                            Some(name) => {
                                 tagged.insert(format!("{name}{I1_TAG_SEP}FN{I1_TAG_SEP}{t}"));
                             }
                             _ => {
@@ -14211,11 +14260,11 @@ pub(crate) fn collect_opaque_trait_impls(
                 let mut found: Vec<(syn::Path, Vec<String>)> = Vec::new();
                 macro_token_impls(mm.mac.tokens.clone(), &mut found);
                 // I1 stage 1 — tagged with the macro's name, so the merge retires the hedge once every invocation of it
-                // was expanded (its impls then stand as units; `cache::retire_expanded`). `CANDOR_I1_OFF` records as before.
+                // was expanded (its impls then stand as units; `cache::retire_expanded`).
                 let name = mm.ident.as_ref().map(|i| i.to_string());
                 for (tr, members) in found {
                     match &name {
-                        Some(n) if !candor_report::env::switch("CANDOR_I1_OFF") => {
+                        Some(n) => {
                             let (mut l, mut f) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
                             record(&tr, &members, uses, &mut l, &mut f, "macro");
                             tagged.extend(l.into_iter().map(|k| format!("{n}{I1_TAG_SEP}L{I1_TAG_SEP}{k}")));

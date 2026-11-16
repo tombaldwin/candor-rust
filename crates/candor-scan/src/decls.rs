@@ -39,7 +39,7 @@ impl<'ast, 'a> Visit<'ast> for LocalUseCollector<'a> {
         // coverage — R373. `alts` is a throwaway rather than a parameter so this cannot silently
         // start feeding a consumer again without someone changing this line.
         let mut unused_alts: HashMap<String, Vec<String>> = HashMap::new();
-        collect_use(&u.tree, String::new(), self.out, &mut unused_alts, &mut self.seen);
+        crate::lang::collect_use_item(u, self.out, &mut unused_alts, &mut self.seen);
         // A `use` tree contains no further `use` items — no need to recurse into it.
     }
     // SOUNDNESS R1710 — a body-local `extern crate X as Y;` binds `Y` in the body exactly as a body-local `use X as Y;` does
@@ -149,7 +149,11 @@ pub(crate) fn scan_items(
                 }
                 let n = f.sig.ident.to_string();
                 let loc = next_loc(locs, loc_idx);
-                out.push(fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant));
+                let mut info = fninfo(&n, &qual(&n), modpath, &loc, &f.sig, &f.block, None, None, None, include_tests, uses, &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
+                if f.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
+                    info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
+                }
+                out.push(info);
             }
             syn::Item::Impl(im) => {
                 if !include_tests && is_cfg_test(&im.attrs) {
@@ -266,6 +270,9 @@ pub(crate) fn scan_items(
                         info.derive_synth = crate::model::is_derive_synth(&im.attrs);
                         info.mbe_prim_op = mbe_prim.is_some(); // R1157
                         info.mbe_op = im.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_OP_ATTR)); // R1180
+                        if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
+                            info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
+                        }
                         // SOUNDNESS R1537 (c) — which kind of block declared the unit, for the co-path split in `scan.rs`.
                         if mbe_prim.is_none() && tyname.is_some() {
                             match &im.trait_ {

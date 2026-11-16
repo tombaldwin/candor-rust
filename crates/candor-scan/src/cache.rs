@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev200 (rustagent-i1s2, I1 stage 2): modules, `use`s and `extern crate`s an expansion yields are SPLICED, a cross-file
+    // expansion carrying `#[cfg]` is no longer refused, and a cfg-gated fn beside an unexpanded twin carries a refusal in its
+    // cached `FnInfo` (`mbe::mark_hidden_twins`). A rev198 entry holds the stage-1 decls and none of the refusals.
     // rev199 (rustagent-r1807): SOUNDNESS R1807 — a classified call into a chained crate now joins its row. No cached field moves
     // (the change is in `scan_one`'s join, downstream of every cached fact); bumped so no warm entry from before the rule is
     // replayed beside it, as the lane brief asks.
@@ -714,7 +717,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev199/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev200/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -135,7 +135,7 @@ fn a_macro_made_impl_on_a_std_type_discloses_macro() {
         pub fn zz(a: &AtomicUsize) -> usize { a.load_it() }\n");
     let on = scan(&d, None, false);
     // I1 stage 1 (R1541): the macro-made impl is EXPANDED now, so the std-receiver call resolves to its unit and is charged
-    // (it was `macro:` before). `tests/i1_macro_units.rs` pins the `CANDOR_I1_OFF` arm.
+    // (it was `macro:` before). `tests/i1_macro_units.rs` pins the arm where the invocation is left unexpanded (`CANDOR_I1_SEED_DROP`).
     assert_eq!(inferred(&on, "zz"), vec!["Fs".to_string()], "{:?}", on.get("zz"));
     assert!(inferred(&scan(&d, None, true), "zz").is_empty());
     let _ = std::fs::remove_dir_all(&d);

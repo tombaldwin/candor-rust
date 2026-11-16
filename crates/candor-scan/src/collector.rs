@@ -13983,7 +13983,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // bindings the code cannot reach.
         let mut alts = std::mem::take(&mut self.use_alts);
         let mut seen = std::mem::take(&mut self.local_use_seen);
-        crate::lang::collect_use(&node.tree, String::new(), &mut self.local_uses, &mut alts, &mut seen);
+        crate::lang::collect_use_item(node, &mut self.local_uses, &mut alts, &mut seen);
         self.local_use_seen = seen;
         self.use_alts = alts;
         syn::visit::visit_item_use(self, node);

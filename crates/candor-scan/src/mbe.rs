@@ -649,6 +649,10 @@ struct Ctx<'x> {
     scope: HashMap<String, Option<String>>,
     /// I1 step 1 — names a non-crate-rooted `use` in this file binds (see `local_name`).
     imported: std::collections::HashSet<String>,
+    /// I1 stage 2 — the invocations kept beside a PARTIAL splice, at any depth (a partial `cfg_trace!` nested in `cfg_rt!`
+    /// is kept in the OUTER output): their spliced items stand in the module, so their text is not hidden-twin evidence
+    /// (`mark_hidden_twins`); what they did not splice is kept as its own item or marker.
+    partial: std::collections::HashSet<String>,
 }
 
 /// I1 step 1 — every name a `use` item of this file binds through a path that is NOT rooted at `crate`/`self`/`super`
@@ -822,15 +826,23 @@ impl Ctx<'_> {
         // did not, so `crate::trace::trace_leaf()` resolved to the stub alone — one cfg arm where the engine
         // answers with the UNION (SPEC §4). Measured on the first cut's corpus A/B: tokio lost `Log` on 86
         // rows that way. Refused, the invocation reads exactly as before (R128's `macro:` evidence).
-        if cross_file
+        //
+        // I1 stage 2 — LIFTED. The refusal existed because the splice dropped `use`s: with modules and `use`s spliced, the
+        // twin arm (`cfg_taskdump! { use …::trace_leaf; }`) stands beside the stub and the union is whole, exactly as for a
+        // hand-written pair. palette's `impl_eq!` (`#[cfg(feature = "approx")]` on what it stamps) was the measured cost of
+        // keeping it. `CANDOR_I1S2_XCFG_OFF=1` refuses again.
+        let xcfg = cross_file
             && file.items.iter().any(|it| {
                 crate::lang::item_attrs(it).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
-            })
-        {
+            });
+        if xcfg && candor_report::env::switch("CANDOR_I1S2_XCFG_OFF") {
             if candor_report::env::trace("CANDOR_R1004_INSTR") {
                 eprintln!("R1004XCFG\t{name}");
             }
             return None;
+        }
+        if xcfg && candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("I1S2XCFG\t{name}"); // §E1 REACH COUNTER, on the CHANGED branch only
         }
         self.budget -= 1;
         self.splice(&mut file.items, depth + 1);
@@ -854,12 +866,13 @@ impl Ctx<'_> {
         })
         .parse2(ts)
         .ok()?;
-        if cross_file
-            && gen.iter().any(|ii| {
-                impl_item_attrs(ii).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
-            })
-        {
-            return None;
+        let xcfg = cross_file
+            && gen.iter().any(|ii| impl_item_attrs(ii).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr")));
+        if xcfg && candor_report::env::switch("CANDOR_I1S2_XCFG_OFF") {
+            return None; // I1 stage 2 — lifted, as for item position
+        }
+        if xcfg && candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("I1S2XCFG\timpl-item"); // §E1 REACH COUNTER, on the CHANGED branch only
         }
         self.budget -= 1;
         self.splice_impl_items(&mut gen, depth + 1);
@@ -952,54 +965,44 @@ impl Ctx<'_> {
                             syn::Item::Trait(t) => mbe_trait_body_marker(t, &m.attrs),
                             _ => None,
                         }));
-                        // FUNCTIONS ONLY — free `fn`s and `extern` blocks, which is what a call BY PATH
-                        // reaches and what R1004 is. A macro-generated `impl`/`struct`/`mod` stays
-                        // unindexed exactly as before: expanding impls RESOLVES dispatch onto their
-                        // methods, and on wasm-bindgen that removed a `dispatch:` hedge from
-                        // `ScopedClosure::once` whose real reach (`Closure::wrap_maybe_aborting`, through
-                        // `type Closure<T> = ScopedClosure<'static, T>`) has no edge — a pre-existing
-                        // dropped edge the hedge was standing in front of. Owed separately.
-                        //
-                        // The INVOCATION STAYS, so R128's "this module holds hidden items" evidence is
-                        // unchanged for whatever the expansion declared besides functions.
-                        // SOUNDNESS R1541 / I1 stage 1 — EXPAND, DO NOT FILTER. Every item the expansion parses as is
-                        // spliced beside the invocation, as rustc places it, EXCEPT an explicit refusal list (`i1_refused`):
-                        // modules, `use`s and `extern crate`s (stage 2, where the cfg-arm union lives), a nested
-                        // invocation or `macro_rules!` this pass could not expand (R1784), and traits (the R1748/R1754
-                        // markers above stand for them). The allowlist this replaces kept free fns, inherent impls and
-                        // operator impls only, so a macro-made TRAIT impl had no unit (R1541: `<AtomicU32 as LoadIt>::load_it`
-                        // read pure over a write) and a macro-made struct left its impls keyed to no declared type — a
-                        // same-leaf twin elsewhere could claim them (R1678's class), which is why declarations ship WITH
-                        // impls. `CANDOR_I1_OFF=1` restores the allowlist and keeps every invocation.
-                        let i1_on = !candor_report::env::switch("CANDOR_I1_OFF");
+                        // SOUNDNESS R1541 / I1 — EXPAND, DO NOT FILTER. Every item the expansion parses as is spliced beside
+                        // the invocation, as rustc places it, EXCEPT the refusal list (`i1_refused`): a nested invocation or
+                        // `macro_rules!` this pass could not expand (R1784), and traits (the R1748/R1754 markers above stand
+                        // for them). This replaced an ALLOWLIST that grew one item kind per row (free fns, then inherent impls,
+                        // then operator impls — R1004 → R1146 → R1157 → R1180 → R1748 → R1754): a macro-made TRAIT impl had no
+                        // unit (R1541: `<AtomicU32 as LoadIt>::load_it` read pure over a write), a macro-made struct left its
+                        // impls keyed to no declared type (R1678's class), and a macro-made module or `use` left the names it
+                        // binds unread (R1535, R1688). Stage 1 spliced impls and declarations; stage 2 deleted the allowlist
+                        // and splices modules, `use`s and `extern crate`s too.
                         let seed_name = m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
                         let seed_body = !seed_name.is_empty()
                             && candor_report::env::switch_value(
                                 "CANDOR_I1_SEED_BODY",
                                 candor_report::env::Selects::AnyOf(&[seed_name.as_str()]),
                             );
-                        let full = i1_on && gen.iter().all(|g| !i1_refused(g) || matches!(g, syn::Item::Trait(_)));
+                        let full = gen.iter().all(|g| !i1_refused(g) || matches!(g, syn::Item::Trait(_)));
+                        if candor_report::env::trace("CANDOR_I1_INSTR") {
+                            for g in &gen {
+                                let k = match g {
+                                    syn::Item::Mod(_) => "mod",
+                                    syn::Item::Use(_) => "use",
+                                    syn::Item::ExternCrate(_) => "extern-crate",
+                                    _ => continue,
+                                };
+                                if !i1_refused(g) {
+                                    eprintln!("I1S2SPLICE\t{k}\t{seed_name}"); // §E1 REACH COUNTER, on the CHANGED branch only
+                                }
+                            }
+                        }
+                        // A nested invocation the expansion could not itself expand is KEPT in the output (Fable §1.3): it is
+                        // still unexpanded program text, so R128 must see it as module evidence and `expansion_facts` must
+                        // count its macro as invoked-unexpanded — dropped, it made the crate-wide retirement treat
+                        // `__impl_public_bitflags` (bitflags 2.9.4, invoked by path inside `__impl_internal_bitflags`) as
+                        // fully expanded and retire the `fn bits` evidence a `.bits()` call still needed:
+                        // `parser::from_str_truncate` lost its `Flags::bits` key.
                         let mut fns: Vec<syn::Item> = gen
                             .into_iter()
-                            .filter(|g| {
-                                if i1_on {
-                                    // A nested invocation the expansion could not itself expand is KEPT in the output (Fable
-                                    // §1.3): it is still unexpanded program text, so R128 must see it as module evidence and
-                                    // `expansion_facts` must count its macro as invoked-unexpanded — dropped, it made the
-                                    // crate-wide retirement treat `__impl_public_bitflags` (bitflags 2.9.4, invoked by path
-                                    // inside `__impl_internal_bitflags`) as fully expanded and retire the `fn bits` evidence a
-                                    // `.bits()` call still needed: `parser::from_str_truncate` lost its `Flags::bits` key.
-                                    return !i1_refused(g) || matches!(g, syn::Item::Macro(n) if n.ident.is_none());
-                                }
-                                match g {
-                                    syn::Item::Fn(_) | syn::Item::ForeignMod(_) => true,
-                                    // SOUNDNESS R1004 (impl residual) — an INHERENT impl (the pre-I1 allowlist).
-                                    syn::Item::Impl(i) => {
-                                        i.trait_.is_none() || operator_trait_impl(i) || prim_operator_impl(i)
-                                    }
-                                    _ => false,
-                                }
-                            })
+                            .filter(|g| !i1_refused(g) || matches!(g, syn::Item::Macro(n) if n.ident.is_none()))
                             .collect();
                         if !fns.is_empty() && candor_report::env::trace("CANDOR_R1004_INSTR") {
                             eprintln!(
@@ -1080,12 +1083,13 @@ impl Ctx<'_> {
                                 Err(_) => out.push(it),
                             }
                         } else {
-                            if i1_on && candor_report::env::trace("CANDOR_I1_INSTR") {
+                            if candor_report::env::trace("CANDOR_I1_INSTR") {
                                 eprintln!(
                                     "I1PARTIAL\t{}",
                                     m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default()
                                 ); // §E1 REACH COUNTER
                             }
+                            self.partial.insert(invocation_key(&m.mac));
                             out.push(it);
                         }
                         out.extend(fns);
@@ -1110,17 +1114,159 @@ impl Ctx<'_> {
             }
             out.push(it);
         }
+        if !candor_report::env::switch("CANDOR_I1S2_TWIN_OFF") {
+            mark_hidden_twins(&mut out, &self.partial);
+        }
         *items = out;
     }
 }
 
+fn invocation_key(mac: &syn::Macro) -> String {
+    let p: Vec<String> = mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
+    format!("{}!{}", p.join("::"), mac.tokens)
+}
+
+/// The names unexpanded macro TEXT may define: every `fn <name>`, and every leaf a `use … ;` run binds (an over-read: every
+/// ident of the run but the path keywords — a name it does not bind only costs a hedge).
+fn hidden_names(ts: &TokenStream, out: &mut std::collections::HashSet<String>) {
+    let mut prev_fn = false;
+    let mut in_use = false;
+    for tt in ts.clone() {
+        match &tt {
+            TokenTree::Group(g) => {
+                if in_use {
+                    hidden_use_idents(&g.stream(), out);
+                } else {
+                    hidden_names(&g.stream(), out);
+                }
+                prev_fn = false;
+            }
+            TokenTree::Ident(i) => {
+                let s = i.to_string();
+                if prev_fn {
+                    out.insert(s.trim_start_matches("r#").to_string());
+                }
+                if in_use && !matches!(s.as_str(), "crate" | "self" | "super" | "as" | "pub" | "in") {
+                    out.insert(s.clone());
+                }
+                if s == "use" {
+                    in_use = true;
+                }
+                prev_fn = s == "fn";
+            }
+            TokenTree::Punct(p) => {
+                if p.as_char() == ';' {
+                    in_use = false;
+                }
+                prev_fn = false;
+            }
+            TokenTree::Literal(_) => prev_fn = false,
+        }
+    }
+}
+fn hidden_use_idents(ts: &TokenStream, out: &mut std::collections::HashSet<String>) {
+    for tt in ts.clone() {
+        match &tt {
+            TokenTree::Group(g) => hidden_use_idents(&g.stream(), out),
+            TokenTree::Ident(i) => {
+                let s = i.to_string();
+                if !matches!(s.as_str(), "crate" | "self" | "super" | "as" | "pub" | "in") {
+                    out.insert(s);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R1541 / I1 stage 2 — A CFG ARM THAT STAYED UNEXPANDED BESIDE ONE THAT DID NOT.
+///
+/// THE EXPOSURE. Stage 2 lifts the cross-file cfg refusal, so `cfg_not_unix! { pub fn leaf() {} }` (a stub) is spliced. If
+/// its twin `cfg_unix! { pub fn leaf() { <write> } }` stays UNEXPANDED (its wrapper is defined twice, the budget ran out,
+/// the arms do not match, the name is imported, it is a dependency's macro…), `a::leaf()` RESOLVES to the stub and reads
+/// pure over a program that writes. Before the lift BOTH invocations were refused, the name resolved to nothing and R128
+/// disclosed `macro:`; the correct lift removed that cover and nothing replaced it (executed fixture `s2tw`: `deny Unknown`
+/// 1 on published 0.42.0 and main, 0 on the lift alone). The same-file twin was silent on every arm, pre-existing.
+///
+/// THE COVER, at the lost site: a `fn` this module (or impl block's module) can see that carries a `#[cfg]`, whose name the
+/// module's unexpanded item- or impl-item-position macro text also defines (`fn <name>`, or a `use` leaf), is marked; Pass A
+/// records the mark as a refusal, so the unit itself carries `Unknown` with a true reason and every caller — chained ones
+/// included — inherits it. An UNGATED visible `fn` is not marked: a second compiled definition of the name in one module is a
+/// rustc error, so an ungated one is the only one. `CANDOR_I1S2_TWIN_OFF=1` drops the mark.
+fn mark_hidden_twins(out: &mut [syn::Item], partial: &std::collections::HashSet<String>) {
+    let mut free: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut methods: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for it in out.iter() {
+        match it {
+            syn::Item::Macro(m)
+                if m.ident.is_none() && !m.mac.path.is_ident("macro_rules") && !partial.contains(&invocation_key(&m.mac)) =>
+            {
+                hidden_names(&m.mac.tokens, &mut free);
+            }
+            syn::Item::Impl(im) => {
+                for ii in &im.items {
+                    if let syn::ImplItem::Macro(m) = ii {
+                        hidden_names(&m.mac.tokens, &mut methods);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if free.is_empty() && methods.is_empty() {
+        return;
+    }
+    let gated = |a: &[syn::Attribute]| a.iter().any(|x| x.path().is_ident("cfg") || x.path().is_ident("cfg_attr"));
+    let mark = |attrs: &mut Vec<syn::Attribute>, n: &str| {
+        if !attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
+            let id = syn::Ident::new(crate::model::MBE_TWIN_ATTR, proc_macro2::Span::call_site());
+            attrs.push(syn::parse_quote!(#[#id]));
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("I1S2TWIN\t{n}"); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+        }
+    };
+    for it in out.iter_mut() {
+        match it {
+            syn::Item::Fn(f) if free.contains(&f.sig.ident.to_string()) && gated(&f.attrs) => {
+                let n = f.sig.ident.to_string();
+                mark(&mut f.attrs, &n);
+            }
+            // A method's twin may be hidden in an impl-item invocation of an impl block of this module, or in an item-position
+            // invocation that writes a whole `impl` block (`cfg_unix! { impl Go for S { fn go(..) .. } }`).
+            syn::Item::Impl(im) => {
+                let block_gated = gated(&im.attrs);
+                for ii in im.items.iter_mut() {
+                    if let syn::ImplItem::Fn(f) = ii {
+                        let n = f.sig.ident.to_string();
+                        if (methods.contains(&n) || free.contains(&n)) && (block_gated || gated(&f.attrs)) {
+                            let n = f.sig.ident.to_string();
+                            mark(&mut f.attrs, &n);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// I1 stage 1 — the explicit REFUSAL list for a spliced expansion (the denylist that replaced the R1004 allowlist).
+///
+/// I1 stage 2 — modules, `use`s and `extern crate`s are SPLICED: the expansion is the program rustc compiles, so a module a
+/// macro makes (`mk!(bool)` → `pub mod bool { pub fn go() .. }`, R1535) is a module, and a `use` it makes binds a name
+/// (`sys!(tu)` → `use crate::tu as sys;`, R1688) exactly as the hand-written item does. What stays refused is what this pass
+/// cannot stand behind: a nested invocation it could not expand (kept as written, so it remains evidence), a nested
+/// `macro_rules!` definition (R1784, stage 3), and a trait (the R1748/R1754 markers stand for it). `CANDOR_I1S2_MODUSE_OFF=1`
+/// refuses modules, `use`s and `extern crate`s again (the stage-1 list).
 fn i1_refused(g: &syn::Item) -> bool {
-    matches!(
-        g,
-        syn::Item::Mod(_) | syn::Item::Use(_) | syn::Item::ExternCrate(_) | syn::Item::Macro(_) | syn::Item::Trait(_)
-            | syn::Item::TraitAlias(_)
-    )
+    match g {
+        syn::Item::Macro(_) | syn::Item::Trait(_) | syn::Item::TraitAlias(_) => true,
+        syn::Item::Mod(_) | syn::Item::Use(_) | syn::Item::ExternCrate(_) => {
+            candor_report::env::switch("CANDOR_I1S2_MODUSE_OFF")
+        }
+        _ => false,
+    }
 }
 
 /// I1 stage 1 — the marker that stands where a fully expanded invocation was. Read by `mbe_expanded_of`.
@@ -1184,6 +1330,12 @@ fn empty_bodies(g: &mut syn::Item) {
                 if let syn::ImplItem::Fn(f) = ii {
                     f.block.stmts.clear();
                 }
+            }
+        }
+        // I1 stage 2 — a spliced MODULE's items too, or the seed could not reach a stage-2 shape.
+        syn::Item::Mod(m) => {
+            if let Some((_, inner)) = &mut m.content {
+                inner.iter_mut().for_each(empty_bodies);
             }
         }
         _ => {}
@@ -1549,6 +1701,8 @@ const BUILTIN: &[&str] = &[
     "no_coverage", "doc_cfg", "feature", "rustc_diagnostic_item", "const_trait", "fundamental", "no_std", "no_implicit_prelude",
     "crate_type", "crate_name", "recursion_limit", "type_length_limit", "windows_subsystem", "no_main", "macro_escape",
     "target_arch", "ignore_function", "rustversion",
+    // candor's own I1 stage-2 mark (`mark_hidden_twins`), not an attribute macro
+    "candor_i1_hidden_twin",
 ];
 const STD_ITEM_MACROS: &[&str] = &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm"];
 fn derive_hides(list: &syn::punctuated::Punctuated<syn::Path, syn::Token![,]>) -> bool {
@@ -2147,7 +2301,7 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
     if defs.is_empty() && xdefs.values().all(|d| d.is_none()) {
         return;
     }
-    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported };
+    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default() };
     cx.splice(items, 0);
 }
 

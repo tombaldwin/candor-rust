@@ -1030,6 +1030,11 @@ pub(crate) const MBE_PRIM_ATTR: &str = "candor_mbe_prim_op";
 /// SOUNDNESS R1180 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is
 /// NOMINAL (R1146), so `scan.rs` can keep its units from contesting a hand-written impl's `Type::method` tail.
 pub(crate) const MBE_OP_ATTR: &str = "candor_mbe_op";
+/// SOUNDNESS R1541 / I1 stage 2 — the attribute `mbe::mark_hidden_twins` stamps on a `#[cfg]`-gated fn whose name the same
+/// module's UNEXPANDED macro text also defines: another cfg arm of it may be hidden. Pass A turns it into a refusal.
+pub(crate) const MBE_TWIN_ATTR: &str = "candor_i1_hidden_twin";
+/// The reason that refusal publishes.
+pub(crate) const MBE_TWIN_WHY: &str = "macro:another cfg arm of this fn is hidden by an unexpanded macro";
 /// SOUNDNESS R1157 — the qual segment that keeps such an impl's unit apart from a hand-written impl's (`decls::scan_items`).
 pub(crate) const MBE_PRIM_SEG: &str = "<mbe>";
 
