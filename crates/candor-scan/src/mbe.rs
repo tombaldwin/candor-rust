@@ -535,7 +535,7 @@ fn collect_defs(
                     // macro_rules! delegate_async_read`), and refusing those deleted 184 rows on the 181-entry A/B.
                     // `CANDOR_I1_BIND_OFF=1` restores the old binding.
                     if crate::lang::has_cfg(&m.attrs)
-                        && imported.contains(&name.to_string())
+                        && (imported.contains(&name.to_string()) || imported.contains("*"))
                         && !candor_report::env::switch("CANDOR_I1_BIND_OFF")
                     {
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
@@ -671,8 +671,38 @@ fn imported_names(items: &[syn::Item], out: &mut std::collections::HashSet<Strin
             _ => {}
         }
     }
+    // A non-crate-rooted GLOB `use` or a `#[macro_use] extern crate` can bring ANY macro name into scope; it is recorded as
+    // the wildcard `*`, which only `collect_defs`' cfg-gated rule reads (Fable merge review §6k: a `#[cfg(any())]` stub
+    // beside `use dep::*;` or `#[macro_use] extern crate dep;` was still bound, pre-existing). An UNGATED local definition
+    // still wins over a glob or `macro_use` name, as rustc's textual scope does.
+    fn glob_root(t: &syn::UseTree, root: Option<&str>) -> bool {
+        match t {
+            syn::UseTree::Path(p) => {
+                let first = p.ident.to_string();
+                glob_root(&p.tree, Some(root.unwrap_or(first.as_str())))
+            }
+            // A glob of the toolchain's own crates (`use core::simd::*`) is not a dependency's macro namespace: counting it
+            // refused rand's `#[cfg(feature = "simd_support")] macro_rules! simd_impl` and lost two of I1's `Rand` charges.
+            syn::UseTree::Glob(_) => {
+                !matches!(root, Some("crate") | Some("self") | Some("super") | Some("std") | Some("core") | Some("alloc"))
+                    && root.is_some()
+            }
+            syn::UseTree::Group(g) => g.items.iter().any(|x| glob_root(x, root)),
+            _ => false,
+        }
+    }
     for it in items {
         match it {
+            syn::Item::Use(u) if glob_root(&u.tree, if u.leading_colon.is_some() { Some("::") } else { None }) => {
+                out.insert("*".to_string());
+                walk(&u.tree, if u.leading_colon.is_some() { Some("::") } else { None }, out)
+            }
+            syn::Item::ExternCrate(e)
+                if e.attrs.iter().any(|a| a.path().is_ident("macro_use"))
+                    && !matches!(e.ident.to_string().as_str(), "std" | "core" | "alloc") =>
+            {
+                out.insert("*".to_string());
+            }
             syn::Item::Use(u) => walk(&u.tree, if u.leading_colon.is_some() { Some("::") } else { None }, out),
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
@@ -1168,6 +1198,14 @@ fn empty_bodies(g: &mut syn::Item) {
 /// disclosure on a dispatch over such a trait. `cache::retire_expanded` keeps it in that crate. A guard on the retirement,
 /// not a fix for R1804: it keeps the old cover, it does not supply the missing implementor.
 pub(crate) fn has_hidden_impl_surface(items: &[syn::Item]) -> bool {
+    // THE POSITIONS (Fable merge review §4: the first cut read only plain attributes on fn/struct/enum/union/impl/trait and
+    // missed 7 of 9 measured shapes). An attribute macro or a derive can add an `impl` from ANY item it decorates, at ANY
+    // depth the splice walks — a module, an `extern` block and its foreign items, a `const`/`static`/`type`, an `impl` and
+    // its items, a trait and its items, an item inside a fn body or a block — and `#[cfg_attr(pred, ..)]` can carry either,
+    // nested. So this is a `syn::visit` over EVERY item and associated item of the file (fields and variants excluded: an
+    // attribute there is a derive helper, never a macro), with `cfg_attr` read recursively; plus every item-position macro
+    // invocation still unexpanded at any depth, and the brace groups of one (`cfg_if! { if #[cfg(..)] { items } }`) parsed
+    // as items and walked the same way.
     const STD_DERIVES: &[&str] = &["Debug", "Clone", "Copy", "PartialEq", "Eq", "PartialOrd", "Ord", "Hash", "Default"];
     const BUILTIN: &[&str] = &[
         "cfg", "cfg_attr", "derive", "doc", "allow", "warn", "deny", "forbid", "expect", "inline", "cold", "must_use",
@@ -1175,49 +1213,149 @@ pub(crate) fn has_hidden_impl_surface(items: &[syn::Item]) -> bool {
         "no_mangle", "export_name", "link", "link_name", "link_section", "used", "track_caller", "automatically_derived",
         "rustfmt", "clippy", "diagnostic", "unsafe", "target_feature", "proc_macro", "proc_macro_derive", "proc_macro_attribute",
         "naked", "instruction_set", "debugger_visualizer", "collapse_debuginfo", "global_allocator", "panic_handler", "lang",
-        "rustversion", "stable", "unstable", "rustc_const_stable", "rustc_const_unstable", "may_dangle", "optimize", "coverage",
-        "no_coverage", "doc_cfg", "feature", "rustc_diagnostic_item", "const_trait", "fundamental",
+        "stable", "unstable", "rustc_const_stable", "rustc_const_unstable", "may_dangle", "optimize", "coverage",
+        "no_coverage", "doc_cfg", "feature", "rustc_diagnostic_item", "const_trait", "fundamental", "no_std", "no_implicit_prelude",
+        "crate_type", "crate_name", "recursion_limit", "type_length_limit", "windows_subsystem", "no_main", "macro_escape",
+        "target_arch", "ignore_function", "rustversion",
     ];
-    const STD_ITEM_MACROS: &[&str] =
-        &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm", "cfg_if", "pin_project", "link"];
-    fn attrs_hide(attrs: &[syn::Attribute]) -> bool {
-        attrs.iter().any(|a| {
-            let p = a.path();
-            if p.is_ident("derive") {
-                return a
-                    .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
-                    .map(|l| {
-                        l.iter().any(|d| {
-                            !STD_DERIVES.contains(&d.segments.last().map(|s| s.ident.to_string()).unwrap_or_default().as_str())
-                        })
-                    })
-                    .unwrap_or(true);
-            }
-            let first = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
-            !(p.segments.len() == 1 && BUILTIN.contains(&first.as_str()) || first == "rustfmt" || first == "clippy")
-        })
+    const STD_ITEM_MACROS: &[&str] = &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm"];
+    fn derive_hides(list: &syn::punctuated::Punctuated<syn::Path, syn::Token![,]>) -> bool {
+        list.iter().any(|d| !STD_DERIVES.contains(&d.segments.last().map(|s| s.ident.to_string()).unwrap_or_default().as_str()))
     }
-    items.iter().any(|it| {
-        if crate::lang::is_cfg_test(crate::lang::item_attrs(it)) {
-            return false;
+    fn path_hides(p: &syn::Path) -> bool {
+        let first = p.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+        // `rustversion::since(..)` & co. only gate; every other multi-segment or unknown path is a macro.
+        !(p.segments.len() == 1 && BUILTIN.contains(&first.as_str()) || matches!(first.as_str(), "rustfmt" | "clippy" | "rustversion"))
+    }
+    /// One `Meta` as an attribute body: `derive(..)`, a nested `cfg_attr(pred, ..)`, or any other path.
+    fn meta_hides(m: &syn::Meta) -> bool {
+        let p = m.path();
+        if p.is_ident("derive") {
+            return match m {
+                syn::Meta::List(l) => l
+                    .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+                    .map(|l| derive_hides(&l))
+                    .unwrap_or(true),
+                _ => false,
+            };
         }
-        let own = match it {
-            syn::Item::Fn(f) => attrs_hide(&f.attrs),
-            syn::Item::Struct(x) => attrs_hide(&x.attrs),
-            syn::Item::Enum(x) => attrs_hide(&x.attrs),
-            syn::Item::Union(x) => attrs_hide(&x.attrs),
-            syn::Item::Impl(x) => attrs_hide(&x.attrs),
-            syn::Item::Trait(x) => attrs_hide(&x.attrs),
-            // Read AFTER the splice: a fully expanded invocation is a marker by now, so any item-position invocation still
-            // here was not expanded (another crate's macro, a function-like proc macro, a refused or partial local one).
-            syn::Item::Macro(m) if m.ident.is_none() => {
-                let leaf = m.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
-                !STD_ITEM_MACROS.contains(&leaf.as_str())
+        if p.is_ident("cfg_attr") {
+            return match m {
+                syn::Meta::List(l) => l
+                    .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+                    .map(|metas| metas.iter().skip(1).any(meta_hides)) // the first is the predicate
+                    .unwrap_or(true),
+                _ => false,
+            };
+        }
+        path_hides(p)
+    }
+    fn attrs_hide(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|a| meta_hides(&a.meta))
+    }
+    struct V {
+        hit: bool,
+    }
+    impl V {
+        fn macro_body(&mut self, mac: &syn::Macro) {
+            // An unexpanded invocation: its brace groups may be item lists (`cfg_if!`'s branches); walk them too.
+            fn groups(ts: proc_macro2::TokenStream, v: &mut V) {
+                for t in ts {
+                    if let TokenTree::Group(g) = t {
+                        if g.delimiter() == Delimiter::Brace {
+                            if let Ok(f) = syn::parse2::<syn::File>(g.stream()) {
+                                for it in &f.items {
+                                    syn::visit::Visit::visit_item(v, it);
+                                }
+                            }
+                        }
+                        groups(g.stream(), v);
+                    }
+                }
             }
-            _ => false,
-        };
-        own || matches!(it, syn::Item::Mod(md) if md.content.as_ref().is_some_and(|(_, inner)| has_hidden_impl_surface(inner)))
-    })
+            groups(mac.tokens.clone(), self);
+        }
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_item(&mut self, it: &'ast syn::Item) {
+            if self.hit {
+                return;
+            }
+            let attrs = crate::lang::item_attrs(it);
+            if crate::lang::is_cfg_test(attrs) {
+                return;
+            }
+            if attrs_hide(attrs) {
+                self.hit = true;
+                return;
+            }
+            if let syn::Item::Macro(m) = it {
+                if m.ident.is_none() {
+                    let leaf = m.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                    // Read AFTER the splice: a fully expanded invocation is a marker by now, so any item-position invocation
+                    // still here was not expanded (another crate's macro, a function-like proc macro, a refused or partial
+                    // local one). `cfg_if!`/`pin_project!`-style item lists are walked instead of counted.
+                    if !STD_ITEM_MACROS.contains(&leaf.as_str()) && !matches!(leaf.as_str(), "cfg_if" | "pin_project") {
+                        self.hit = true;
+                        return;
+                    }
+                    self.macro_body(&m.mac);
+                    return;
+                }
+            }
+            syn::visit::visit_item(self, it);
+        }
+        fn visit_impl_item(&mut self, ii: &'ast syn::ImplItem) {
+            let attrs: &[syn::Attribute] = match ii {
+                syn::ImplItem::Fn(f) => &f.attrs,
+                syn::ImplItem::Const(c) => &c.attrs,
+                syn::ImplItem::Type(t) => &t.attrs,
+                syn::ImplItem::Macro(m) => &m.attrs,
+                _ => &[],
+            };
+            if attrs_hide(attrs) {
+                self.hit = true;
+                return;
+            }
+            syn::visit::visit_impl_item(self, ii);
+        }
+        fn visit_trait_item(&mut self, ti: &'ast syn::TraitItem) {
+            let attrs: &[syn::Attribute] = match ti {
+                syn::TraitItem::Fn(f) => &f.attrs,
+                syn::TraitItem::Const(c) => &c.attrs,
+                syn::TraitItem::Type(t) => &t.attrs,
+                syn::TraitItem::Macro(m) => &m.attrs,
+                _ => &[],
+            };
+            if attrs_hide(attrs) {
+                self.hit = true;
+                return;
+            }
+            syn::visit::visit_trait_item(self, ti);
+        }
+        fn visit_foreign_item(&mut self, fi: &'ast syn::ForeignItem) {
+            let attrs: &[syn::Attribute] = match fi {
+                syn::ForeignItem::Fn(f) => &f.attrs,
+                syn::ForeignItem::Static(s) => &s.attrs,
+                syn::ForeignItem::Type(t) => &t.attrs,
+                syn::ForeignItem::Macro(m) => &m.attrs,
+                _ => &[],
+            };
+            if attrs_hide(attrs) {
+                self.hit = true;
+                return;
+            }
+            syn::visit::visit_foreign_item(self, fi);
+        }
+    }
+    let mut v = V { hit: false };
+    for it in items {
+        syn::visit::Visit::visit_item(&mut v, it);
+        if v.hit {
+            return true;
+        }
+    }
+    false
 }
 
 /// I1 stage 1 — `peel_groups` over the types a spliced DECLARATION carries (struct / enum / union fields, an alias, a

@@ -405,3 +405,67 @@ fn i1_step6_hidden_impl_surface_keeps_the_r828_hedge() {
     let (off, _) = scan(&d, None, &[("CANDOR_I1_HIDDEN_OFF", "1")]);
     assert!(eff(&off, "d").is_empty(), "OFF retires it: {off:?}");
 }
+
+/// Step 6b (Fable merge review §4) — the hidden-impl surface is read at EVERY position an attribute or derive can add an
+/// `impl` from, with `cfg_attr` read recursively. One one-variable crate per position; each shape was BUILT AND EXECUTED in
+/// the lane with a real proc macro (`fx/pos`, `pmac2::{GoDerive, add_go}`): the hidden implementor ran and wrote. The first
+/// step-6 cut held the hedge for the plain derive and the attributed impl only, and read `d` pure for the rest.
+#[test]
+fn i1_step6b_every_position_keeps_the_hedge() {
+    const POSITIONS: &[(&str, &str)] = &[
+        ("plain_derive", "#[derive(other::GoDerive)] pub struct Hid;"),
+        ("cfgattr_derive", "#[cfg_attr(feature = \"x\", derive(other::GoDerive))] pub struct Hid;"),
+        ("cfgattr_attr", "#[cfg_attr(feature = \"x\", other::add_go(Hid))] pub struct Other1;"),
+        ("nested_cfgattr", "#[cfg_attr(unix, cfg_attr(feature = \"x\", derive(other::GoDerive)))] pub struct Hid;"),
+        ("attr_impl", "pub struct Other1; #[other::add_go(Hid)] impl Other1 {}"),
+        ("attr_extern_block", "#[other::add_go(Hid)] extern \"C\" {}"),
+        ("attr_foreign_item", "extern \"C\" { #[other::add_go(Hid)] fn ff(); }"),
+        ("attr_mod", "#[other::add_go(Hid)] pub mod hm {}"),
+        ("attr_const", "#[other::add_go(Hid)] pub const C: u8 = 0;"),
+        ("attr_static", "#[other::add_go(Hid)] pub static ST: u8 = 0;"),
+        ("attr_type_alias", "#[other::add_go(Hid)] pub type T = u8;"),
+        ("attr_trait", "#[other::add_go(Hid)] pub trait Tx {}"),
+        ("attr_fn", "#[other::add_go(Hid)] pub fn f0() {}"),
+        ("attr_enum", "#[other::add_go(Hid)] pub enum E0 { A }"),
+        ("derive_in_fn_body", "pub fn setup() { #[derive(other::GoDerive)] struct Inner; }"),
+        ("derive_in_inline_mod", "pub mod inner { #[derive(other::GoDerive)] pub struct Hid; }"),
+        ("cfg_if_body", "cfg_if::cfg_if! { if #[cfg(unix)] { #[derive(other::GoDerive)] pub struct Hid; } }"),
+        ("attr_impl_item", "pub struct Other1; impl Other1 { #[other::add_go(Hid)] pub fn x(&self) {} }"),
+    ];
+    for (name, shape) in POSITIONS {
+        let d = tmpdir(&format!("pos-{name}"));
+        write_crate(
+            &d,
+            &format!("pos_{name}"),
+            "",
+            &format!(
+                "pub trait Go {{ fn go(&self); }}\npub struct Pure; impl Go for Pure {{ fn go(&self) {{}} }}\n\
+                 macro_rules! mk {{ ($t:ident) => {{ impl Go for $t {{ fn go(&self) {{}} }} }} }}\npub struct M; mk!(M);\n\
+                 pub struct Hid;\npub fn d(t: &dyn Go) {{ t.go() }}\n{shape}\n"
+            ),
+        );
+        let (rows, _) = scan(&d, None, &[]);
+        assert_eq!(eff(&rows, "d"), vec!["Unknown".to_string()], "{name}: the hedge must stand: {rows:?}");
+        let (off, _) = scan(&d, None, &[("CANDOR_I1_HIDDEN_OFF", "1")]);
+        assert!(eff(&off, "d").is_empty(), "{name}: OFF retires it (the fixture reaches the code): {off:?}");
+    }
+}
+
+/// Step 1b (Fable merge review §6k) — a `#[cfg]`-gated stub beside a GLOB `use dep::*` or a `#[macro_use] extern crate dep`
+/// (either can bring the macro's name into scope) is not bound either; pre-existing on main.
+#[test]
+fn i1_step1b_glob_and_macro_use_refuse_a_gated_stub() {
+    for (name, import) in [("glob", "use dmlib::*;"), ("macuse", "#[macro_use] extern crate dmlib;")] {
+        let d = tmpdir(&format!("bind-{name}"));
+        write_crate(
+            &d,
+            &format!("bind_{name}"),
+            "",
+            &format!("{import}\n#[cfg(any())]\nmacro_rules! make_bnd {{ () => {{ pub fn bnd_f() {{ EFF }} }}; }}\nmake_bnd!();\npub fn b_call() {{ bnd_f() }}\n"),
+        );
+        let (_, units) = scan(&d, None, &[]);
+        assert!(!units.contains("bnd_f"), "{name}: the compiled-out stub must not be bound: {units:?}");
+        let (_, off) = scan(&d, None, &[("CANDOR_I1_BIND_OFF", "1")]);
+        assert!(off.contains("bnd_f"), "{name}: OFF binds it: {off:?}");
+    }
+}
