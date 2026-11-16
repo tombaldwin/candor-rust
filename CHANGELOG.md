@@ -35,9 +35,38 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   futures-util 101, serde_json 90, reqwest 57, chacha20 20), 0 removed, 0 concrete lost, 1 `invisible` element lost
   (reqwest `get`, which keeps its `Unknown` and its reasons: its only edge went into the `wasm32` arm, through a produced
   `use` now put back as unexpanded text); `CANDOR_I1S2B_FOREIGN_LOOSE=1` restores the narrower foreign reading. The
-  cross-file `#[cfg]` lift stays behind `CANDOR_I1S2_XCFG_ON=1`; it was measured, not shipped (see I1 stage 2b's report).
+  cross-file `#[cfg]` lift was measured here and is now ON by default (see the stage 2b FLIP entry in this section).
   A trivially-superset cover (`CANDOR_I1S2B_TRIVIAL=1`: every produced gated item beside any unexpanded text carries the
   refusal) is measured, not the default. Cache rev 214.
+
+- ⚠ **I1 stage 2b FLIP: a configuration macro defined in ANOTHER file that stamps `#[cfg]` on what it wraps (tokio's
+  `cfg_rt!`, mio's `cfg_io_source!`, palette's `impl_eq!`) is now expanded by default** (SOUNDNESS R1541 / R1831). Before, the
+  stamped items were refused and their methods were invisible, so a call over them read ABSENT over a write: the rustc-expansion
+  oracle counted palette's absent effectful units 163 → 0 and mio's 17 → 0, tokio gains 283 `Log` charges (tracing spans under
+  `tokio_unstable`), and the executed shapes `fxmio1`, `inh_e` and `trait_e` go `deny Unknown` 0 → 1. `CANDOR_I1S2_XCFG_OFF=1`
+  restores the refusal; it is result-moving, so a gate over such a report exits 2. The opt-in `CANDOR_I1S2_XCFG_ON` is gone.
+  Priced against the lift-off arm of the same build, on 181 crates, in all three directions:
+  - **`Unknown` added:** 847 rows newly carry `Unknown` only (0.87% of 97,534). Unit-scope `deny Unknown` 0→1 on 1,011
+    units; crate scope 0 flips either way.
+  - **Concrete effects added:** 520 unit-scope `deny <E>` 0→1 on 452 units (Log 278, Net 163, Rand 40, Fs 19, Clock 10, Env 5,
+    Ipc 3, Exec 2). 258 of the (unit, effect) pairs agree with the rustc-expansion oracle, 150 sit on units the oracle itself
+    hedges, 85 are outside its compiled cfg (palette's 40 `Rand` among them, read genuine), 27 disagree and were read. 20 are
+    pre-existing over-approximations the lift extends to more callers, named: mio `Log` ×12 through the union edge
+    `IoSourceState::register → Registry::register` (`pipe::{Sender,Receiver}::{register,reregister,deregister}`,
+    `event_ports`/`poll`/`windows` `IoSourceState::{register,reregister,deregister}`); tokio `Log` ×6 through drop glue
+    (`time::clock::now`, `Instant::{now,elapsed,far_future}`, `instant::variant::now`, `taskdump::Handle::trace_core`); tokio
+    `create_process_driver` `Log` + `Net` through a type-alias arm union.
+  - **Hedges removed:** 183 units lose `Unknown` and 3 lose `Log` (186 unit flips 1→0). Against published 0.42.0 the lift-on
+    arm loses 214 elements beyond the lift-off arm, every one slotted: 10 resolved to `Net` (tokio shutdown/drop); 11 tokio
+    `TcpSocket` rows newly naming `socket2`, which chained reads `Unknown`, as does `UnixSocket::bind`; pure by reading —
+    syn's four `{UseName,Path,Member,TypeTraitObject}::to_tokens` (quote's `ToTokens` bodies; chaining proc_macro2 + quote
+    does not join them, a chain-join defect, not the lift's) and hashbrown's `RawIter*` / SIMD `Group` rows, plus 17 resolved
+    readers and the read C3 set (tokio stdio fds, field readers, palette's derived `eq`); `MaybeDone`/`TryJoin3::poll` under
+    the parametric slot; mio `SockState::cancel` keeps `Unknown` chained to windows-sys; 90 inherited cascades; 3 union rows;
+    36 lost `invisible` elements and 3 keys on rows that keep `Unknown`; and the three mio `Box::{register,reregister,
+    deregister}` `Log` rows under R1812 (d), which keep `Unknown`.
+  The lift's cover is stage 2b's superset reader and the arm-set floor (both in this section); their own costs (1,096 and 37 rows)
+  are measured on the lift-off arm and stand as stated. Cache rev 217.
 
 - ⚠ **A method called on a receiver no route typed, whose every candidate is the same-named type's member in two or more
   modules (the `#[cfg]` arms of one type), now discloses `Unknown` when any arm is not provably pure** — an arm that is
@@ -162,9 +191,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   could not expand, a nested `macro_rules!` definition (R1784) and a trait (its markers stand for it). `mk!(bool)` →
   `pub mod bool { pub fn go() .. }` is a module, so `bool::go(&true)` no longer resolves to `Tr::go`'s default (R1535);
   `#[cfg(unix)] sys!(tu)` → `use crate::tu as sys;` binds `sys` (R1688). A configuration macro defined in ANOTHER file that
-  stamps `#[cfg]` on what it wraps (tokio's `cfg_rt! { .. }`, palette's `impl_eq!`) is still refused by default, as before:
-  lifting that refusal exposes cfg twins whose other arm is text this pass cannot expand, and it stays behind the opt-in
-  `CANDOR_I1S2_XCFG_ON=1` (a result-moving switch, so a gate over such a report exits 2) until its cover is shown complete.
+  stamps `#[cfg]` on what it wraps (tokio's `cfg_rt! { .. }`, palette's `impl_eq!`) was still refused at this stage:
+  lifting that refusal exposes cfg twins whose other arm is text this pass cannot expand, so it waited until its cover was
+  shown complete (stage 2b), and is now lifted by default (see the stage 2b FLIP entry in this section).
   Within one file a cfg-gated fn whose name the same module's UNEXPANDED macro text may also define carries `macro:another
   cfg arm of this fn is hidden by an unexpanded macro` (the cover is read by expanding the hidden text and parsing it with
   the reader the visible arm uses). The cover also reaches a cfg-gated TRAIT impl. I1 stage 1 (on main since `97c23112`,
@@ -197,8 +226,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `color_theory::T::*`, `set_hue`, `shift_hue_assign`) lose their enumerated implementor edges and keep the `dispatch:` hedge
   (`CANDOR_I1S2_MODUSE_OFF=1` restores them; every implementor is a pure field store, so no gate moves; R1812's class without
   the lift). Oracle: palette's 253 absent effectful units → 163. Cache rev 205. Kill
-  switches `CANDOR_I1S2_MODUSE_OFF`, `CANDOR_I1S2_TWIN_OFF`, `CANDOR_I1S2_TRAITARM_OFF`, `CANDOR_I1S2_LCGLOB_OFF`; opt-in
-  `CANDOR_I1S2_XCFG_ON`.
+  switches `CANDOR_I1S2_MODUSE_OFF`, `CANDOR_I1S2_TWIN_OFF`, `CANDOR_I1S2_TRAITARM_OFF`, `CANDOR_I1S2_LCGLOB_OFF` (and, since the
+  stage 2b flip, the opt-out `CANDOR_I1S2_XCFG_OFF`).
 
 - ⚠ **With `--deps`, a call the curated classifier answers now ALSO carries the chained dependency's row for it, on every
   spelling** (SOUNDNESS R1807; silent under-reports, pre-existing on 0.42.0). A classified call into a chained, covered

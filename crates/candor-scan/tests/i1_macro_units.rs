@@ -45,7 +45,7 @@ fn scan(dir: &Path, deps: Option<&Path>, env: &[(&str, &str)]) -> (Rows, BTreeSe
     let _ = std::fs::remove_dir_all(&out);
     let mut cmd = Command::new(bin());
     cmd.arg(dir.to_string_lossy().as_ref()).arg("--out").arg(out.join("r"));
-    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_I1_SEED_DROP", "CANDOR_I1_BIND_OFF", "CANDOR_I1_RESPAN_OFF", "CANDOR_I1S2_MODUSE_OFF", "CANDOR_I1S2_XCFG_ON"] {
+    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_I1_SEED_DROP", "CANDOR_I1_BIND_OFF", "CANDOR_I1_RESPAN_OFF", "CANDOR_I1S2_MODUSE_OFF", "CANDOR_I1S2_XCFG_OFF"] {
         cmd.env_remove(k);
     }
     if let Some(d) = deps {
@@ -647,10 +647,10 @@ fn i1s2_macro_made_modules_and_uses_are_spliced() {
     }
 }
 
-/// Stage 2a: the cross-file cfg refusal STAYS by default, so a configuration macro defined in another file (tokio's
-/// `cfg_rt!` shape) that stamps `#[cfg]` on what it wraps is not expanded and the call discloses (R128). With
-/// `CANDOR_I1S2_XCFG_ON=1` it is lifted: with `use`s spliced the twin arm (`cfg_unix! { pub use crate::real::leaf2; }`)
-/// stands beside the stub, so the union is whole and the call is charged.
+/// A configuration macro defined in another file (tokio's `cfg_rt!` shape) that stamps `#[cfg]` on what it wraps is expanded
+/// by default since the stage 2b flip: with `use`s spliced the twin arm (`cfg_unix! { pub use crate::real::leaf2; }`) stands
+/// beside the stub, so the union is whole and the call is charged. Under the opt-out `CANDOR_I1S2_XCFG_OFF` it is refused
+/// and the call discloses (R128), as it did by default through stage 2a.
 #[test]
 fn i1s2_cross_file_cfg_expansion_is_spliced() {
     let d = tmpdir("s2xcfg");
@@ -674,14 +674,14 @@ fn i1s2_cross_file_cfg_expansion_is_spliced() {
          cfg_unix! { pub fn leafq() {} }\ncfg_not_unix! { pub fn leafq() {} }\n",
     );
     write_file(&d, "src/b.rs", "cfg_unix! { pub use crate::real::leaf2; }\ncfg_not_unix! { pub fn leaf2() {} }\n");
-    let (rows, units) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1")]);
+    let (rows, units) = scan(&d, None, &[]);
     for f in ["xcfg_e", "xcfguse_e"] {
-        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "XCFG_ON: {f}: {rows:?}");
+        assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "default (lift on): {f}: {rows:?}");
     }
     assert!(eff(&rows, "xcfgq_x").is_empty() && units.contains("a::leafq"), "the pure twin stays pure: {rows:?}");
-    let (off, _) = scan(&d, None, &[]);
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_OFF", "1")]);
     for f in ["xcfg_e", "xcfguse_e"] {
-        assert_eq!(eff(&off, f), vec!["Unknown".to_string()], "default (2a): {f} is R128's disclosure: {off:?}");
+        assert_eq!(eff(&off, f), vec!["Unknown".to_string()], "XCFG_OFF: {f} is R128's disclosure: {off:?}");
     }
 }
 
@@ -742,20 +742,20 @@ fn i1s2_a_hidden_cfg_twin_keeps_a_hedge() {
         "pub struct S2;\ncfg_unix! { impl crate::Go for S2 { fn go(&self) { EFF } } }\n\
          cfg_not_unix! { impl crate::Go for S2 { fn go(&self) {} } }\n",
     );
-    // Stage 2a: by default the cross-file cfg expansion is REFUSED, so the call discloses (R128) as on main; the cover
-    // below is exercised with the lift opted in.
-    let (def, _) = scan(&d, None, &[]);
+    // Since the stage 2b flip the cross-file cfg expansion is LIFTED by default and the cover below is the default reading;
+    // under the opt-out `CANDOR_I1S2_XCFG_OFF` it is refused and the call discloses (R128) as on main — the teeth.
+    let (def, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_OFF", "1")]);
     for f in ["tw_e", "twsame_e", "twuse_e", "twty_e", "twctl_e"] {
-        assert!(eff(&def, f).contains(&"Unknown".to_string()), "default (2a): {f} discloses: {def:?}");
+        assert!(eff(&def, f).contains(&"Unknown".to_string()), "XCFG_OFF: {f} discloses (R128): {def:?}");
     }
-    let (rows, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1")]);
+    let (rows, _) = scan(&d, None, &[]);
     for f in ["tw_e", "twsame_e", "twii_e", "twuse_e", "twty_e"] {
         assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden arm: {rows:?}");
     }
     assert_eq!(eff(&rows, "twctl_e"), vec!["Fs".to_string()], "a once-defined pair is spliced whole and charged: {rows:?}");
     assert!(!eff(&rows, "ungated_x").contains(&"Unknown".to_string()), "an ungated fn is the only one: {rows:?}");
     assert_eq!(rows["a::leaf"].1, vec!["macro:another cfg arm of this fn is hidden by an unexpanded macro".to_string()]);
-    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1"), ("CANDOR_I1S2_TWIN_OFF", "1")]);
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
     for f in ["tw_e", "twsame_e", "twii_e", "twuse_e", "twty_e"] {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to the stub alone: {off:?}");
     }
@@ -845,18 +845,18 @@ fn i1s2_a_hidden_use_or_module_twin_keeps_a_hedge() {
          cfg_unix! { pub use self::real5::leaf5; }\ncfg_not_unix! { pub use self::stub5::leaf5; }\n",
     );
     write_file(&d, "src/m5.rs", "use crate::m4::leaf5;\npub fn via5() { leaf5() }\n");
-    // Stage 2a: by default the cross-file cfg expansion is REFUSED, so the call discloses (R128) as on main; the cover
-    // below is exercised with the lift opted in.
-    let (def, _) = scan(&d, None, &[]);
+    // Since the stage 2b flip the cross-file cfg expansion is LIFTED by default and the cover below is the default reading;
+    // under the opt-out `CANDOR_I1S2_XCFG_OFF` it is refused and the call discloses (R128) as on main — the teeth.
+    let (def, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_OFF", "1")]);
     for f in ["useuse_e", "fnuse_e", "useother_e"] {
-        assert!(eff(&def, f).contains(&"Unknown".to_string()), "default (2a): {f} discloses: {def:?}");
+        assert!(eff(&def, f).contains(&"Unknown".to_string()), "XCFG_OFF: {f} discloses (R128): {def:?}");
     }
-    let (rows, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1")]);
+    let (rows, _) = scan(&d, None, &[]);
     for f in ["modtw_e", "useuse_e", "fnuse_e", "useother_e"] {
         assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden arm: {rows:?}");
     }
     assert_eq!(eff(&rows, "modctl_e"), vec!["Fs".to_string()], "a once-defined module pair is charged: {rows:?}");
-    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1"), ("CANDOR_I1S2_TWIN_OFF", "1")]);
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
     for f in ["modtw_e", "useuse_e", "fnuse_e", "useother_e"] {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to the stub alone: {off:?}");
     }
@@ -916,20 +916,20 @@ fn i1s2_glob_and_nested_name_twins_keep_a_hedge() {
         "pub mod realgc2 { pub fn leaf_gc2() { EFF } }\npub mod stubgc2 { pub fn leaf_gc2() {} }\n\
          on_unix! { pub use self::realgc2::*; }\noff_unix! { pub use self::stubgc2::*; }\n",
     );
-    // Stage 2a: by default the cross-file cfg expansion is REFUSED, so the call discloses (R128) as on main; the cover
-    // below is exercised with the lift opted in.
-    let (def, _) = scan(&d, None, &[]);
+    // Since the stage 2b flip the cross-file cfg expansion is LIFTED by default and the cover below is the default reading;
+    // under the opt-out `CANDOR_I1S2_XCFG_OFF` it is refused and the call discloses (R128) as on main — the teeth.
+    let (def, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_OFF", "1")]);
     for f in ["glob_e", "globuse_e", "hidglob_e", "deepname_e", "globshadow_e", "usectl_x", "globctl2_x"] {
-        assert!(eff(&def, f).contains(&"Unknown".to_string()), "default (2a): {f} discloses: {def:?}");
+        assert!(eff(&def, f).contains(&"Unknown".to_string()), "XCFG_OFF: {f} discloses (R128): {def:?}");
     }
-    let (rows, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1")]);
+    let (rows, _) = scan(&d, None, &[]);
     for f in ["glob_e", "globuse_e", "hidglob_e", "deepname_e", "globshadow_e"] {
         assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden arm: {rows:?}");
     }
     for f in ["usectl_x", "globctl2_x"] {
         assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: a once-defined pair with no hidden text is charged: {rows:?}");
     }
-    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1"), ("CANDOR_I1S2_TWIN_OFF", "1")]);
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
     for f in ["glob_e", "globuse_e", "hidglob_e", "deepname_e", "globshadow_e"] {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to one arm: {off:?}");
     }
@@ -1007,20 +1007,20 @@ fn i1s2_one_reader_covers_groups_std_globs_traits_and_item_impls() {
         "pub struct SB;\nimpl SB {\n    #[cfg(unix)]\n    pub fn go(&self) { EFF }\n    #[cfg(not(unix))]\n    pub fn go(&self) {}\n}\n\
          pub struct SB1;\nimpl SB1 { fwd!{ a1 a2 a3 a4 a5 a6 a7 a8 } }\npub struct SB2;\nimpl SB2 { fwd!{ a1 a2 a3 a4 a5 a6 a7 a8 } }\n",
     );
-    // Stage 2a: by default the cross-file cfg expansion is REFUSED, so the call discloses (R128) as on main; the cover
-    // below is exercised with the lift opted in.
-    let (def, _) = scan(&d, None, &[]);
+    // Since the stage 2b flip the cross-file cfg expansion is LIFTED by default and the cover below is the default reading;
+    // under the opt-out `CANDOR_I1S2_XCFG_OFF` it is refused and the call discloses (R128) as on main — the teeth.
+    let (def, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_OFF", "1")]);
     for f in ["hidgroup_e", "hidgroupglob_e", "stdglob_e", "stdglobty_e", "traitdef_e", "implmix_e", "stdglobctl_x", "globnamedctl_x"] {
-        assert!(eff(&def, f).contains(&"Unknown".to_string()), "default (2a): {f} discloses: {def:?}");
+        assert!(eff(&def, f).contains(&"Unknown".to_string()), "XCFG_OFF: {f} discloses (R128): {def:?}");
     }
-    let (rows, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1")]);
+    let (rows, _) = scan(&d, None, &[]);
     for f in ["hidgroup_e", "hidgroupglob_e", "stdglob_e", "stdglobty_e", "traitdef_e", "implmix_e"] {
         assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden arm: {rows:?}");
     }
     for f in ["stdglobctl_x", "globnamedctl_x", "budgetctl_x"] {
         assert_eq!(eff(&rows, f), vec!["Fs".to_string()], "{f}: must not hold: {rows:?}");
     }
-    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_XCFG_ON", "1"), ("CANDOR_I1S2_TWIN_OFF", "1")]);
+    let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
     for f in ["hidgroup_e", "hidgroupglob_e", "stdglob_e", "stdglobty_e", "traitdef_e", "implmix_e"] {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to one arm: {off:?}");
     }

@@ -1273,18 +1273,21 @@ impl Ctx<'_> {
         // answers with the UNION (SPEC §4). Measured on the first cut's corpus A/B: tokio lost `Log` on 86
         // rows that way. Refused, the invocation reads exactly as before (R128's `macro:` evidence).
         //
-        // I1 stage 2a — STILL REFUSED by default. Stage 2 lifted it, on the argument that with modules and `use`s spliced the
+        // I1 stage 2b FLIP — LIFTED BY DEFAULT; `CANDOR_I1S2_XCFG_OFF` (result-moving) restores the refusal. Stage 2a refused it
+        // by default for the reason below; stage 2b made every fallback arm a superset, part B2 added the untyped-receiver
+        // ARM-SET floor (Fable `fxmio2`), and the lift-ON arm was measured against 0.42.0 with every lost element slotted.
+        // HISTORY — I1 stage 2a refused it by default. Stage 2 lifted it, on the argument that with modules and `use`s spliced the
         // twin arm (`cfg_taskdump! { use …::trace_leaf; }`) stands beside the stub and the union is whole. That holds only
         // where the twin arm's text EXPANDS; where it does not (another crate's macro, a nested invocation, an arm the matcher
         // cannot take) the lift turns the call site's `macro:` disclosure into a lone stub, and five review rounds of
         // hidden-twin holes were all restored by refusing here (Fable stage-2 RC3, `fxp`). The lift and its cover
-        // (`mark_hidden_twins`) stay behind the opt-in `CANDOR_I1S2_XCFG_ON=1` until every fallback arm is shown a superset;
-        // palette's `impl_eq!` (`#[cfg(feature = "approx")]` on what it stamps) is the measured cost of refusing.
+        // (`mark_hidden_twins`) stayed behind an opt-in until every fallback arm was shown a superset (stage 2b);
+        // palette's `impl_eq!` (`#[cfg(feature = "approx")]` on what it stamps) was the measured cost of refusing.
         let xcfg = cross_file
             && file.items.iter().any(|it| {
                 crate::lang::item_attrs(it).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
             });
-        if xcfg && !candor_report::env::switch("CANDOR_I1S2_XCFG_ON") {
+        if xcfg && xcfg_off() {
             if candor_report::env::trace("CANDOR_R1004_INSTR") {
                 eprintln!("R1004XCFG\t{name}");
             }
@@ -1317,8 +1320,8 @@ impl Ctx<'_> {
         .ok()?;
         let xcfg = cross_file
             && gen.iter().any(|ii| impl_item_attrs(ii).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr")));
-        if xcfg && !candor_report::env::switch("CANDOR_I1S2_XCFG_ON") {
-            return None; // I1 stage 2a — refused by default, as for item position (`CANDOR_I1S2_XCFG_ON=1` lifts it)
+        if xcfg && xcfg_off() {
+            return None; // as for item position: lifted by default, `CANDOR_I1S2_XCFG_OFF` refuses it
         }
         if xcfg && candor_report::env::trace("CANDOR_I1_INSTR") {
             eprintln!("I1S2XCFG\timpl-item"); // §E1 REACH COUNTER, on the CHANGED branch only
@@ -1749,7 +1752,7 @@ fn cover_arm(it: &mut syn::Item) {
 /// SOUNDNESS R1541 / I1 stage 2 — A CFG ARM THE SPLICE PRODUCED, BESIDE TEXT IT DID NOT EXPAND.
 ///
 /// THE EXPOSURE. Each widening of the splice puts one more kind of cfg arm in the program: stage 1 macro-made trait impls and
-/// declarations, stage 2a modules and `use`s (and, opt-in, `CANDOR_I1S2_XCFG_ON`, another file's cfg-stamping macro). If the
+/// declarations, stage 2a modules and `use`s (and, by default since the stage 2b flip, another file's cfg-stamping macro). If the
 /// arm's twin stays UNEXPANDED (its wrapper is defined twice, the budget ran out, no arm matches, the name is imported, it is
 /// another crate's macro…), the name RESOLVES to the produced arm and reads pure over a program that writes. Before the splice
 /// reached that kind, the name resolved to nothing and R128 disclosed `macro:`; the widening removed that cover.
@@ -3457,6 +3460,14 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
     all_bodies(items, &mut bodies);
     let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default(), bodies, scope_bodies: HashMap::new() };
     cx.splice(items, 0);
+}
+
+
+/// I1 stage 2b FLIP — the opt-OUT of the cross-file `#[cfg]` lift (result-moving: a scan run under it records the switch and its
+/// gates refuse, as an opted-in scan's did while the lift was opt-in).
+pub(crate) fn xcfg_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_I1S2_XCFG_OFF"))
 }
 
 #[cfg(test)]

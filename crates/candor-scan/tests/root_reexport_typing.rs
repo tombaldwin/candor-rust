@@ -31,7 +31,7 @@ fn scan(dir: &Path, env: &[(&str, &str)]) -> Rows {
     let _ = std::fs::remove_dir_all(&out);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_candor-scan"));
     cmd.arg(dir.to_string_lossy().as_ref()).arg("--out").arg(out.join("r"));
-    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_ROOT_REEXPORT1_OFF", "CANDOR_I1S2_XCFG_ON"] {
+    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_ROOT_REEXPORT1_OFF", "CANDOR_I1S2_XCFG_OFF"] {
         cmd.env_remove(k);
     }
     for (k, v) in env {
