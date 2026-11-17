@@ -1263,13 +1263,18 @@ impl Ctx<'_> {
     /// generated-trait marker). An opaque reading covers the arm whole. The marked arm must be PRODUCED (inside an expansion, or
     /// spliced into this list): a pair of hand-written arms is not this pass's change. The arm holding the hidden text may be
     /// either (`p9hand`: a hand-written live arm beside a produced one; 0.42.0 refused the produced arm). Arms are grouped by
-    /// module name within one item list, which is where rustc requires a module's cfg twins to be. `CANDOR_R1857_WHOLE=1`
+    /// module name within one item list, which is where rustc requires a module's cfg twins to be. An OUT-OF-LINE arm
+    /// (`#[cfg(unix)] mod sub;`, Fable merge review C1 `k_outline`) takes part with an opaque reading: its body is another
+    /// file, so every produced inline twin is covered whole. An out-of-line arm is never itself marked here (its units are
+    /// that file's; `k_path`, `k_outline2` and the hand-written pair `k_hand` read silent on 0.42.0 as well). `CANDOR_R1857_WHOLE=1`
     /// covers every produced arm whole wherever another arm holds hidden text (measurement only). `CANDOR_R1857_OFF=1` drops it.
     fn mark_module_twins(&self, out: &mut [syn::Item], spliced: &[bool], depth: usize) {
         let mut groups: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
         for (i, it) in out.iter().enumerate() {
+            // An out-of-line arm (`#[cfg(unix)] mod sub;`) is in the group too (Fable merge review C1, `k_outline`): its body is
+            // another file, which this per-file pass cannot read, so its reading is OPAQUE below.
             if let syn::Item::Mod(m) = it {
-                if m.content.is_some() && is_gated(&m.attrs) {
+                if is_gated(&m.attrs) {
                     groups.entry(m.ident.to_string()).or_default().push(i);
                 }
             }
@@ -1280,7 +1285,14 @@ impl Ctx<'_> {
                 .iter()
                 .map(|&i| {
                     let syn::Item::Mod(m) = &out[i] else { return None };
-                    let inner = &m.content.as_ref()?.1;
+                    let Some((_, inner)) = m.content.as_ref() else {
+                        // SUPERSET ARGUMENT: the arm's items are a file's, read nowhere in this pass, so they may define any
+                        // name the produced twin shows; the twin is covered whole (`cover_arm`).
+                        if candor_report::env::trace("CANDOR_I1_INSTR") {
+                            eprintln!("R1857OUTLINE\t{}", m.ident); // §E1 REACH COUNTER
+                        }
+                        return Some(Hidden { opaque: true, ..Hidden::default() });
+                    };
                     if !holds_hidden(inner, &self.partial) {
                         return None;
                     }

@@ -21,8 +21,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   with the same reader the per-module cover uses, at every depth of that arm. Each position of the produced arm whose
   name it may define discloses `macro:another cfg arm of this fn is hidden by an unexpanded macro`. Where the hidden impl
   overrides a trait default this arm inherits, the default is marked, so a default that performs an effect keeps it. A
-  module arm covered from hidden text
-  one level up now discloses its trait defaults too. Names the hidden text does not define stay as they were.
+  module arm covered from hidden text one level up now discloses its trait defaults too. Where the other arm is an
+  out-of-line `#[cfg(..)] mod sub;`, whose body is another file, the produced inline arm discloses as a whole. Names the
+  hidden text does not define stay as they were.
   `CANDOR_R1857_OFF=1` restores the previous reading. Cache rev219.
 
 - ⚠ **A `macro_rules!` that another macro DEFINES is expanded, and the `impl`s a macro emits inside a function body are

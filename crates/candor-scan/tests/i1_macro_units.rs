@@ -1660,9 +1660,9 @@ fn r1857_module_twin_arms_keep_a_hedge() {
          #[macro_export] macro_rules! wmod { () => { #[cfg(unix)] pub mod up { pub trait TU { fn go_u(&self) { EFF } } } } }\n\
          #[macro_export] macro_rules! wimpl { () => { impl TI for crate::Q { fn go_i(&self) { EFF } } } }\n\
          #[macro_export] macro_rules! wimpls { () => { impl TS for crate::Q { fn go_s(&self) {} } } }\n\
-         pub struct Q;\npub mod fa;\npub mod fb;\npub mod fc;\npub mod fn_;\npub mod ft;\npub mod fh;\npub mod fu;\npub mod fv;\npub mod fi;\npub mod fs;\n",
+         pub struct Q;\npub mod fa;\npub mod fb;\npub mod fc;\npub mod fn_;\npub mod ft;\npub mod fh;\npub mod fu;\npub mod fv;\npub mod fi;\npub mod fs;\npub mod fo;\n",
     );
-    let files: [(&str, &str); 10] = [
+    let files: [(&str, &str); 12] = [
         ("fa", "cfg_x! {\n\
                 #[cfg(unix)] pub mod a { pub trait TA { crate::wt! { fn go_a(&self); } fn pure_go_a(&self) {} } }\n\
                 #[cfg(not(unix))] pub mod a { pub trait TA { fn go_a(&self) {} fn pure_go_a(&self) {} } }\n}\n\
@@ -1704,12 +1704,19 @@ fn r1857_module_twin_arms_keep_a_hedge() {
                 #[cfg(not(unix))] pub mod s { pub trait TS { fn go_s(&self) {} } crate::wimpls! {} }\n\
                 #[cfg(unix)] pub mod s { pub trait TS { fn go_s(&self) { EFF } } impl TS for crate::Q {} }\n}\n\
                 pub fn keep_e(x: &crate::Q) { use s::TS; x.go_s() }\n"),
+        // Fable merge review C1 (`k_outline`): the LIVE arm is an out-of-line module the expansion emits; its file holds the
+        // hidden member.
+        ("fo", "cfg_x! {\n\
+                #[cfg(unix)] pub mod so;\n\
+                #[cfg(not(unix))] pub mod so { pub trait TO { fn go_o(&self) {} } }\n}\n\
+                impl so::TO for crate::Q {}\npub fn outline_e(x: &crate::Q) { use so::TO; x.go_o() }\n"),
+        ("fo/so", "pub trait TO { crate::wt! { fn go_o(&self); } }\n"),
     ];
     for (n, src) in files {
         write_file(&d, &format!("src/{n}.rs"), src);
     }
     let (rows, _) = scan(&d, None, &[]);
-    let probes = ["fa::dflt_e", "fb::trait_e", "fc::fn_e", "fn_::deep_e", "ft::two_e", "fh::hand_e", "fu::up_e", "fi::ovr_e"];
+    let probes = ["fa::dflt_e", "fb::trait_e", "fc::fn_e", "fn_::deep_e", "ft::two_e", "fh::hand_e", "fu::up_e", "fi::ovr_e", "fo::outline_e"];
     for f in probes {
         assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden module arm: {rows:?}");
     }
