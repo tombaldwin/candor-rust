@@ -1214,6 +1214,105 @@ impl Ctx<'_> {
         }
     }
 
+    /// SOUNDNESS R1857 — what one module arm's hidden text may define, at every depth of it: each item-position invocation
+    /// left unexpanded, and each impl-item and trait-item invocation (keyed `Owner::m`), read by `read_hidden` as the
+    /// per-module cover reads them. Keys are unprefixed (see `cover_arm_keyed`).
+    fn read_arm_hidden(&self, items: &[syn::Item], h: &mut Hidden) {
+        for it in items {
+            match it {
+                syn::Item::Macro(m) if is_hidden_text(m, &self.partial) => self.read_hidden(&m.mac, None, items, h, 0),
+                syn::Item::Impl(im) => {
+                    let owner = ty_key(&im.self_ty);
+                    for ii in &im.items {
+                        if let syn::ImplItem::Macro(m) = ii {
+                            self.read_hidden(&m.mac, Some(&owner), items, h, 0);
+                        }
+                    }
+                }
+                syn::Item::Trait(t) => {
+                    let owner = t.ident.to_string();
+                    for ti in &t.items {
+                        if let syn::TraitItem::Macro(m) = ti {
+                            self.read_hidden(&m.mac, Some(&owner), items, h, 0);
+                        }
+                    }
+                }
+                syn::Item::Mod(m) => {
+                    if let Some((_, inner)) = &m.content {
+                        self.read_arm_hidden(inner, h);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// SOUNDNESS R1857 — A CFG-TWIN MODULE WHOSE OTHER ARM HOLDS HIDDEN TEXT.
+    ///
+    /// THE EXPOSURE. Stage 2 splices the modules an expansion emits (`i1_refused`). Two `#[cfg]` arms of one module (`#[cfg(unix)]
+    /// mod sub { .. }` / `#[cfg(not(unix))] mod sub { .. }`) both become visible, and a path into either resolves to the union of
+    /// the units the two arms write. Where the live arm's item is still unexpanded text — at ANY depth of that arm: an item
+    /// invocation, a trait-item invocation in a trait (`ftrcfgmod`), an impl-item invocation, inside a nested module — no unit
+    /// stands for it, and the call resolves to the OTHER arm's visible item alone (a pure trait default, a pure fn). On 0.42.0 the
+    /// whole expansion stayed opaque and R128 disclosed `macro:`. The per-module cover (`mark_hidden_twins`) cannot see this: the
+    /// hidden text sits in a SIBLING module, not in the arm's own list, and pass B's crate-wide check reads impl members only.
+    ///
+    /// THE UNIT. A module arm, read whole: the other arms' hidden text at every depth, by the ONE reader (`read_arm_hidden` →
+    /// `read_hidden`), and every position of this arm checked against it (`cover_arm_keyed`): fns, `use`s, aliases, named
+    /// macro definitions, nested modules, impl members (by `Owner::m`, owner type or trait) and trait defaults (written or as a
+    /// generated-trait marker). An opaque reading covers the arm whole. The marked arm must be PRODUCED (inside an expansion, or
+    /// spliced into this list): a pair of hand-written arms is not this pass's change. The arm holding the hidden text may be
+    /// either (`p9hand`: a hand-written live arm beside a produced one; 0.42.0 refused the produced arm). Arms are grouped by
+    /// module name within one item list, which is where rustc requires a module's cfg twins to be. `CANDOR_R1857_WHOLE=1`
+    /// covers every produced arm whole wherever another arm holds hidden text (measurement only). `CANDOR_R1857_OFF=1` drops it.
+    fn mark_module_twins(&self, out: &mut [syn::Item], spliced: &[bool], depth: usize) {
+        let mut groups: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+        for (i, it) in out.iter().enumerate() {
+            if let syn::Item::Mod(m) = it {
+                if m.content.is_some() && is_gated(&m.attrs) {
+                    groups.entry(m.ident.to_string()).or_default().push(i);
+                }
+            }
+        }
+        let whole = candor_report::env::switch("CANDOR_R1857_WHOLE");
+        for idxs in groups.values().filter(|v| v.len() >= 2) {
+            let readings: Vec<Option<Hidden>> = idxs
+                .iter()
+                .map(|&i| {
+                    let syn::Item::Mod(m) = &out[i] else { return None };
+                    let inner = &m.content.as_ref()?.1;
+                    if !holds_hidden(inner, &self.partial) {
+                        return None;
+                    }
+                    let mut h = Hidden::default();
+                    self.read_arm_hidden(inner, &mut h);
+                    h.opaque |= whole;
+                    Some(h)
+                })
+                .collect();
+            for (bi, &b) in idxs.iter().enumerate() {
+                if depth == 0 && !spliced.get(b).copied().unwrap_or(false) {
+                    continue;
+                }
+                let mut h = Hidden::default();
+                for r in readings.iter().enumerate().filter(|(ai, _)| *ai != bi).filter_map(|(_, r)| r.as_ref()) {
+                    h.absorb(r.clone());
+                }
+                if h.is_empty() {
+                    continue;
+                }
+                if let syn::Item::Mod(m) = &mut out[b] {
+                    if candor_report::env::trace("CANDOR_I1_INSTR") {
+                        eprintln!("R1857MODTWIN\t{}\t{}", m.ident, if h.opaque { "opaque" } else { "keyed" }); // §E1 REACH COUNTER
+                    }
+                    if let Some((_, inner)) = &mut m.content {
+                        cover_arm_keyed(inner, &h);
+                    }
+                }
+            }
+        }
+    }
+
     /// R1156 — the definition in textual scope for a name this FILE defines more than once.
     fn scoped_def(&self, name: &str) -> Option<String> {
         // I1 stage 3 (R1784) — an emitted definition is read from textual scope whatever the file-wide table holds: it shadows a
@@ -1760,6 +1859,11 @@ impl Ctx<'_> {
             // I1 stage 2b — does this module still hold unexpanded ITEM text at all (whatever its reading came to)?
             let has_hidden = out.iter().any(|it| matches!(it, syn::Item::Macro(m) if is_hidden_text(m, &self.partial)));
             mark_hidden_twins(&mut out, &spliced, &item, &member, has_hidden);
+            // SOUNDNESS R1857 — cfg-twin MODULES: one arm's hidden text, at any depth of it, may define what the other arm
+            // shows (`mark_module_twins`).
+            if !r1857_off() {
+                self.mark_module_twins(&mut out, &spliced, depth);
+            }
             // I1 stage 2c — export this module's impl-scoped hidden keys (and, for the measured `all` scope, its path keys)
             // for the crate-wide check at pass B (`cache::twin_facts`).
             if !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
@@ -2286,8 +2390,130 @@ fn cover_arm(it: &mut syn::Item) {
                 inner.iter_mut().for_each(cover_arm);
             }
         }
+        // SOUNDNESS R1857 — a trait in a module arm: every default body is a unit the arm defines (`p6uptr`: the visible arm's
+        // pure `ExtG::go` default answered a call whose live arm was the hidden text beside it). Both spellings: a trait the
+        // module writes, and the marker an expansion inside it left for a generated trait.
+        syn::Item::Trait(t) if !r1857_off() => {
+            let tn = t.ident.to_string();
+            for ti in t.items.iter_mut() {
+                if let syn::TraitItem::Fn(f) = ti {
+                    if f.default.is_some() {
+                        let n = format!("{tn}::{}", f.sig.ident);
+                        mark_fn_as(&mut f.attrs, &n, "R1857MARKTRAIT");
+                    }
+                }
+            }
+        }
+        syn::Item::Verbatim(_) if !r1857_off() && mbe_trait_body_of(it).is_some() => {
+            cover_trait_marker(it, &Hidden { opaque: true, ..Hidden::default() });
+        }
         _ => {}
     }
+}
+
+/// SOUNDNESS R1857 — does this module body hold unexpanded text at any depth: an item-position invocation (`is_hidden_text`),
+/// or an impl-item or trait-item invocation left in an impl or trait.
+fn holds_hidden(items: &[syn::Item], partial: &std::collections::HashSet<String>) -> bool {
+    items.iter().any(|it| match it {
+        syn::Item::Macro(m) => is_hidden_text(m, partial),
+        syn::Item::Impl(im) => im.items.iter().any(|ii| matches!(ii, syn::ImplItem::Macro(_))),
+        syn::Item::Trait(t) => t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Macro(_))),
+        syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| holds_hidden(inner, partial)),
+        _ => false,
+    })
+}
+
+/// SOUNDNESS R1857 — the visible side of a module arm, against what the OTHER arm's hidden text may define (`h`, read by
+/// `Ctx::read_arm_hidden` with the same `item_keys`/`read_hidden` the per-module cover uses). Keys are read unprefixed through
+/// every depth of the arm, so a name the hidden text defines in a nested module covers that name at every depth here: an
+/// over-approximation in the hedge direction. An opaque reading covers the whole arm (`cover_arm`).
+fn cover_arm_keyed(items: &mut [syn::Item], h: &Hidden) {
+    let type_twins: std::collections::HashSet<String> = items
+        .iter()
+        .filter_map(|it| match it {
+            syn::Item::Struct(x) => Some(x.ident.to_string()),
+            syn::Item::Enum(x) => Some(x.ident.to_string()),
+            syn::Item::Union(x) => Some(x.ident.to_string()),
+            syn::Item::Type(x) => Some(x.ident.to_string()),
+            _ => None,
+        })
+        .collect();
+    let covered_names: Vec<bool> = items
+        .iter()
+        .map(|it| {
+            let k = item_keys(it, items);
+            k.opaque || k.names.iter().any(|n| h.covers(n))
+        })
+        .collect();
+    for (i, it) in items.iter_mut().enumerate() {
+        if h.opaque {
+            cover_arm(it);
+            continue;
+        }
+        match it {
+            syn::Item::Fn(f) => {
+                let n = f.sig.ident.to_string();
+                if h.covers(&n) {
+                    mark_fn_as(&mut f.attrs, &n, "R1857MARKFN");
+                }
+            }
+            syn::Item::Use(_) | syn::Item::Type(_) => {
+                if covered_names[i] {
+                    cover_arm(it);
+                }
+            }
+            syn::Item::Macro(m) if m.ident.is_some() => {
+                if covered_names[i] {
+                    cover_arm(it);
+                }
+            }
+            syn::Item::Mod(m) => {
+                if h.covers(&m.ident.to_string()) {
+                    cover_arm(it);
+                } else if let Some((_, inner)) = &mut m.content {
+                    cover_arm_keyed(inner, h);
+                }
+            }
+            syn::Item::Impl(im) => {
+                let owner = ty_key(&im.self_ty);
+                let tr = trait_key(im);
+                let tt = type_twins.contains(&owner);
+                for ii in im.items.iter_mut() {
+                    if let syn::ImplItem::Fn(f) = ii {
+                        let n = f.sig.ident.to_string();
+                        let trait_leg = tr.as_ref().is_some_and(|t| {
+                            h.keys.contains(t)
+                                || h.keys.contains(&format!("{t}::{n}"))
+                                || h.xkeys.contains(&format!("{owner} as {t}"))
+                                || h.xkeys.contains(&format!("* as {t}"))
+                        });
+                        if h.covers_method(&owner, &n, tt) || trait_leg {
+                            mark_fn_as(&mut f.attrs, &format!("{owner}::{n}"), "R1857MARKMETH");
+                        }
+                    }
+                }
+            }
+            syn::Item::Trait(t) => {
+                let tn = t.ident.to_string();
+                for ti in t.items.iter_mut() {
+                    if let syn::TraitItem::Fn(f) = ti {
+                        let n = f.sig.ident.to_string();
+                        if f.default.is_some() && trait_default_twin(h, &tn, &n) {
+                            mark_fn_as(&mut f.attrs, &format!("{tn}::{n}"), "R1857MARKTRAIT");
+                        }
+                    }
+                }
+            }
+            syn::Item::Verbatim(_) if mbe_trait_body_of(it).is_some() => cover_trait_marker_by(it, |tn, n| trait_default_twin(h, tn, n)),
+            _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R1857 — the opt-out of the module-twin cover (`Ctx::mark_module_twins`) and of `cover_arm`'s trait arm.
+pub(crate) fn r1857_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1857_OFF"))
 }
 
 /// SOUNDNESS R1541 / I1 stage 2 — A CFG ARM THE SPLICE PRODUCED, BESIDE TEXT IT DID NOT EXPAND.
@@ -2323,7 +2549,7 @@ fn cover_arm(it: &mut syn::Item) {
 /// from the items another crate's macro is passed; `loose`, the fallback where expansion could not finish — every identifier
 /// of the invocation and of every body reachable from it (`loose_closure`); or `opaque` (another crate's macro, a `$m!`, a
 /// token-paster, an unreadable body, or the closure's bound). Each fallback arm states its superset argument where it is.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Hidden {
     opaque: bool,
     keys: std::collections::HashSet<String>,
@@ -2613,12 +2839,26 @@ fn use_into(t: &syn::UseTree, mods: &std::collections::HashSet<String>, first: b
 
 /// Mark a trait-body marker's default methods (the visible arm of a hidden trait twin).
 fn cover_trait_marker(it: &mut syn::Item, h: &Hidden) {
+    cover_trait_marker_by(it, |tn, n| h.covers(tn) || h.covers_method(tn, n, true));
+}
+
+/// SOUNDNESS R1857 — a default body of trait `tn` in one module arm is twinned by the other arm's hidden text when that text
+/// may define the trait or the member, or writes an impl of the trait that defines the member (`p14himpl`: the hidden arm's
+/// `impl TI for Q { fn go_i }` overrides the default this arm's empty impl inherits). The DEFAULT is marked, not a member
+/// stood on this arm's impl: a stood member would take the call from a default that may itself perform an effect
+/// (`p15stood`, `Fs` on main), which turns a concrete effect into `Unknown` alone.
+fn trait_default_twin(h: &Hidden, tn: &str, n: &str) -> bool {
+    let tail = format!(" as {tn}::{n}");
+    h.covers(tn) || h.covers_method(tn, n, true) || h.keys.iter().chain(&h.xkeys).any(|k| k.ends_with(&tail))
+}
+
+fn cover_trait_marker_by(it: &mut syn::Item, twin: impl Fn(&str, &str) -> bool) {
     let Some(mut t) = mbe_trait_body_of(it) else { return };
     let tn = t.ident.to_string();
     let mut hit = false;
     for ti in t.items.iter_mut() {
         if let syn::TraitItem::Fn(f) = ti {
-            if f.default.is_some() && (h.covers(&tn) || h.covers_method(&tn, &f.sig.ident.to_string(), true)) {
+            if f.default.is_some() && twin(&tn, &f.sig.ident.to_string()) {
                 let n = format!("{tn}::{}", f.sig.ident);
                 mark_fn_as(&mut f.attrs, &n, "I1S2MARKTRAIT");
                 hit = true;

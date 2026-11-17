@@ -11,6 +11,20 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A `#[cfg]` module arm is checked against the hidden text in its twin arm, at every depth** (SOUNDNESS R1857; closes a
+  silent under-report introduced after 0.42.0 by I1 stage 2, and the free-fn and `use` forms of the same shape that were
+  silent on 0.42.0 too). An expansion that writes `#[cfg(unix)] mod sub { .. }` and `#[cfg(not(unix))] mod sub { .. }` now
+  has both arms spliced. Where the live arm's item was still unexpanded text, a call resolved to the other arm's visible,
+  pure item alone. This covered every such position: a trait default whose member is a trait-item invocation, a whole
+  hidden trait, a free fn, a `use`, a nested module, and an `impl` overriding the trait's default. It also covered arms
+  written by two invocations, and a hand-written live arm beside a produced one. The other arm's hidden text is now read
+  with the same reader the per-module cover uses, at every depth of that arm. Each position of the produced arm whose
+  name it may define discloses `macro:another cfg arm of this fn is hidden by an unexpanded macro`. Where the hidden impl
+  overrides a trait default this arm inherits, the default is marked, so a default that performs an effect keeps it. A
+  module arm covered from hidden text
+  one level up now discloses its trait defaults too. Names the hidden text does not define stay as they were.
+  `CANDOR_R1857_OFF=1` restores the previous reading. Cache rev219.
+
 - ⚠ **A `macro_rules!` that another macro DEFINES is expanded, and the `impl`s a macro emits inside a function body are
   units** (SOUNDNESS R1784, R1813, I1 stage 3; closes silent under-reports pre-existing on 0.42.0). Where a definition comes
   from and where an invocation sits are now read as data rather than as a list of positions:

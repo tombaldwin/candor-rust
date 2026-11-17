@@ -45,7 +45,7 @@ fn scan(dir: &Path, deps: Option<&Path>, env: &[(&str, &str)]) -> (Rows, BTreeSe
     let _ = std::fs::remove_dir_all(&out);
     let mut cmd = Command::new(bin());
     cmd.arg(dir.to_string_lossy().as_ref()).arg("--out").arg(out.join("r"));
-    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_I1_SEED_DROP", "CANDOR_I1_BIND_OFF", "CANDOR_I1_RESPAN_OFF", "CANDOR_I1S2_MODUSE_OFF", "CANDOR_I1S2_XCFG_OFF"] {
+    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_I1_SEED_DROP", "CANDOR_I1_BIND_OFF", "CANDOR_I1_RESPAN_OFF", "CANDOR_I1S2_MODUSE_OFF", "CANDOR_I1S2_XCFG_OFF", "CANDOR_R1857_OFF", "CANDOR_R1857_WHOLE"] {
         cmd.env_remove(k);
     }
     if let Some(d) = deps {
@@ -1634,4 +1634,93 @@ fn i1s2b_cfg_if_is_opaque_like_any_foreign_macro() {
     let (rows2, _) = scan(&d2, None, &[]);
     assert!(eff(&rows2, "c10_e").contains(&"Unknown".to_string()), "c10_e: must disclose the twin: {rows2:?}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// SOUNDNESS R1857 — `#[cfg]`-twin MODULES an expansion (or the source beside it) writes, where one arm's item is still
+/// unexpanded text at some depth of that arm and the other arm's is visible and pure. Stage 2 splices both module arms, so the
+/// call resolved to the visible arm's unit alone (`deny Unknown` 1 on 0.42.0, 0 on main for every `_e` here except `fn_e`,
+/// whose 0.42.0 reading was already silent). Each position: a trait default whose live member is a trait-item invocation
+/// (`ftrcfgmod`), a whole hidden trait, a free fn, a nested module, a deeper module, arms from two invocations, a hand-written
+/// live arm, and a visible arm covered from hidden text one level up. Must NOT hold: a member the hidden text does not define
+/// (`_q`), and two fully visible arms (`vis_e` stays `Fs`, no hedge).
+#[test]
+fn r1857_module_twin_arms_keep_a_hedge() {
+    let d = tmpdir("r1857");
+    // One file per shape, the probes beside it: a hidden item left in one module's list is R128 module evidence for every
+    // caller in that file, which would answer the probes of the others. Every method name is unique: two traits implemented
+    // for one type with a same-named method lose the call, a separate reading that is the same on 0.42.0.
+    write_crate(
+        &d,
+        "r1857",
+        "",
+        "macro_rules! cfg_x { ($($i:item)*) => { $($i)* } }\n\
+         #[macro_export] macro_rules! wt { ($(fn $n:ident(&self);)*) => { $( fn $n(&self) { EFF } )* } }\n\
+         #[macro_export] macro_rules! wfn { ($v:vis fn $n:ident();) => { $v fn $n() { EFF } } }\n\
+         #[macro_export] macro_rules! wtrait { ($n:ident, $m:ident) => { pub trait $n { fn $m(&self) { EFF } } } }\n\
+         #[macro_export] macro_rules! wmod { () => { #[cfg(unix)] pub mod up { pub trait TU { fn go_u(&self) { EFF } } } } }\n\
+         #[macro_export] macro_rules! wimpl { () => { impl TI for crate::Q { fn go_i(&self) { EFF } } } }\n\
+         #[macro_export] macro_rules! wimpls { () => { impl TS for crate::Q { fn go_s(&self) {} } } }\n\
+         pub struct Q;\npub mod fa;\npub mod fb;\npub mod fc;\npub mod fn_;\npub mod ft;\npub mod fh;\npub mod fu;\npub mod fv;\npub mod fi;\npub mod fs;\n",
+    );
+    let files: [(&str, &str); 10] = [
+        ("fa", "cfg_x! {\n\
+                #[cfg(unix)] pub mod a { pub trait TA { crate::wt! { fn go_a(&self); } fn pure_go_a(&self) {} } }\n\
+                #[cfg(not(unix))] pub mod a { pub trait TA { fn go_a(&self) {} fn pure_go_a(&self) {} } }\n}\n\
+                impl a::TA for crate::Q {}\n\
+                pub fn dflt_e(x: &crate::Q) { use a::TA; x.go_a() }\npub fn dflt_q(x: &crate::Q) { use a::TA; x.pure_go_a() }\n"),
+        ("fb", "cfg_x! {\n\
+                #[cfg(unix)] pub mod b { crate::wtrait! { TB, go_b } }\n\
+                #[cfg(not(unix))] pub mod b { pub trait TB { fn go_b(&self) {} } }\n}\n\
+                impl b::TB for crate::Q {}\npub fn trait_e(x: &crate::Q) { use b::TB; x.go_b() }\n"),
+        ("fc", "cfg_x! {\n\
+                #[cfg(unix)] pub mod c { crate::wfn! { pub fn go_c(); } pub fn pure_go_c() {} }\n\
+                #[cfg(not(unix))] pub mod c { pub fn go_c() {} pub fn pure_go_c() {} }\n}\n\
+                pub fn fn_e() { c::go_c() }\npub fn fn_q() { c::pure_go_c() }\n"),
+        ("fn_", "cfg_x! {\n\
+                #[cfg(unix)] pub mod n { pub mod m { pub trait TN { crate::wt! { fn go_n(&self); } } } }\n\
+                #[cfg(not(unix))] pub mod n { pub mod m { pub trait TN { fn go_n(&self) {} } } }\n}\n\
+                impl n::m::TN for crate::Q {}\npub fn deep_e(x: &crate::Q) { use n::m::TN; x.go_n() }\n"),
+        ("ft", "cfg_x! { #[cfg(unix)] pub mod t { pub trait TT { crate::wt! { fn go_t(&self); } } } }\n\
+                cfg_x! { #[cfg(not(unix))] pub mod t { pub trait TT { fn go_t(&self) {} } } }\n\
+                impl t::TT for crate::Q {}\npub fn two_e(x: &crate::Q) { use t::TT; x.go_t() }\n"),
+        ("fh", "#[cfg(unix)] pub mod h { pub trait TH { crate::wt! { fn go_h(&self); } } }\n\
+                cfg_x! { #[cfg(not(unix))] pub mod h { pub trait TH { fn go_h(&self) {} } } }\n\
+                impl h::TH for crate::Q {}\npub fn hand_e(x: &crate::Q) { use h::TH; x.go_h() }\n"),
+        ("fu", "crate::wmod! {}\n\
+                cfg_x! { #[cfg(not(unix))] pub mod up { pub trait TU { fn go_u(&self) {} } } }\n\
+                impl up::TU for crate::Q {}\npub fn up_e(x: &crate::Q) { use up::TU; x.go_u() }\n"),
+        ("fv", "cfg_x! {\n\
+                #[cfg(unix)] pub mod v { pub trait TV { fn go_v(&self) { EFF } fn pure_go_v(&self) {} } }\n\
+                #[cfg(not(unix))] pub mod v { pub trait TV { fn go_v(&self) {} fn pure_go_v(&self) {} } }\n}\n\
+                impl v::TV for crate::Q {}\n\
+                pub fn vis_e(x: &crate::Q) { use v::TV; x.go_v() }\npub fn vis_q(x: &crate::Q) { use v::TV; x.pure_go_v() }\n"),
+        ("fi", "cfg_x! {\n\
+                #[cfg(unix)] pub mod i { pub trait TI { fn go_i(&self) {} } crate::wimpl! {} }\n\
+                #[cfg(not(unix))] pub mod i { pub trait TI { fn go_i(&self) {} } impl TI for crate::Q {} }\n}\n\
+                pub fn ovr_e(x: &crate::Q) { use i::TI; x.go_i() }\n"),
+        // The LIVE arm's default performs the effect and the hidden arm's impl overrides it: the default is marked, so the
+        // call keeps `Fs` (a member stood on the live arm's empty impl would have taken the call from it).
+        ("fs", "cfg_x! {\n\
+                #[cfg(not(unix))] pub mod s { pub trait TS { fn go_s(&self) {} } crate::wimpls! {} }\n\
+                #[cfg(unix)] pub mod s { pub trait TS { fn go_s(&self) { EFF } } impl TS for crate::Q {} }\n}\n\
+                pub fn keep_e(x: &crate::Q) { use s::TS; x.go_s() }\n"),
+    ];
+    for (n, src) in files {
+        write_file(&d, &format!("src/{n}.rs"), src);
+    }
+    let (rows, _) = scan(&d, None, &[]);
+    let probes = ["fa::dflt_e", "fb::trait_e", "fc::fn_e", "fn_::deep_e", "ft::two_e", "fh::hand_e", "fu::up_e", "fi::ovr_e"];
+    for f in probes {
+        assert_eq!(eff(&rows, f), vec!["Unknown".to_string()], "{f} must disclose the hidden module arm: {rows:?}");
+    }
+    for f in ["fa::dflt_q", "fc::fn_q", "fv::vis_q"] {
+        assert!(eff(&rows, f).is_empty(), "{f}: must not hold (the hidden text does not define it): {rows:?}");
+    }
+    assert_eq!(eff(&rows, "fv::vis_e"), vec!["Fs".to_string()], "vis_e: two visible arms, no hedge: {rows:?}");
+    assert_eq!(eff(&rows, "fs::keep_e"), vec!["Fs".to_string(), "Unknown".to_string()], "keep_e keeps the live default's Fs: {rows:?}");
+    // The kill switch restores main's reading: every probe resolves to the visible pure arm alone.
+    let (off, _) = scan(&d, None, &[("CANDOR_R1857_OFF", "1")]);
+    for f in probes {
+        assert!(!eff(&off, f).contains(&"Unknown".to_string()), "R1857_OFF: {f} reads the visible arm alone: {off:?}");
+    }
 }
