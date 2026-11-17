@@ -102,7 +102,7 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   trait impls (97c23112, R1541); this change restores it. Where every producer row under the tail belongs to a DIFFERENT
   published type (R1807's rule for classified calls), the tail is not asked, and the walk from the written type reaches
   the trait default (`Env, Fs`) or discloses. A full qual the producer carries keeps the old key. `CANDOR_R1835_OFF=1`.
-  Cache rev 218.
+  Cache rev 219.
 - Cost of the three entries above, measured on 7425d9eb against the final build (corpus A/B, `--jobs 2`): 32 real
   consumers chained over their own locks (22,152 rows): 9 rows gain a concrete effect (hickory-net's `impl UdpSocket for
   tokio::net::UdpSocket`, whose `Self::bind` / `Self::poll_recv_from` / `Self::poll_send_to` run tokio's own `Net`; each
