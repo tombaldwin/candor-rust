@@ -53,23 +53,38 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   which is what the `use` spelling already produced. Executed, `deny Fs` 0 on 0.42.0 and main and 1 now: `Self::m(..)`,
   `<Self>::m(..)`, `Self::m` as a value, inside a closure, an associated fn with no receiver, a sibling method of the
   same impl, a generic dependency type (`dep::g::Gen<u8>`), a module-path impl (`impl E for d::Lone`), and an impl nested
-  in a fn body. A classified member through `Self` now joins its row as well as the classifier's charge. Where a local
+  in a fn body, a module path only an exclusive glob supplies (`use dep::*; impl Tr for d::Lone`). A classified member through `Self` now joins its row as well as the classifier's charge. Where a local
   type shares the dependency type's leaf, the call no longer reaches only the local twin. A std/core/alloc-rooted self
   type (`impl R for core::ops::Range<u8>`) keeps the leaf binding: the written std path is never resolved to the
-  impl's own units, and a first cut lost every `Self::sibling()` edge there (`Fs` on 0.42.0, ABSENT). `self.m()` on such a receiver
+  impl's own units, and a first cut lost every `Self::sibling()` edge there (`Fs` on 0.42.0, ABSENT). Where a `use`
+  binds that leaf to ANOTHER type (`use dep::d::Lone as Range; impl Tr for std::ops::Range<u8>`), `Self` binds the bare
+  leaf, the impl's own unit key: `Self::sibling()` reached nothing on every arm before. `self.m()` on such a receiver
   is unchanged: it was, and stays, the untyped-receiver `Unknown` (R1169 types `self` by the written path only beside a
   local twin). Cost: a pure trait default called through `Self` with its trait in scope now reads `Unknown` (the walk
-  does not join a pure union row), as the `use` spelling already did. `CANDOR_R1832_OFF=1`.
+  does not join a pure union row), as the `use` spelling already did. NOT reached, all pre-existing and silent over an
+  executed write: `Self::m` in a trait DEFAULT body naming a SUPERTRAIT's member (`trait P: Tally { fn a(self, p) {
+  Self::tally_zz(self, p) } }`, a local supertrait too; `Self` there names the trait, R160, and supertraits are not
+  followed; `<Self as Tally>::m` is charged); a std-rooted self type whose `Self::m` is a std inherent (`impl C for
+  std::fs::File { Self::create(..) }`) or whose leaf a `use` binds to the std type itself (`use core::ops::Range; impl ..
+  for Range<u32> { Self::sibling() }`), both needing two readings of `Self`; and two entry edges next to `Self` that are
+  not `Self` at all: a path call to a trait a `macro_rules!` DECLARES (the macro-made impl's unit is charged, the call to
+  it forms no edge) and a UFCS call `<Box<i8> as Tr>::m(..)`. `CANDOR_R1832_OFF=1`.
 - ⚠ **A nested fn's callable parameter discloses when it is invoked** (SOUNDNESS R1833; pre-existing on 0.42.0). `{ fn
   app<F: FnOnce(&str)>(f: F, p: &str) { f(p) } app(dep::wr_zz, p) }` read ABSENT, chained and unchained, over an executed
   write, and so did the same shape with a LOCAL effectful fn, a `fn(&str)` pointer or a `&dyn Fn(&str)` parameter. The
   identical helper at the top level read `Unknown` (`callback:`). A nested fn's callable parameters are now hedged as a
-  top-level fn's are. This is a hedge, not a resolution: neither helper is resolved to the fn passed in. A callable
+  top-level fn's are, including through an `Option` binder (`f: Option<fn(&str)>`, `Option<F>`, `Option<Box<dyn Fn>>`,
+  then `if let Some(g) = f { g(p) }` or `match`), which a first cut missed. A callable component of a TUPLE-destructured
+  parameter (`fn ap((f, q): (F, &str)) { f(q) }`) was silent at the top level as well as nested, and is hedged at both
+  now. This is a hedge, not a resolution: neither helper is resolved to the fn passed in. A callable
   parameter that is never invoked adds nothing. `CANDOR_R1833_OFF=1`.
 - ⚠ **An unclassified join no longer takes a same-tail sibling type's row** (SOUNDNESS R1835; pre-existing on 0.42.0).
   `dep::c::Raw::tally_zz(..)`, where `tally_zz` is `Tally`'s provided body on `c::Raw`, asked the tail `Raw::tally_zz`
   and joined `a::Raw::tally_zz`, an inherent that only writes, so the row read `[Fs]` and `deny Env` exited 0 over an
-  executed read (path and method spelling alike). Where every producer row under the tail belongs to a DIFFERENT
+  executed read. The PATH spelling was silent on 0.42.0. The METHOD spelling (`let r: dep::c::Raw = ..; r.tally_zz(p)`)
+  is pre-existing only for some dependency shapes: where the dependency also carries a MACRO-MADE impl of the same trait,
+  0.42.0 read `Env, Fs` and main lost the `Env` (`deny Env` 1 → 0), introduced by I1 step 2's splicing of macro-made
+  trait impls (97c23112, R1541); this change restores it. Where every producer row under the tail belongs to a DIFFERENT
   published type (R1807's rule for classified calls), the tail is not asked, and the walk from the written type reaches
   the trait default (`Env, Fs`) or discloses. A full qual the producer carries keeps the old key. `CANDOR_R1835_OFF=1`.
   Cache rev 218.
@@ -80,9 +95,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `binlog::jsonb::Value::try_from`, an `impl TryFrom<..> for serde_json::Value` whose only `Unknown` came from `Self`
   resolving to the crate's own same-leaf `Value`; its body only converts JSON values, read pure). 141 census crates
   standalone (72,397 rows): 9 concrete adds (hickory-net `Net`, tokio-util `Ipc` through `impl .. for
-  tokio::net::UnixListener`), 12 rows newly `Unknown` only (0.017%: borsh's nested `all(.., f_key: impl Fn ..)`, and
-  tokio-util's untyped-receiver hedges now naming a newly effectful candidate), 0 concrete or `invisible` lost, the same
-  one removal. R1835 reached no real-corpus call; its evidence is the executed fixtures.
+  tokio::net::UnixListener`), 12 rows newly `Unknown` only (0.017%): 6 are R1833's (borsh's nested `all(.., f_key: impl
+  Fn ..)` and its callers) and 6 are R1832's side effect (tokio-util's untyped-receiver hedges now naming the newly
+  effectful `ListenerAcceptFut::poll`); 0 concrete or `invisible` lost, the same one removal. The merge-review rework
+  (Option-binder and tuple callables, glob-supplied and leaf-shadowed self types), measured against the build before it:
+  0 rows added or newly `Unknown` on either corpus; 51 chained / 76 standalone `invisible: thiserror` elements and 19
+  standalone rows that carried only that element are gone. Every one traces to `impl From<..> for io::Error {
+  Self::other(e) }` / `Self::new(kind, e)` in a file that also says `use thiserror::Error` (hickory-proto, quinn), where
+  `Self` had named thiserror's derive macro; `io::Error::other` and `io::Error::new` construct a value and are pure. R1835 reached no real-corpus call; its evidence is the executed fixtures.
 
 - ⚠ **The hidden-twin cover now reads unexpanded macro text as a SUPERSET of what it can bind** (SOUNDNESS R1541 / R1831, I1
   stage 2b; closes silent under-reports pre-existing on 0.42.0). A cfg-gated item a crate's own macro produces, beside a

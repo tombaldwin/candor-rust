@@ -661,21 +661,26 @@
     },
     {
       "fn": "<collector::CallCollector<'a> as syn::visit::Visit<'ast>>::visit_item_impl",
-      "loc": "crates/candor-scan/src/collector.rs:11661:5: 11661:61",
+      "loc": "crates/candor-scan/src/collector.rs:13819:5: 13819:61",
       "inferred": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "declared": [],
       "undeclared": [
         "Env"
       ],
       "overdeclared": [],
-      "hash": "7f07d505992c79d659089adf634ecc5e",
+      "unresolved": true,
+      "hash": "11866934e13bbff55f72c364682d3906",
       "calls": [
         "collector::CallCollector::<'a>::rebind_self",
-        "lang::expand"
+        "lang::expand",
+        "lang::impl_self_binding"
       ],
       "invisible": [
+        "candor_report",
+        "proc_macro2",
         "syn"
       ]
     },
