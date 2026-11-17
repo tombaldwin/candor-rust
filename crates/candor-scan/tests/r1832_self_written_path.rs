@@ -165,6 +165,13 @@ const R1832_APP: &str = "#![allow(unused_imports)]\n\
     pub trait Rr { fn r_a(p: &str); fn r_b(p: &str); }\n\
     impl Rr for core::ops::Range<u8> { fn r_a(p: &str) { Self::r_b(p) } fn r_b(p: &str) { std::fs::write(format!(\"{p}.rb\"), \"b\").unwrap(); } }\n\
     pub fn s_coresib_zq(p: &str) { <core::ops::Range<u8> as Rr>::r_a(p) }\n\
+    mod gm { use sqlx_core::*; pub trait G9: Sized { fn g9_a(self, p: &str); } impl G9 for d::Lone { fn g9_a(self, p: &str) { Self::tally_zz(self, p) } } }\n\
+    pub use gm::G9;\n\
+    mod shm { use sqlx_core::d::Lone as Range; pub trait S11 { fn s11_a(p: &str); fn s11_b(p: &str); }\n\
+     impl S11 for std::ops::Range<u8> { fn s11_a(p: &str) { Self::s11_b(p) } fn s11_b(p: &str) { std::fs::write(format!(\"{p}.s11\"), \"b\").unwrap(); } } }\n\
+    pub use shm::S11;\n\
+    pub fn s_glob_zq(p: &str) { G9::g9_a(sqlx_core::d::lone(\"q\"), p) }\n\
+    pub fn s_shadow_zq(p: &str) { <std::ops::Range<u8> as S11>::s11_a(p) }\n\
     pub fn l_crate_zq(p: &str) { <crate::lm::Loc2 as L1>::l_crate(p) }\n\
     pub fn l_super_zq(p: &str) { <crate::lm::Loc2 as L3>::l_super(p) }\n";
 
@@ -174,7 +181,7 @@ fn r1832_self_in_an_impl_written_on_a_dependency_path_reaches_the_dependency() {
     let on = rows(&app, Some(&reps), &[]);
     let off = rows(&app, Some(&reps), &[("CANDOR_R1832_OFF", "1")]);
     // every one of these writes a file (and reads the environment) when run
-    for f in ["s_path_zq", "s_cls_zq", "s_qself_zq", "s_fnref_zq", "s_sib_zq", "s_mod_zq", "s_gen_zq", "s_nested_zq"] {
+    for f in ["s_path_zq", "s_cls_zq", "s_qself_zq", "s_fnref_zq", "s_sib_zq", "s_mod_zq", "s_gen_zq", "s_nested_zq", "s_glob_zq"] {
         let e = eff(&on, f);
         assert!(e.iter().any(|x| x == "Fs") && e.iter().any(|x| x == "Env"), "{f}: {e:?} (R1832 must reach the trait default)");
         assert!(!eff(&off, f).iter().any(|x| x == "Fs"), "{f}: the OFF switch must restore the silence ({:?})", eff(&off, f));
@@ -188,6 +195,9 @@ fn r1832_self_in_an_impl_written_on_a_dependency_path_reaches_the_dependency() {
     // a std/core-rooted self type keeps the leaf binding: `Self::r_b` still reaches the impl's own sibling (a first cut
     // bound `core::ops::Range` and the sibling edge was lost in every position, fx/g5 `core_*`)
     assert!(eff(&on, "s_coresib_zq").iter().any(|x| x == "Fs"), "s_coresib_zq: {:?}", eff(&on, "s_coresib_zq"));
+    // …and where a `use` binds that leaf to ANOTHER type, the bare leaf (the impl's own unit key) is bound instead
+    assert!(eff(&on, "s_shadow_zq").iter().any(|x| x == "Fs"), "s_shadow_zq: {:?}", eff(&on, "s_shadow_zq"));
+    assert!(!eff(&off, "s_shadow_zq").iter().any(|x| x == "Fs"), "s_shadow_zq OFF: {:?}", eff(&off, "s_shadow_zq"));
     // local types written with a path are unchanged: `Self::hit2` still reaches the local body
     for f in ["l_crate_zq", "l_super_zq"] {
         assert_eq!(eff(&on, f), eff(&off, f), "{f}");
@@ -204,7 +214,13 @@ const R1833_APP: &str = "#![allow(unused_imports)]\n\
     pub fn n_dyn_zq(p: &str) { fn ap(f: &dyn Fn(&str), p: &str) { f(p) } ap(&sqlx_core::wr_zz, p) }\n\
     pub fn n_local_zq(p: &str) { fn ap<R, F: FnOnce(&str) -> R>(f: F, p: &str) -> R { f(p) } ap(crate::loc_eff, p) }\n\
     pub fn n_nocall_zq(p: &str) -> usize { fn ap<F: FnOnce(&str)>(_f: F, p: &str) -> usize { p.len() } ap(sqlx_core::wr_zz, p) }\n\
-    pub fn t_free_zq(p: &str) { crate::top_app(sqlx_core::wr_zz, p) }\n";
+    pub fn t_free_zq(p: &str) { crate::top_app(sqlx_core::wr_zz, p) }\n\
+    pub fn n_opt_zq(p: &str) { fn ap(f: Option<fn(&str)>, p: &str) { if let Some(g) = f { g(p) } } ap(Some(sqlx_core::wr_zz), p) }\n\
+    pub fn n_optgen_zq(p: &str) { fn ap<F: FnOnce(&str)>(f: Option<F>, p: &str) { match f { Some(g) => g(p), None => {} } } ap(Some(sqlx_core::wr_zz), p) }\n\
+    pub fn n_optbox_zq(p: &str) { fn ap(f: Option<Box<dyn Fn(&str)>>, p: &str) { if let Some(g) = f { g(p) } } ap(Some(Box::new(sqlx_core::wr_zz)), p) }\n\
+    pub fn n_tuple_zq(p: &str) { fn ap<F: FnOnce(&str)>((f, q): (F, &str)) { f(q) } ap((sqlx_core::wr_zz, p)) }\n\
+    pub fn top_tuple<F: FnOnce(&str)>((f, q): (F, &str)) { f(q) }\n\
+    pub fn t_tuple_zq(p: &str) { crate::top_tuple((sqlx_core::wr_zz, p)) }\n";
 
 #[test]
 fn r1833_a_nested_fn_invoking_its_callable_parameter_discloses() {
@@ -213,12 +229,14 @@ fn r1833_a_nested_fn_invoking_its_callable_parameter_discloses() {
         let on = rows(&app, deps, &[]);
         let off = rows(&app, deps, &[("CANDOR_R1833_OFF", "1")]);
         // each one writes a file when run
-        for f in ["n_free_zq", "n_meth_zq", "n_ptr_zq", "n_dyn_zq", "n_local_zq"] {
+        for f in ["n_free_zq", "n_meth_zq", "n_ptr_zq", "n_dyn_zq", "n_local_zq", "n_opt_zq", "n_optgen_zq", "n_optbox_zq", "n_tuple_zq", "top_tuple"] {
             let (e, why) = on.get(f).cloned().unwrap_or_default();
             assert!(e.iter().any(|x| x == "Unknown"), "{f} ({}): {e:?}", deps.is_some());
             assert!(why.iter().any(|w| w.starts_with("callback:")), "{f}: {why:?}");
             assert!(!eff(&off, f).iter().any(|x| x == "Unknown"), "{f}: OFF must restore the old answer ({:?})", eff(&off, f));
         }
+        // the top-level tuple-pattern helper's caller inherits the disclosure
+        assert!(eff(&on, "t_tuple_zq").iter().any(|x| x == "Unknown"), "t_tuple_zq: {:?}", eff(&on, "t_tuple_zq"));
         // a callable parameter that is never invoked is nothing to disclose
         assert!(eff(&on, "n_nocall_zq").is_empty(), "n_nocall_zq: {:?}", eff(&on, "n_nocall_zq"));
         // parity with the top-level helper

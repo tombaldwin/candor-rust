@@ -1152,17 +1152,43 @@ pub(crate) fn seed_fn_typed_vars(
     callable_aliases: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
     let gb = generic_bounds_of(sig);
-    let mut s = std::collections::HashSet::new();
+    callable_param_names(sig, &gb, callable_aliases).into_iter().collect()
+}
+
+/// The names a signature binds to a CALLABLE: a plain `f: F` / `f: fn(..)` / `f: &dyn Fn(..)` parameter, and (SOUNDNESS
+/// R1833) each name of a TUPLE-destructured parameter whose own component is callable (`(f, q): (F, &str)`), which
+/// `seed_fn_typed_vars` read as nothing at all: `fn top((f, q): (F, &str)) { f(q) }` was silent over an executed write at
+/// the top level and nested alike (Fable's R1832 merge review, fx/h3 `t8`, `n8`). The tuple half is behind
+/// `CANDOR_R1833_OFF`. Shared by the top-level seed and the nested-fn hedge (`CallCollector::visit_item_fn`).
+pub(crate) fn callable_param_names(
+    sig: &syn::Signature,
+    gb: &HashMap<String, Vec<String>>,
+    callable_aliases: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
     for arg in &sig.inputs {
-        if let syn::FnArg::Typed(pt) = arg {
-            if let syn::Pat::Ident(id) = &*pt.pat {
-                if is_callable_type(&pt.ty, &gb, callable_aliases) {
-                    s.insert(id.ident.to_string());
+        let syn::FnArg::Typed(pt) = arg else { continue };
+        match (&*pt.pat, &*pt.ty) {
+            (syn::Pat::Ident(id), ty) => {
+                if is_callable_type(ty, gb, callable_aliases) {
+                    out.push(id.ident.to_string());
                 }
             }
+            (syn::Pat::Tuple(tp), syn::Type::Tuple(tt))
+                if tp.elems.len() == tt.elems.len() && !candor_report::env::switch("CANDOR_R1833_OFF") =>
+            {
+                for (p, t) in tp.elems.iter().zip(tt.elems.iter()) {
+                    if let syn::Pat::Ident(id) = p {
+                        if is_callable_type(t, gb, callable_aliases) {
+                            out.push(id.ident.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    s
+    out
 }
 
 /// `X -> [trait leaves]` for a signature's generic params, from both inline bounds (`fn f<X: Store>`)
@@ -5491,7 +5517,19 @@ pub(crate) fn impl_self_binding(
             && tp.path.segments.last().is_some_and(|s| s.ident == leaf)
             && !r1832_off()
         {
-            let written = ex(&path_to_string_lc(&tp.path));
+            let raw = path_to_string_lc(&tp.path);
+            let mut written = ex(&raw);
+            // A module path whose head only a GLOB supplies (`use dep::*; impl Tr for d::Lone`) is left as written by
+            // `expand`, naming nothing; the exclusive glob candidate is the origin, as at a call site (`glob_candidates`).
+            // Silent on every arm before (Fable's R1832 merge review, fx/h1 `p19`).
+            if written == raw {
+                let segs: Vec<&str> = raw.split("::").collect();
+                if let Some((c, true)) = glob_candidates(&segs, uses, &|_| false) {
+                    if let [one] = c.as_slice() {
+                        written = one.clone();
+                    }
+                }
+            }
             // NOT a std/core/alloc path. The impl's own units are keyed under its LEAF, and a std-rooted path is never
             // resolved to a crate unit, so `impl R for core::ops::Range<u8> { fn a() { Self::b() } }` lost its edge to
             // the sibling `Range::b`, in every position (`Self::b()`, `<Self>::b()`, `let f = Self::b`, `map(Self::b)`):
@@ -5499,7 +5537,16 @@ pub(crate) fn impl_self_binding(
             // crate-local root keeps the sibling edge (g5 `dep_*`, `loc_*`). The std root keeps the leaf reading, as before.
             let root = written.trim_start_matches("::").split("::").next().unwrap_or("");
             if matches!(root, "std" | "core" | "alloc") {
-                return ex(leaf);
+                // …unless a `use` binds the LEAF to something else (`use dep::d::Lone as Range; impl Tr for
+                // std::ops::Range<u8>`): the leaf reading then names that other type, and `Self::sibling()` reached
+                // nothing on every arm (fx/h1 `s11`). The bare leaf is the impl's own unit key, which is what the leaf
+                // reading is kept for.
+                let by_leaf = ex(leaf);
+                let leaf_root = by_leaf.trim_start_matches("::").split("::").next().unwrap_or("");
+                if by_leaf != leaf && !matches!(leaf_root, "std" | "core" | "alloc") {
+                    return leaf.to_string();
+                }
+                return by_leaf;
             }
             if candor_report::env::trace("CANDOR_R1832_INSTR") {
                 let old = ex(leaf);

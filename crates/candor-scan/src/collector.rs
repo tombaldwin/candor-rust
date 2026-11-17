@@ -13756,18 +13756,34 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // while the identical helper written at the top level read `Unknown` (EXECUTED, rustagent-r1814 fx/z1
         // `u_fnarg*`, rustagent-r1832 fx/g4 `n_*`). A hedge, not a resolution: the top-level helper is not resolved to
         // its argument either. Restored on exit, as a closure's parameters are. `CANDOR_R1833_OFF=1`.
+        //
+        // …and a callable reached through a WRAPPER the top-level route also reads (`f: Option<fn(&str)>`, `Option<F>`,
+        // `Option<Box<dyn Fn>>`, then `if let Some(g) = f { g(p) }` or `match`): the top-level seed puts the element's
+        // callable leaves in `elem_trait_of` (`decls::seed_elem_of`), which is what hedges `g`; a nested fn's parameter
+        // had none, so its twin stayed ABSENT (Fable's R1832 merge review, fx/h3 `n7*`). Only a CALLABLE element is
+        // installed here: the other element facts of a nested parameter stay as they were. A tuple-destructured callable
+        // component is hedged too (`lang::callable_param_names`).
         let mut saved_fn_typed: Vec<(String, bool)> = Vec::new();
+        let mut saved_elem_tr: Vec<(String, Option<Vec<String>>)> = Vec::new();
         if !candor_report::env::switch("CANDOR_R1833_OFF") {
+            for n in crate::lang::callable_param_names(&node.sig, &self.generic_bounds, self.callable_aliases) {
+                let was = !self.fn_typed_vars.insert(n.clone());
+                if candor_report::env::trace("CANDOR_R1833_INSTR") {
+                    eprintln!("R1833NESTED\t{}\t{n}", node.sig.ident); // §E1 REACH COUNTER
+                }
+                saved_fn_typed.push((n, was));
+            }
             for arg in &node.sig.inputs {
                 let syn::FnArg::Typed(pt) = arg else { continue };
                 let syn::Pat::Ident(id) = &*pt.pat else { continue };
-                if is_callable_type(&pt.ty, &self.generic_bounds, self.callable_aliases) {
+                let leaves = crate::lang::elem_trait_leaves(&pt.ty, &self.generic_bounds, self.callable_aliases);
+                if Self::leaves_are_callable(&leaves) {
                     let n = id.ident.to_string();
-                    let was = !self.fn_typed_vars.insert(n.clone());
                     if candor_report::env::trace("CANDOR_R1833_INSTR") {
-                        eprintln!("R1833NESTED\t{}\t{n}", node.sig.ident); // §E1 REACH COUNTER
+                        eprintln!("R1833NESTEDELEM\t{}\t{n}", node.sig.ident); // §E1 REACH COUNTER
                     }
-                    saved_fn_typed.push((n, was));
+                    let prev = self.elem_trait_of.insert(n.clone(), leaves);
+                    saved_elem_tr.push((n, prev));
                 }
             }
         }
@@ -13775,6 +13791,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         for (n, was) in saved_fn_typed {
             if !was {
                 self.fn_typed_vars.remove(&n);
+            }
+        }
+        for (n, prev) in saved_elem_tr.into_iter().rev() {
+            match prev {
+                Some(v) => {
+                    self.elem_trait_of.insert(n, v);
+                }
+                None => {
+                    self.elem_trait_of.remove(&n);
+                }
             }
         }
         for (n, v, tv) in saved_vars {
