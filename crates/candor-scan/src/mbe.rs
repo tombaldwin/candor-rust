@@ -1570,10 +1570,10 @@ impl Ctx<'_> {
                         // I1 stage 3 (D1) — a produced trait that still holds an unexpanded trait-item invocation keeps the invocation
                         // PARTIAL: its text stays hidden evidence (R452), the cover main read through, since no unit stands for
                         // the members it would write.
-                        let full = gen.iter().all(|g| match g {
-                            syn::Item::Trait(t) => !t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Macro(_))),
-                            _ => !i1_refused(g),
-                        });
+                        // At ANY module depth of the expansion (Fable re-check 1, D1′: a trait inside an EMITTED `mod` read as
+                        // full here and its definer was retired while its member invocation stayed hidden; `ftrmod`).
+                        let full = gen.iter().all(|g| !i1_refused(g) || matches!(g, syn::Item::Trait(_)))
+                            && !holds_unexpanded_trait_member(&gen);
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
                             for (g, k) in gen.iter().filter_map(|g| stage2_kind(g).map(|k| (g, k))) {
                                 if !i1_refused(g) {
@@ -1679,16 +1679,13 @@ impl Ctx<'_> {
                             self.partial.insert(invocation_key(&m.mac));
                             out.push(it);
                         }
-                        // I1 stage 3 (R1813) — a produced item's bodies are read for body-position impls too (`hoist_body_impls`),
-                        // here, where `scope` is the textual scope at the item.
-                        let mut hoisted = Vec::new();
-                        for g in &fns {
-                            hoisted.extend(self.hoist_body_impls(g, depth));
-                        }
+                        // I1 stage 3 (R1813) — a produced item's bodies were already read for body-position impls inside the
+                        // expansion's own splice (`expand_items` → `splice`), at every module depth of it, where `scope` is the
+                        // textual scope at the item; the hoisted impls stand among `fns`. (Reading them HERE, at the top level
+                        // only, missed a host inside an emitted module: `u_modhoist`, Fable re-check 1's question.)
                         spliced.resize(out.len(), false);
-                        spliced.resize(out.len() + fns.len() + hoisted.len(), true);
+                        spliced.resize(out.len() + fns.len(), true);
                         out.extend(fns);
-                        out.extend(hoisted);
                         out.append(&mut markers);
                         continue;
                     }
@@ -2036,7 +2033,7 @@ impl Ctx<'_> {
             syn::Item::Trait(t) => t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Fn(f) if f.default.is_some())),
             _ => false,
         };
-        if !has_body || depth > 0 || body_off() {
+        if !has_body || body_off() {
             return Vec::new();
         }
         let read = {
@@ -2121,6 +2118,16 @@ impl Ctx<'_> {
         }
         out
     }
+}
+
+/// I1 stage 3 (D1, D1′) — does a trait anywhere in these items (through inline modules, at any depth) still hold an
+/// unexpanded trait-item invocation? Such an expansion is PARTIAL: its text stays R452 evidence for the members it hides.
+fn holds_unexpanded_trait_member(items: &[syn::Item]) -> bool {
+    items.iter().any(|it| match it {
+        syn::Item::Trait(t) => t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Macro(_))),
+        syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| holds_unexpanded_trait_member(inner)),
+        _ => false,
+    })
 }
 
 /// I1 stage 3 (D1) — the opt-out of trait-item splicing (`CANDOR_I1S3_TRAITITEM_OFF`); it implies `mdef_off` (see there).

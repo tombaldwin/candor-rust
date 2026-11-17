@@ -22,8 +22,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
     `ambiguous:` as hand-written ones do, and so does a body-position invocation of a name ONE file defines both in source
     and through an expansion (which one is in textual scope there is not kept), with the source arm still expanded;
   - a TRAIT-ITEM-position invocation (`pub trait AsyncWriteExt { write_impl! { fn write_u8(..); } }`) is expanded into
-    the trait's members, as impl-item position already was; a macro-made trait whose member invocation cannot be expanded
-    keeps its definer as unexpanded text, so the name-keyed hedge over its members stands;
+    the trait's members, as impl-item position already was; a macro-made trait whose member invocation cannot be expanded,
+    at any module depth of the expansion, keeps its definer as unexpanded text, so the name-keyed hedge over its members
+    stands;
   - an `impl` a body-position invocation emits (in a fn, method, trait default, `const _: () = { .. }`, static, closure or
     nested block) is placed beside its host item, as rustc collects it crate-wide: it becomes a unit, joins dispatch, and its
     type publishes `deref` / `supers` in `typeSurface`, and an impl-item invocation inside it is expanded as in any impl.

@@ -294,3 +294,30 @@ fn a_source_and_an_emitted_definition_in_one_file_disclose_at_body_position() {
     assert!(off.get("kb_pre").is_none_or(|v| v.is_empty()), "the switch restores the old (silent) reading: {:?}", off.get("kb_pre"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Fable stage-3 re-check 1, D1′ (an INTRODUCED silence on the first rework): the same produced trait inside an EMITTED
+/// module, whose member invocation cannot be expanded (a `crate::`-path macro). The partial floor read only the expansion's
+/// top-level items, so the definer was retired and the call read ABSENT; the floor now reaches a trait at any module depth.
+/// And a body-position impl inside an emitted module is hoisted like one at the top level (`u_modhoist`).
+#[test]
+fn the_partial_floor_and_the_hoist_reach_into_an_emitted_module() {
+    let d = tmpdir("trmod");
+    krate(
+        &d,
+        "i1s3trmod",
+        "macro_rules! cfg_x { ($($i:item)*) => { $($i)* } }\n\
+         #[macro_export] macro_rules! wother { ($(fn $name:ident(&mut self);)*) => { $( fn $name(&mut self) { EFF } )* } }\n\
+         pub struct QM;\n\
+         cfg_x! {\n    macro_rules! wimplm { ($(fn $name:ident(&mut self);)*) => { $( fn $name(&mut self) {} )* } }\n\
+             pub mod sub { pub trait ExtM { crate::wother! { fn write_zm(&mut self); } wimplm! { fn pure_zm(&mut self); } } }\n}\n\
+         impl sub::ExtM for QM {}\npub fn callerm_e(x: &mut QM) { use sub::ExtM; x.write_zm() }\n\
+         macro_rules! mk_um { ($t:ident) => { impl $t { pub fn um_go(&self) { EFF } } }; }\n\
+         cfg_x! { pub mod m { pub struct TU; fn host() { mk_um!(TU); } } }\npub fn u_modhoist() { m::TU.um_go() }\n",
+    );
+    let r = rows(&scan_json(&d, &[], None));
+    assert!(has(&r, "callerm_e", "Unknown") || has(&r, "callerm_e", "Fs"), "callerm_e must not read pure: {:?}", r.get("callerm_e"));
+    assert!(has(&r, "u_modhoist", "Fs"), "u_modhoist must read Fs: {:?}", r.get("u_modhoist"));
+    let off = rows(&scan_json(&d, &[("CANDOR_I1S3_BODY_OFF", "1")], None));
+    assert!(!has(&off, "u_modhoist", "Fs"), "the hoist's kill switch restores the old reading: {:?}", off.get("u_modhoist"));
+    let _ = std::fs::remove_dir_all(&d);
+}
