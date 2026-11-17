@@ -11,6 +11,32 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **A `macro_rules!` that another macro DEFINES is expanded, and the `impl`s a macro emits inside a function body are
+  units** (SOUNDNESS R1784, R1813, I1 stage 3; closes silent under-reports pre-existing on 0.42.0). Where a definition comes
+  from and where an invocation sits are now read as data rather than as a list of positions:
+  - a definition an expansion emits (`def!();` writing `macro_rules! mk { .. }`, or the common `cfg_x! { macro_rules! m { .. } }`)
+    enters textual scope where it is met, at item, impl-item and statement position, in this file and (through
+    `#[macro_use] mod`) in others. An unbound `$name` in a transcriber is copied through as rustc does, which is what a
+    definer's inner metavariables are. Such a definition is keyed apart from SOURCE definitions of the same name in the
+    crate-wide tables, so it never turns a sibling module's definition into an R208 twin; cfg twins a macro emits disclose
+    `ambiguous:` as hand-written ones do;
+  - an `impl` a body-position invocation emits (in a fn, method, trait default, `const _: () = { .. }`, static, closure or
+    nested block) is placed beside its host item, as rustc collects it crate-wide: it becomes a unit, joins dispatch, and its
+    type publishes `deref` / `supers` in `typeSurface`. Where module scope is not where its names resolve (the body writes a
+    `use`, or declares an item the impl names) it is not placed, and a disclosure stands in its place. A hand-written impl in
+    a body is unchanged (SOUNDNESS R1257).
+  Executed probes, `deny Fs` 0 on 0.42.0 and main and 1 now: a fn, statement, method and inherent impl from a macro-defined
+  macro, two definer levels deep, in a module, in another file, and after a definer in textual order; a macro defined by a
+  body-position expansion; inherent, trait and `Deref` impls emitted in a fn, method, trait default, `const`, `static`,
+  closure, nested block and expression position; and a chained consumer following a body-emitted `Deref`. Pure twins stay
+  uncharged. On 181 crates against main: ADDED 115 rows, REMOVED 24 (12 units, each read pure: time `Weekday` arithmetic,
+  tokio's in-memory `AsyncWrite` for `Vec`/`Cursor`), 17 rows gain a concrete effect (mio's socket constructors `Net`/`Ipc`
+  through `syscall!`, rand 0.9 `fill` `Rand`, tokio `Log` through `trace_poll_op!`), 103 rows newly `Unknown` only (0.11%),
+  and one concrete effect lost: rand 0.10 `RngExt::fill` goes `Rand` → `Unknown dispatch:Fill.fill_slice`, because the
+  20 `Fill` impls rand writes in `const _: () = { impl_fill!(..) }` are now implementors and the dispatch passes the §4
+  bound. The chained census (138 entries) moves no probe. `CANDOR_I1S3_MDEF_OFF`, `CANDOR_I1S3_BMDEF_OFF` and
+  `CANDOR_I1S3_BODY_OFF` (which implies the first) restore the old readings. Cache rev 218.
+
 - ⚠ **The hidden-twin cover now reads unexpanded macro text as a SUPERSET of what it can bind** (SOUNDNESS R1541 / R1831, I1
   stage 2b; closes silent under-reports pre-existing on 0.42.0). A cfg-gated item a crate's own macro produces, beside a
   twin left as unexpanded text, is hedged where that text may define its name. The readings of such text were narrower than

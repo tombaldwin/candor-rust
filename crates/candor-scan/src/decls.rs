@@ -6463,7 +6463,14 @@ pub(crate) fn collect_decls(
                     && m.mac.path.is_ident("macro_rules") =>
             {
                 if let Some(name) = &m.ident {
-                    let name = name.to_string();
+                    // I1 stage 3 (R1784) — a definition an expansion emitted is keyed apart (`model::EMITTED_MACRO_PREFIX`): it
+                    // must not become an R208 twin of a source definition of the name in another module, and the collector
+                    // reads it only for a name no source definition has.
+                    let name = if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_EMITTED_DEF_ATTR)) {
+                        format!("{}{name}", crate::model::EMITTED_MACRO_PREFIX)
+                    } else {
+                        name.to_string()
+                    };
                     let tokens = m.mac.tokens.to_string();
                     // SOUNDNESS R208 — two `#[cfg]`-gated definitions of one name are the commonest
                     // spelling of this, and within ONE file they are the ONLY spelling of it. A plain
@@ -6479,6 +6486,10 @@ pub(crate) fn collect_decls(
                     // gated); `file_decls` strips them, so `FileDecls::macro_twins` carries names only.
                     let gate_key = format!("cfg\u{1f}{name}");
                     let gated = crate::lang::has_cfg(&m.attrs);
+                    // I1 stage 3 (R1784) — a produced arm whose twin may be in hidden text (`mbe::cover_arm`) is a twin already.
+                    if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_DEF_ATTR)) {
+                        macro_twins.insert(name.clone());
+                    }
                     if gated {
                         macro_twins.insert(gate_key.clone());
                     }

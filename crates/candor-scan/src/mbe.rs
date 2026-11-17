@@ -33,6 +33,13 @@
 //! the invoking module had no unit and read ABSENT, while its `super::`/`crate::` spellings disclosed
 //! `macro:`. The per-file cache keys on one file's bytes, so the table's digest is folded into every file's
 //! key (`scan.rs`) — a definition read from elsewhere cannot go stale under a warm entry.
+//!
+//! I1 STAGE 3 — WHERE A DEFINITION COMES FROM AND WHERE AN INVOCATION SITS ARE READ AS DATA, NOT POSITIONS. A definition enters
+//! textual scope where it is met, whether written in source or EMITTED by an expansion (R1784: `Ctx::emitted`, `scope`; the
+//! crate table reads a file's emitted definitions from its own splice, `file_macro_defs`; the collector keeps one a
+//! statement-position expansion emits, `collector::walk_expansion`). An invocation at item, impl-item and trait-item position
+//! is spliced as before; one in a BODY (fn, method, trait default, const, static, closure, nested block) has its emitted
+//! `impl`s hoisted beside the host item (R1813, `Ctx::hoist_body_impls`), since an `impl` is not scoped to its block.
 
 use proc_macro2::{Delimiter, Group, Ident, Spacing, TokenStream, TokenTree};
 use std::collections::HashMap;
@@ -438,6 +445,14 @@ fn transcribe(ts: &TokenStream, b: &Binds, idx: &[usize]) -> Option<TokenStream>
                     out.extend([TokenTree::Ident(Ident::new("crate", n.span()))]);
                     i += 2;
                 }
+                // I1 stage 3 (R1784) — a `$name` the arm does not bind is copied through as written, as rustc does: it is the
+                // metavariable of a `macro_rules!` this transcriber DEFINES (`macro_rules! inner { ($t:ident) => { .. $t .. } }`),
+                // read when that definition is invoked. Refusing it made every macro-defining macro with a metavariable in
+                // its inner definition unexpandable. `CANDOR_I1S3_MDEF_OFF=1` restores the refusal.
+                TokenTree::Ident(n) if !b.contains_key(&n.to_string()) && !mdef_off() => {
+                    out.extend([t.clone(), TokenTree::Ident(n.clone())]);
+                    i += 2;
+                }
                 TokenTree::Ident(n) => {
                     match lookup(b, &n.to_string(), idx)? {
                         Binding::One(ts) => out.extend(ts.clone()),
@@ -524,7 +539,12 @@ fn collect_defs(
         match it {
             syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => {
                 if let Some(name) = &m.ident {
-                    let e = defs.entry(name.to_string()).or_insert(Some(m.mac.tokens.clone()));
+                    // I1 stage 3 — an emitted definition (only in `file_macro_defs`' spliced copy) is keyed apart
+                    // (`model::EMITTED_MACRO_PREFIX`), read only for a name no source definition has.
+                    let emitted = m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_EMITTED_DEF_ATTR));
+                    let name =
+                        if emitted { format!("{}{name}", crate::model::EMITTED_MACRO_PREFIX) } else { name.to_string() };
+                    let e = defs.entry(name.clone()).or_insert(Some(m.mac.tokens.clone()));
                     if e.as_ref().is_some_and(|prev| prev.to_string() != m.mac.tokens.to_string()) {
                         *e = None;
                     }
@@ -535,7 +555,7 @@ fn collect_defs(
                     // macro_rules! delegate_async_read`), and refusing those deleted 184 rows on the 181-entry A/B.
                     // `CANDOR_I1_BIND_OFF=1` restores the old binding.
                     if crate::lang::has_cfg(&m.attrs)
-                        && (imported.contains(&name.to_string()) || imported.contains("*"))
+                        && (imported.contains(&name) || imported.contains("*"))
                         && !candor_report::env::switch("CANDOR_I1_BIND_OFF")
                     {
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
@@ -563,6 +583,18 @@ pub(crate) type CrateMacros = HashMap<String, Option<String>>;
 
 /// This file's definitions, for `merge_crate_macros`.
 pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String>)> {
+    // I1 stage 3 (R1784) — a definition another definition's EXPANSION emits (`m_defx!();` in `defs.rs`, invoked from a
+    // `#[macro_use] mod defs;` parent) is the crate's too: read from this file's own splice, which emits it. Only where some
+    // `macro_rules!` body here writes `macro_rules` itself (the cheap test), and with no other file's definitions (one level).
+    let spliced;
+    let items = if !mdef_off() && defines_a_definer(items) {
+        let mut c = items.to_vec();
+        splice_local_macros(&mut c, &CrateMacros::new());
+        spliced = c;
+        &spliced[..]
+    } else {
+        items
+    };
     let mut imported = std::collections::HashSet::new();
     if !candor_report::env::switch("CANDOR_I1_BIND_OFF") {
         imported_names(items, &mut imported);
@@ -591,6 +623,20 @@ pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String
     }
     walk(items, &mut v);
     v
+}
+
+/// I1 stage 3 — the crate-table key of a definition an expansion emitted (`model::EMITTED_MACRO_PREFIX`).
+fn emitted_key(name: &str) -> String {
+    format!("{}{name}", crate::model::EMITTED_MACRO_PREFIX)
+}
+
+/// I1 stage 3 — does some `macro_rules!` body in these items (at any module depth) itself write `macro_rules`?
+fn defines_a_definer(items: &[syn::Item]) -> bool {
+    items.iter().any(|it| match it {
+        syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => m.mac.tokens.to_string().contains("macro_rules"),
+        syn::Item::Mod(md) => md.content.as_ref().is_some_and(|(_, inner)| defines_a_definer(inner)),
+        _ => false,
+    })
 }
 
 /// The macro bodies `Ctx::read_hidden` may expand with: this file's (`Ctx::bodies`) and the crate's (`CrateMacros`, all bodies under
@@ -732,6 +778,9 @@ struct Ctx<'x> {
     /// so a sibling module's same-named macro is not bound to an invocation that cannot reach it (Fable re-check 2c-2 RC4.3,
     /// tokio's `impl_traits!` in `mod sys` read as `mod windows`'s hidden text).
     scope_bodies: HashMap<String, Vec<TokenStream>>,
+    /// I1 stage 3 (R1784) — the names of `macro_rules!` definitions an EXPANSION emitted (a macro-defining macro). Such a
+    /// name binds only where its definition is in TEXTUAL scope (`scope`), never through the file-wide once-defined table.
+    emitted: std::collections::HashSet<String>,
 }
 
 /// I1 step 1 — every name a `use` item of this file binds through a path that is NOT rooted at `crate`/`self`/`super`
@@ -1167,7 +1216,11 @@ impl Ctx<'_> {
 
     /// R1156 — the definition in textual scope for a name this FILE defines more than once.
     fn scoped_def(&self, name: &str) -> Option<String> {
-        if !matches!(self.defs.get(name), Some(None)) {
+        // I1 stage 3 (R1784) — an emitted definition is read from textual scope whatever the file-wide table holds: it shadows a
+        // source definition of the name from its invocation on (the table was set to `None` there), and it is the only
+        // definition of a name the table never held.
+        let emitted = self.emitted.contains(name) && !matches!(self.defs.get(name), Some(Some(_)));
+        if !emitted && !matches!(self.defs.get(name), Some(None)) {
             return None;
         }
         self.scope.get(name).cloned().flatten()
@@ -1193,9 +1246,11 @@ impl Ctx<'_> {
         let def = match local {
             Some(t) => Some(t),
             // R1004 — a definition from ANOTHER file, re-read from its text on THIS thread.
-            None if !self.defs.contains_key(name) => {
-                self.xdefs.get(name).cloned().flatten().and_then(|s| s.parse::<TokenStream>().ok())
-            }
+            None if !self.defs.contains_key(name) => match self.xdefs.get(name) {
+                Some(d) => d.clone().and_then(|s| s.parse::<TokenStream>().ok()),
+                // I1 stage 3 — a name only an expansion (in another file) defines
+                None => self.xdefs.get(&emitted_key(name)).cloned().flatten().and_then(|s| s.parse::<TokenStream>().ok()),
+            },
             None => None,
         };
         let a = def.and_then(|t| parse_arms(&t)).map(std::rc::Rc::new);
@@ -1215,7 +1270,11 @@ impl Ctx<'_> {
         // to the local definition by name would mint the WRONG items. Refused: the invocation stays, and R128 discloses it.
         let bound = match self.defs.get(&id) {
             Some(d) => d.is_some() || self.scoped_def(&id).is_some(),
-            None => self.xdefs.get(&id).is_some_and(|d| d.is_some()),
+            None if self.emitted.contains(&id) && self.scope.contains_key(&id) => self.scoped_def(&id).is_some(),
+            None => match self.xdefs.get(&id) {
+                Some(d) => d.is_some(),
+                None => !mdef_off() && self.xdefs.get(&emitted_key(&id)).is_some_and(|d| d.is_some()),
+            },
         };
         if bound && self.imported.contains(&id) {
             if candor_report::env::trace("CANDOR_I1_INSTR") {
@@ -1232,7 +1291,7 @@ impl Ctx<'_> {
             return None;
         }
         let name = self.local_name(mac)?;
-        let cross_file = !self.defs.contains_key(&name);
+        let cross_file = !self.defs.contains_key(&name) && !(self.emitted.contains(&name) && self.scope.contains_key(&name));
         let arms = self.arms_of(&name)?;
         SEP2_USED.with(|c| c.set(false));
         let ts = expand(&arms, &mac.tokens)?;
@@ -1392,9 +1451,29 @@ impl Ctx<'_> {
                     let gated = crate::lang::has_cfg(&m.attrs);
                     self.scope.insert(name.to_string(), (!gated).then(|| m.mac.tokens.to_string()));
                     self.scope_bodies.entry(name.to_string()).or_default().push(m.mac.tokens.clone());
+                    // I1 stage 3 (R1784) — a definition met INSIDE an expansion (depth > 0) was emitted by a macro. It enters
+                    // textual scope above like any other; a source definition of the same name no longer answers for the
+                    // whole file (`None`: read from scope), since which one an invocation sees now depends on order.
+                    if depth > 0 && !mdef_off() {
+                        let n = name.to_string();
+                        if candor_report::env::trace("CANDOR_I1_INSTR") {
+                            eprintln!("I1S3MDEF\t{n}"); // §E1 REACH COUNTER, on the CHANGED branch only
+                        }
+                        if self.defs.get(&n).is_some_and(|d| d.as_ref().map(|t| t.to_string()) != Some(m.mac.tokens.to_string())) {
+                            self.defs.insert(n.clone(), None);
+                        }
+                        self.emitted.insert(n);
+                    }
                 }
             }
             match &mut it {
+                // I1 stage 3 (R1784) — mark a definition an expansion emitted (see `model::MBE_EMITTED_DEF_ATTR`).
+                syn::Item::Macro(m) if m.ident.is_some() && depth > 0 && m.mac.path.is_ident("macro_rules") && !mdef_off() => {
+                    if !m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_EMITTED_DEF_ATTR)) {
+                        let id = syn::Ident::new(crate::model::MBE_EMITTED_DEF_ATTR, proc_macro2::Span::call_site());
+                        m.attrs.push(syn::parse_quote!(#[#id]));
+                    }
+                }
                 syn::Item::Macro(m) if m.ident.is_none() && !seed_dropped(&m.mac) => {
                     if let Some(gen) = self.expand_items(&m.mac, depth) {
                         // SOUNDNESS R1748 (a) — the TRAITS the expansion declares are not spliced (see below), but their
@@ -1421,8 +1500,8 @@ impl Ctx<'_> {
                             _ => None,
                         }));
                         // SOUNDNESS R1541 / I1 — EXPAND, DO NOT FILTER. Every item the expansion parses as is spliced beside
-                        // the invocation, as rustc places it, EXCEPT the refusal list (`i1_refused`): a nested invocation or
-                        // `macro_rules!` this pass could not expand (R1784), and traits (the R1748/R1754 markers above stand
+                        // the invocation, as rustc places it, EXCEPT the refusal list (`i1_refused`): a nested invocation this
+                        // pass could not expand, and traits (the R1748/R1754 markers above stand
                         // for them). This replaced an ALLOWLIST that grew one item kind per row (free fns, then inherent impls,
                         // then operator impls — R1004 → R1146 → R1157 → R1180 → R1748 → R1754): a macro-made TRAIT impl had no
                         // unit (R1541: `<AtomicU32 as LoadIt>::load_it` read pure over a write), a macro-made struct left its
@@ -1541,9 +1620,16 @@ impl Ctx<'_> {
                             self.partial.insert(invocation_key(&m.mac));
                             out.push(it);
                         }
+                        // I1 stage 3 (R1813) — a produced item's bodies are read for body-position impls too (`hoist_body_impls`),
+                        // here, where `scope` is the textual scope at the item.
+                        let mut hoisted = Vec::new();
+                        for g in &fns {
+                            hoisted.extend(self.hoist_body_impls(g, depth));
+                        }
                         spliced.resize(out.len(), false);
-                        spliced.resize(out.len() + fns.len(), true);
+                        spliced.resize(out.len() + fns.len() + hoisted.len(), true);
                         out.extend(fns);
+                        out.extend(hoisted);
                         out.append(&mut markers);
                         continue;
                     }
@@ -1565,7 +1651,15 @@ impl Ctx<'_> {
                 }
                 _ => {}
             }
+            // I1 stage 3 (R1813) — the impls a BODY-position invocation in this item emits, beside it (`hoist_body_impls`). Read
+            // HERE, in the loop, so `scope` is the textual scope at the item (a later redefinition does not answer for it).
+            let hoisted = self.hoist_body_impls(&it, depth);
             out.push(it);
+            if !hoisted.is_empty() {
+                spliced.resize(out.len(), false);
+                spliced.resize(out.len() + hoisted.len(), true);
+                out.extend(hoisted);
+            }
         }
         if !candor_report::env::switch("CANDOR_I1S2_TWIN_OFF") {
             spliced.resize(out.len(), false);
@@ -1627,6 +1721,274 @@ impl Ctx<'_> {
         }
         *items = out;
     }
+}
+
+/// I1 stage 3 (R1813) — one body-position invocation's expansion, read: the impls it emits (at any block depth of the
+/// expansion, and through the invocations nested in it), and whether some part could not be read.
+#[derive(Default)]
+struct BodyRead {
+    impls: Vec<syn::ItemImpl>,
+    /// an invocation of a CRATE-LOCAL macro whose bodies write `impl` could not be expanded or parsed
+    unread: bool,
+}
+
+/// I1 stage 3 (R1813) — the visitor over a host item's bodies. `overlay` is the body-local `macro_rules!` scope (R142's, and
+/// definitions a body-position expansion emits, R1784): name → arm tokens, `None` for a `#[cfg]`-gated one (no textual order
+/// picks between cfg twins). `in_expansion` is false over the host's own text: a HAND-WRITTEN impl in a body is SOUNDNESS
+/// R1257's, not hoisted here.
+struct BodyWalk<'c, 'x> {
+    cx: &'c mut Ctx<'x>,
+    overlay: HashMap<String, Option<String>>,
+    in_expansion: bool,
+    depth: usize,
+    out: BodyRead,
+}
+
+impl BodyWalk<'_, '_> {
+    fn invocation(&mut self, mac: &syn::Macro) {
+        let foreign = |mac: &syn::Macro| {
+            // §E1 REACH COUNTER — a body-position invocation of a macro this pass does not read (another crate's, by path or
+            // by name): SPEC §2's closability rule counts it too, and `typesurf` does not mark it (pre-existing, measured).
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                let root = mac.path.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+                let leaf = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                let tc = (mac.path.segments.len() == 1 || matches!(root.as_str(), "std" | "core" | "alloc"))
+                    && TOOLCHAIN_BANG_MACROS.contains(&leaf.as_str());
+                if !tc {
+                    eprintln!("I1S3BODYFOREIGN\t{root}::{leaf}");
+                }
+            }
+        };
+        let Some(id) = mac.path.get_ident().map(|i| i.to_string()) else {
+            foreign(mac);
+            return;
+        };
+        if id == "macro_rules" || self.depth >= MAX_DEPTH || self.cx.budget == 0 {
+            return;
+        }
+        // which definition: the body-local one in textual scope, else the module's (`local_name`, the item splice's rule)
+        let def: Option<Option<std::rc::Rc<Vec<Arm>>>> = match self.overlay.get(&id) {
+            Some(Some(t)) => Some(t.parse::<TokenStream>().ok().and_then(|t| parse_arms(&t)).map(std::rc::Rc::new)),
+            Some(None) => Some(None),
+            None => self.cx.local_name(mac).map(|n| self.cx.arms_of(&n)),
+        };
+        let Some(def) = def else {
+            foreign(mac); // not a crate-local macro: another crate's or the toolchain's (pre-existing)
+            return;
+        };
+        let may_impl = |arms: &Option<std::rc::Rc<Vec<Arm>>>, cx: &Ctx<'_>| match arms {
+            Some(a) => a.iter().any(|arm| writes_impl(&arm.body)),
+            None => cx.bodies.get(&id).is_none_or(|bs| bs.iter().any(writes_impl)),
+        };
+        let ts = def.as_ref().and_then(|arms| expand(arms, &mac.tokens));
+        let Some(ts) = ts else {
+            if may_impl(&def, self.cx) {
+                self.out.unread = true;
+            }
+            return;
+        };
+        let ts = respan_to(ts, mac.path.segments.first().map(|s| s.ident.span()).unwrap_or_else(proc_macro2::Span::call_site));
+        let braced = TokenStream::from(TokenTree::Group(Group::new(Delimiter::Brace, ts)));
+        let Ok(block) = syn::parse2::<syn::Block>(braced) else {
+            if may_impl(&def, self.cx) {
+                self.out.unread = true;
+            }
+            return;
+        };
+        self.cx.budget -= 1;
+        let (saved_in, saved_depth) = (self.in_expansion, self.depth);
+        self.in_expansion = true;
+        self.depth += 1;
+        // The expansion's top-level statements are the ENCLOSING block's (a statement-position invocation is spliced there),
+        // so a definition it emits stays in the overlay after it (R1784, `bm_def!(); bm_eff!();`).
+        self.stmts(&block.stmts);
+        self.in_expansion = saved_in;
+        self.depth = saved_depth;
+    }
+
+    fn stmts(&mut self, stmts: &[syn::Stmt]) {
+        for st in stmts {
+            match st {
+                syn::Stmt::Item(syn::Item::Macro(m)) if m.ident.is_some() && m.mac.path.is_ident("macro_rules") => {
+                    let n = m.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    let gated = crate::lang::has_cfg(&m.attrs);
+                    self.overlay.insert(n, (!gated).then(|| m.mac.tokens.to_string()));
+                }
+                _ => syn::visit::Visit::visit_stmt(self, st),
+            }
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for BodyWalk<'_, '_> {
+    fn visit_block(&mut self, b: &'ast syn::Block) {
+        let saved = self.overlay.clone();
+        self.stmts(&b.stmts);
+        self.overlay = saved;
+    }
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        self.invocation(m);
+    }
+    fn visit_item_impl(&mut self, im: &'ast syn::ItemImpl) {
+        if self.in_expansion {
+            self.out.impls.push(im.clone());
+        }
+        syn::visit::visit_item_impl(self, im);
+    }
+    // a module nested in a body is its own scope: not read here (the residual is counted, `I1S3BODYMOD`)
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("I1S3BODYMOD\t{}", m.ident); // §E1 REACH COUNTER
+        }
+    }
+}
+
+/// Does a `macro_rules!` arm body write the `impl` keyword anywhere (the cheap test for "may emit an impl")?
+fn writes_impl(ts: &TokenStream) -> bool {
+    ts.clone().into_iter().any(|t| match t {
+        TokenTree::Ident(i) => i == "impl",
+        TokenTree::Group(g) => writes_impl(&g.stream()),
+        _ => false,
+    })
+}
+
+/// Every identifier a body DECLARES as an item (fn, type, const, static, trait, macro) or binds by a `use`, at any block
+/// depth: a hoisted impl that names one would resolve it at module scope, which is not where rustc resolves it.
+fn body_declared(it: &syn::Item) -> std::collections::HashSet<String> {
+    struct D(std::collections::HashSet<String>, bool);
+    impl<'ast> syn::visit::Visit<'ast> for D {
+        fn visit_stmt(&mut self, st: &'ast syn::Stmt) {
+            if let syn::Stmt::Item(i) = st {
+                match i {
+                    syn::Item::Use(u) => {
+                        let mut v = Vec::new();
+                        use_renames_all(&u.tree, &mut v);
+                        self.0.extend(v);
+                        self.1 = true;
+                    }
+                    other => {
+                        if let Some(n) = crate::decls::declared_item_name(other, false) {
+                            self.0.insert(n.to_string());
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_stmt(self, st);
+        }
+    }
+    let mut d = D(Default::default(), false);
+    syn::visit::Visit::visit_item(&mut d, it);
+    if d.1 {
+        d.0.insert("\u{1}use".to_string());
+    }
+    d.0
+}
+
+/// Every name a `use` tree binds (leaf or rename), and `*` for a glob.
+fn use_renames_all(t: &syn::UseTree, out: &mut Vec<String>) {
+    match t {
+        syn::UseTree::Path(p) => use_renames_all(&p.tree, out),
+        syn::UseTree::Name(n) => out.push(n.ident.to_string()),
+        syn::UseTree::Rename(r) => out.push(r.rename.to_string()),
+        syn::UseTree::Glob(_) => out.push("*".to_string()),
+        syn::UseTree::Group(g) => g.items.iter().for_each(|x| use_renames_all(x, out)),
+    }
+}
+
+impl Ctx<'_> {
+    /// SOUNDNESS R1813 — THE IMPLS A BODY-POSITION INVOCATION EMITS, HOISTED BESIDE THE HOST ITEM.
+    ///
+    /// THE DEFECT. `fn _f() { mk_e!(WrapE, InnerX); }` where `mk_e!` expands to `impl Deref for WrapE { .. }`: the splice
+    /// reads item, impl-item and trait-item positions only, so this impl was in no index — no `WrapE::deref` unit, `WrapE`
+    /// published CLOSED with no `deref`, and a method of an inherent impl made this way (`TB.tb_go()`) had no unit at all.
+    /// An `impl` is not scoped to the block that holds it (rustc collects it crate-wide), so hoisting it is the expansion
+    /// rustc performs, read where Pass A can see it: a RESOLUTION. The invocation itself stays in the body, so the collector's
+    /// own R1144 walk (and its containment charge on the host) is unchanged.
+    ///
+    /// REFUSED, AND DISCLOSED INSTEAD, where module scope is not where the impl's names resolve: its self type, or any name
+    /// it mentions, is an item the host body declares or a `use` the host body writes. Then (and where a crate-local
+    /// macro whose bodies write `impl` could not be expanded or parsed) a placeholder item-position invocation stands beside
+    /// the host — R128's module evidence and `typesurf`'s unclosable mark, the cover main read through for a macro another
+    /// macro defined (`m_binh`). A hand-written impl in a body is SOUNDNESS R1257's and is not touched (`in_expansion`).
+    /// `CANDOR_I1S3_BODY_OFF=1` turns the hoist off.
+    fn hoist_body_impls(&mut self, host: &syn::Item, depth: usize) -> Vec<syn::Item> {
+        let has_body = match host {
+            syn::Item::Fn(_) | syn::Item::Const(_) | syn::Item::Static(_) | syn::Item::Impl(_) => true,
+            syn::Item::Trait(t) => t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Fn(f) if f.default.is_some())),
+            _ => false,
+        };
+        if !has_body || depth > 0 || body_off() {
+            return Vec::new();
+        }
+        let read = {
+            let mut w = BodyWalk { cx: self, overlay: HashMap::new(), in_expansion: false, depth: 0, out: BodyRead::default() };
+            syn::visit::Visit::visit_item(&mut w, host);
+            w.out
+        };
+        if read.impls.is_empty() && !read.unread {
+            return Vec::new();
+        }
+        let host_attrs = crate::lang::item_attrs(host);
+        let mut carry: Vec<syn::Attribute> =
+            host_attrs.iter().filter(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr")).cloned().collect();
+        if host_attrs.iter().any(|a| a.path().is_ident("test")) {
+            carry.push(syn::parse_quote!(#[cfg(test)]));
+        }
+        let declared = body_declared(host);
+        let mut out = Vec::new();
+        let mut refused = read.unread;
+        for mut im in read.impls {
+            let mut names = std::collections::HashSet::new();
+            all_idents(&quote::ToTokens::to_token_stream(&im), &mut names);
+            if declared.contains("\u{1}use") || names.iter().any(|n| declared.contains(n)) {
+                if candor_report::env::trace("CANDOR_I1_INSTR") {
+                    eprintln!("I1S3BODYREFUSE\t{}", ty_key(&im.self_ty)); // §E1 REACH COUNTER
+                }
+                refused = true;
+                continue;
+            }
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("I1S3BODYHOIST\t{}", ty_key(&im.self_ty)); // §E1 REACH COUNTER, on the CHANGED branch only
+            }
+            if prim_operator_impl(&im) {
+                let id = syn::Ident::new(crate::model::MBE_PRIM_ATTR, proc_macro2::Span::call_site());
+                im.attrs.push(syn::parse_quote!(#[#id]));
+            } else if operator_trait_impl(&im) {
+                let id = syn::Ident::new(crate::model::MBE_OP_ATTR, proc_macro2::Span::call_site());
+                im.attrs.push(syn::parse_quote!(#[#id]));
+            }
+            peel_groups(&mut im.self_ty);
+            if let Some((_, tp, _)) = &mut im.trait_ {
+                for seg in tp.segments.iter_mut() {
+                    if let syn::PathArguments::AngleBracketed(ab) = &mut seg.arguments {
+                        for a in ab.args.iter_mut() {
+                            if let syn::GenericArgument::Type(t) = a {
+                                peel_groups(t);
+                            }
+                        }
+                    }
+                }
+            }
+            let mut na = carry.clone();
+            na.append(&mut im.attrs);
+            im.attrs = na;
+            out.push(syn::Item::Impl(im));
+        }
+        if refused {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("I1S3BODYHIDDEN"); // §E1 REACH COUNTER
+            }
+            let mut ph: syn::ItemMacro = syn::parse_quote!(__candor_i1_body_hidden! {});
+            ph.attrs = carry;
+            out.push(syn::Item::Macro(ph));
+        }
+        out
+    }
+}
+
+pub(crate) fn body_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_I1S3_BODY_OFF"))
 }
 
 /// I1 stage 2 — the item kinds stage 2 started splicing, named for the reach counter.
@@ -1701,6 +2063,15 @@ fn mark_fn_as(attrs: &mut Vec<syn::Attribute>, n: &str, counter: &str) {
 /// hidden text, and a module arm is treated the same way at every depth of its body.
 fn cover_arm(it: &mut syn::Item) {
     match it {
+        // I1 stage 3 (R1784) — a produced `macro_rules!` arm is kept and MARKED: Pass A records its name as a cfg twin
+        // (`decls`, R208), so a body-position invocation discloses `ambiguous:` instead of reading this arm alone.
+        syn::Item::Macro(m) if m.ident.is_some() => {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("I1S3MARKMDEF\t{}", m.ident.as_ref().map(|i| i.to_string()).unwrap_or_default()); // §E1 REACH COUNTER
+            }
+            let id = syn::Ident::new(crate::model::MBE_TWIN_DEF_ATTR, proc_macro2::Span::call_site());
+            m.attrs.push(syn::parse_quote!(#[#id]));
+        }
         syn::Item::Fn(f) => {
             let n = f.sig.ident.to_string();
             mark_fn(&mut f.attrs, &n);
@@ -2144,7 +2515,11 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
                 && ((trivial
                     && matches!(it, syn::Item::Fn(_) | syn::Item::Use(_) | syn::Item::Mod(_) | syn::Item::Impl(_) | syn::Item::Type(_)))
                     || (matches!(it, syn::Item::Fn(_) | syn::Item::Use(_) | syn::Item::Mod(_) | syn::Item::Type(_))
-                        && visible_twin(it, out)))
+                        && visible_twin(it, out))
+                    // I1 stage 3 (R1784) — a produced, gated `macro_rules!` definition beside hidden text that may define the
+                    // name: its twin arm may be in that text (Fable `macrodef_e`), so a body-position invocation must not read
+                    // this arm alone. Superset argument: the same `visible_twin` test every other produced kind passes.
+                    || (matches!(it, syn::Item::Macro(m) if m.ident.is_some()) && (trivial || visible_twin(it, out))))
         })
         .collect();
     let marked_mods: std::collections::HashSet<String> = out
@@ -2268,11 +2643,14 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
 /// I1 stage 2 — modules, `use`s and `extern crate`s are SPLICED: the expansion is the program rustc compiles, so a module a
 /// macro makes (`mk!(bool)` → `pub mod bool { pub fn go() .. }`, R1535) is a module, and a `use` it makes binds a name
 /// (`sys!(tu)` → `use crate::tu as sys;`, R1688) exactly as the hand-written item does. What stays refused is what this pass
-/// cannot stand behind: a nested invocation it could not expand (kept as written, so it remains evidence), a nested
-/// `macro_rules!` definition (R1784, stage 3), and a trait (the R1748/R1754 markers stand for it). `CANDOR_I1S2_MODUSE_OFF=1`
-/// refuses modules, `use`s and `extern crate`s again (the stage-1 list).
+/// cannot stand behind: a nested invocation it could not expand (kept as written, so it remains evidence) and a trait (the
+/// R1748/R1754 markers stand for it). Stage 3 splices a nested `macro_rules!` DEFINITION (R1784; `CANDOR_I1S3_MDEF_OFF=1`
+/// refuses it again). `CANDOR_I1S2_MODUSE_OFF=1` refuses modules, `use`s and `extern crate`s again (the stage-1 list).
 fn i1_refused(g: &syn::Item) -> bool {
     match g {
+        // I1 stage 3 (R1784) — a `macro_rules!` DEFINITION the expansion emits is spliced: it enters textual scope (`splice`), so
+        // the invocations after it expand, and Pass A's `local_macros` reads it for a body-position invocation (R1144).
+        syn::Item::Macro(m) if m.ident.is_some() && m.mac.path.is_ident("macro_rules") => mdef_off(),
         syn::Item::Macro(_) | syn::Item::Trait(_) | syn::Item::TraitAlias(_) => true,
         syn::Item::Mod(_) | syn::Item::Use(_) | syn::Item::ExternCrate(_) => {
             candor_report::env::switch("CANDOR_I1S2_MODUSE_OFF")
@@ -3436,7 +3814,8 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
     let mut defs = HashMap::new();
     collect_defs(items, &imported, &mut defs);
     // R1156 — a name defined more than once (`None`) may still be expanded from its textual scope.
-    if defs.is_empty() && xdefs.iter().all(|(k, d)| d.is_none() || k.starts_with(ALL_BODIES_KEY)) {
+    // I1 stage 3 (R1813) — a file whose only definitions are BODY-local still has body-position invocations to read.
+    if defs.is_empty() && xdefs.iter().all(|(k, d)| d.is_none() || k.starts_with(ALL_BODIES_KEY)) && body_off() {
         return;
     }
     let mut bodies: HashMap<String, Vec<TokenStream>> = HashMap::new();
@@ -3458,13 +3837,32 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
         }
     }
     all_bodies(items, &mut bodies);
-    let mut cx = Ctx { arms: HashMap::new(), defs, xdefs, budget: MAX_EXPANSIONS, scope: HashMap::new(), imported, partial: Default::default(), bodies, scope_bodies: HashMap::new() };
+    let mut cx = Ctx {
+        arms: HashMap::new(),
+        defs,
+        xdefs,
+        budget: MAX_EXPANSIONS,
+        scope: HashMap::new(),
+        imported,
+        partial: Default::default(),
+        bodies,
+        scope_bodies: HashMap::new(),
+        emitted: Default::default(),
+    };
     cx.splice(items, 0);
 }
 
 
 /// I1 stage 2b FLIP — the opt-OUT of the cross-file `#[cfg]` lift (result-moving: a scan run under it records the switch and its
 /// gates refuse, as an opted-in scan's did while the lift was opt-in).
+/// I1 stage 3 (R1784) — the opt-out of macro-defined definitions. `CANDOR_I1S3_BODY_OFF` implies it: a definer that expands
+/// fully no longer stands as hidden text, and the R452 / R128 cover a body-position invocation of what it defines read through
+/// (`m_binh`, `Unknown` on 0.42.0) is then answered only by the body hoist. Measured: MDEF on with the hoist off read ABSENT.
+pub(crate) fn mdef_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_I1S3_MDEF_OFF") || body_off())
+}
+
 pub(crate) fn xcfg_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| candor_report::env::switch("CANDOR_I1S2_XCFG_OFF"))

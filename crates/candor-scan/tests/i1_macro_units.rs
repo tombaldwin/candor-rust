@@ -212,8 +212,9 @@ fn i1_step2_chained_consumer_joins_the_macro_made_impl() {
 /// Step 2 — ONE "expanded" fact. A fully expanded invocation no longer counts as hidden module text, so R128's
 /// `macro:` hedge on a path into that module is retired (`via_a` names a fn the module does not declare; it is the probe
 /// that the module's evidence is gone, and the OFF arm — the invocation left unexpanded — restores the hedge). A PARTIAL
-/// expansion — it also emits a nested `macro_rules!` definition, which stays refused until R1784's stage — keeps the
-/// invocation and with it the hedge (`via_b2`). Stage 2: an expansion that emits a MODULE is now full, and the module's
+/// expansion — it also emits a nested invocation of another crate's macro, which this pass cannot expand — keeps the
+/// invocation and with it the hedge (`via_b2`). (Until I1 stage 3 the partial arm was a nested `macro_rules!` definition;
+/// R1784 now splices that, so the probe uses the refusal that remains.) Stage 2: an expansion that emits a MODULE is now full, and the module's
 /// fn is a unit (`via_c` is charged through it).
 #[test]
 fn i1_step2_expanded_fact_retires_module_evidence_partial_keeps_it() {
@@ -223,7 +224,7 @@ fn i1_step2_expanded_fact_retires_module_evidence_partial_keeps_it() {
         "partial",
         "",
         "pub mod a { macro_rules! full { () => { pub struct Fa; impl Fa { pub fn fa(&self) {} } }; } full!(); }\n\
-         pub mod b { macro_rules! part { () => { macro_rules! inner_m { () => {} } pub fn pb() {} }; } part!(); }\n\
+         pub mod b { macro_rules! part { () => { other_crate::inner_m! {} pub fn pb() {} }; } part!(); }\n\
          pub mod c { macro_rules! modm { () => { pub mod inner { pub fn hid() { EFF } } pub fn pc() {} }; } modm!(); }\n\
          pub fn via_a() { crate::a::nope() }\npub fn via_b2() { crate::b::hid2() }\npub fn via_c() { crate::c::inner::hid() }\n",
     );

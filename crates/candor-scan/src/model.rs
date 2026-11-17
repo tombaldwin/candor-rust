@@ -1030,6 +1030,16 @@ pub(crate) fn async_ret_key(type_leaf: &str) -> String {
 /// for `ty` (`Self` for the default / the type itself, `*` for a generic parameter).
 /// SOUNDNESS R1157 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is
 /// a PRIMITIVE, so Pass A can tell it from a hand-written one (`prim_op_key`).
+/// I1 stage 3 (R1784) — the marker `mbe::cover_arm` puts on a produced `macro_rules!` arm whose cfg twin may be in hidden text:
+/// Pass A records the name as a `#[cfg]` twin (R208), so a body-position invocation discloses instead of expanding this arm.
+pub(crate) const MBE_TWIN_DEF_ATTR: &str = "__candor_i1_twin_def";
+/// I1 stage 3 (R1784) — the marker `mbe::Ctx::splice` puts on a `macro_rules!` definition an EXPANSION emitted. Every crate-wide
+/// name-keyed table records such a definition under `EMITTED_MACRO_PREFIX` + name, read only for a name no SOURCE definition has:
+/// a cfg-wrapped definition (`cfg_net! { macro_rules! syscall {..} }` in a sibling module) otherwise joined the source definition
+/// of the same name as an R208 twin, and the last-writer pick lost mio's `Net` on 8 rows (measured, the first A/B).
+pub(crate) const MBE_EMITTED_DEF_ATTR: &str = "__candor_i1_emitted_def";
+/// I1 stage 3 — the key prefix of an emitted definition in `local_macros` / `macro_twins` / `CrateMacros`.
+pub(crate) const EMITTED_MACRO_PREFIX: &str = "\u{4}emitted:";
 pub(crate) const MBE_PRIM_ATTR: &str = "candor_mbe_prim_op";
 /// SOUNDNESS R1180 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is
 /// NOMINAL (R1146), so `scan.rs` can keep its units from contesting a hand-written impl's `Type::method` tail.

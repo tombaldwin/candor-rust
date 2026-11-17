@@ -2205,7 +2205,22 @@ impl<'a> CallCollector<'a> {
         );
         let snap2 = (self.veinb_typed.clone(), self.local_use_seen.clone(), self.use_alts.clone(), self.std_made_vars.clone(), self.shape_vars.clone(), self.peeled_vars.clone());
         self.macro_expanding.insert(mname.to_string());
+        // I1 stage 3 (R1784) — a `macro_rules!` the expansion DEFINES at its top level is in textual scope for the rest of the
+        // ENCLOSING block, as rustc splices a statement-position expansion there (`bm_def!(); bm_eff!();`). `visit_block`
+        // restores `body_macros` on its way out, so the definitions it met in THIS block are handed back (`EXPORT_DEFS`) and
+        // kept. A definition inside a nested block of the expansion stays scoped to that block. `CANDOR_I1S3_BMDEF_OFF=1`.
+        let export = !candor_report::env::switch("CANDOR_I1S3_BMDEF_OFF");
+        let prev = export.then(|| EXPORT_DEFS.with(|c| c.replace((block as *const syn::Block as usize, Vec::new()))));
         self.visit_block(block);
+        if let Some(prev) = prev {
+            let (_, defs) = EXPORT_DEFS.with(|c| c.replace(prev));
+            for (n, t) in defs {
+                if candor_report::env::trace("CANDOR_I1_INSTR") {
+                    eprintln!("I1S3BMDEF\t{n}"); // §E1 REACH COUNTER, on the CHANGED branch only
+                }
+                self.body_macros.insert(n, t);
+            }
+        }
         self.macro_expanding.remove(mname);
         (
             self.vars,
@@ -13942,6 +13957,15 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         self.str_locals = saved_str_locals;
         *self.assign_drop.local_consts.borrow_mut() = saved_local_consts;
+        // I1 stage 3 (R1784) — the expansion block `walk_expansion` asked for: hand back what it defined (see there).
+        EXPORT_DEFS.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 == node as *const syn::Block as usize {
+                let new: Vec<(String, String)> =
+                    self.body_macros.iter().filter(|(k, v)| saved_macros.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+                c.1.extend(new);
+            }
+        });
         self.body_macros = saved_macros;
         self.trait_quals_by_param = saved;
     }
@@ -18200,7 +18224,11 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // and refusing here WITHDRAWS the charge the winning template supplies: measured on `r5b`,
         // `mb::a3_collision_hole` goes ['Fs'] → ['Unknown'], a concrete effect lost. So this adds the
         // disclosure and nothing else; the order-dependence stays open, now visibly rather than silently.
-        if !mpath.contains("::") && self.macro_twins.contains(&mleaf) {
+        // I1 stage 3 (R1784) — a name only an EXPANSION defines is keyed apart (`model::EMITTED_MACRO_PREFIX`); its twins are
+        // read under that key, and only where no source definition of the name exists.
+        let emitted_leaf = format!("{}{mleaf}", crate::model::EMITTED_MACRO_PREFIX);
+        let emitted_only = !self.local_macros.contains_key(&mleaf) && self.local_macros.contains_key(&emitted_leaf);
+        if !mpath.contains("::") && (self.macro_twins.contains(&mleaf) || (emitted_only && self.macro_twins.contains(&emitted_leaf))) {
             if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("R208DISCLOSE {mleaf}"); // §E1 HIT COUNTER
             }
@@ -18239,7 +18267,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         } else if scoped_def.is_some() {
             scoped_def.clone()
         } else if !self.macro_expanding.contains(&mleaf) {
-            self.local_macros.get(&mleaf).cloned()
+            self.local_macros.get(&mleaf).cloned().or_else(|| self.local_macros.get(&emitted_leaf).cloned())
         } else {
             None
         };
@@ -18262,7 +18290,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 // the walk records in textual order (R142); otherwise which template applies needs module scope and
                 // order this index does not hold, and the invocation is left to the stripped walk (v052 audit, fxm2).
                 let redefined = self.macro_twins.contains(&mleaf)
-                    || self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_REDEF_PREFIX));
+                    || self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_REDEF_PREFIX))
+                    || (emitted_only
+                        && (self.macro_twins.contains(&emitted_leaf)
+                            || self.macro_twins.contains(&format!("{}{emitted_leaf}", crate::model::MACRO_REDEF_PREFIX))));
                 if !redefined || self.body_macros.contains_key(&mname) || scoped_def.is_some() {
                     if let Some(ts) = crate::mbe::expand_invocation(&body, &respan_call_site(node.tokens.clone())) {
                         let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(
@@ -20164,4 +20195,9 @@ pub(crate) fn r1748_sig_err(
         return None;
     }
     Some(format!("{}Result", crate::model::RESULT_ALIAS_MARK))
+}
+
+thread_local! {
+    /// I1 stage 3 (R1784) — (the expansion block `walk_expansion` is reading, the `macro_rules!` definitions that block made).
+    static EXPORT_DEFS: std::cell::RefCell<(usize, Vec<(String, String)>)> = const { std::cell::RefCell::new((0, Vec::new())) };
 }
