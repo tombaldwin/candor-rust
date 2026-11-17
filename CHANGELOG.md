@@ -24,7 +24,7 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   module arm covered from hidden text one level up now discloses its trait defaults too. Where the other arm is an
   out-of-line `#[cfg(..)] mod sub;`, whose body is another file, the produced inline arm discloses as a whole. Names the
   hidden text does not define stay as they were.
-  `CANDOR_R1857_OFF=1` restores the previous reading. Cache rev219.
+  `CANDOR_R1857_OFF=1` restores the previous reading. Cache rev 220.
 
 - ⚠ **A `macro_rules!` that another macro DEFINES is expanded, and the `impl`s a macro emits inside a function body are
   units** (SOUNDNESS R1784, R1813, I1 stage 3; closes silent under-reports pre-existing on 0.42.0). Where a definition comes
