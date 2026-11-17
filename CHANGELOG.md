@@ -58,22 +58,28 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   type (`impl R for core::ops::Range<u8>`) keeps the leaf binding: the written std path is never resolved to the
   impl's own units, and a first cut lost every `Self::sibling()` edge there (`Fs` on 0.42.0, ABSENT). Where a `use`
   binds that leaf to ANOTHER type (`use dep::d::Lone as Range; impl Tr for std::ops::Range<u8>`), `Self` binds the bare
-  leaf, the impl's own unit key: `Self::sibling()` reached nothing on every arm before. Wherever a std-rooted self type
-  keeps a leaf reading, every `Self::m` position (`Self::m(..)`, `<Self>::m(..)`, `let f = Self::m`, `map(Self::m)`)
-  also carries the written std path, so a std INHERENT is classified (`Self::create(..)` in `impl Tr for std::fs::File`
-  reads `Fs`): with no `use`, a silence on every arm before; beside `use tokio::fs::File;` (or any `use` rebinding the
-  leaf), a first rework cut read ABSENT where 0.42.0 had charged the same-named inherent of the rebound type (`deny Fs`
-  1 → 0, closed before release). A member the crate itself declares for the type is never given the std reading, so a
-  pure sibling of `impl Tr for std::fs::File` is not charged by the classifier's `std::fs` prefix (`CANDOR_R1832B_OFF=1`
-  removes the std reading). `self.m()` on such a receiver
+  leaf, the impl's own unit key: `Self::sibling()` reached nothing on every arm before. For a std-rooted self type,
+  `Self::m` has two possible meanings, a std INHERENT of the type or a member of a trait impl the crate wrote for it,
+  and Rust takes the inherent first. One `Self` binding cannot carry both, so every `Self::m` position (`Self::m(..)`,
+  `<Self>::m(..)`, `let f = Self::m`, `map(Self::m)`) carries the second reading beside the binding, chosen per NAME by
+  that rule from std's inherent table (`std_assoc`, generated from rust-src): where `Self` binds the leaf, the std path
+  is added for a name std has an inherent of, so `Self::create(..)` in `impl Tr for std::fs::File` reads `Fs` even where
+  the impl's own trait member, another type of the same leaf, another trait impl of the type or a hidden member list
+  also declares `create` (SOUNDNESS R1849, silent on every arm before; beside `use tokio::fs::File;` a first rework cut
+  had read ABSENT where 0.42.0 charged the rebound type's same-named inherent, `deny Fs` 1 → 0, closed before release);
+  where `Self` binds the std path (`use core::ops::Range; impl Tr for Range<u32>`), the impl's own sibling is added for
+  a member this impl declares that std has no inherent of (silent on every arm before). A name std has no inherent of
+  never gets the std reading, so a pure own sibling is not charged by the classifier's `std::fs` / `std::process` /
+  `std::net` prefix rules. Known over-charge: the table is keyed by type LEAF across std and lists items that are not
+  public inherents (`File::read_at`, `File::read`), so a pure own member with such a name, called through `Self`, is
+  charged `Fs` (`CANDOR_R1832B_OFF=1` removes the second reading). `self.m()` on such a receiver
   is unchanged: it was, and stays, the untyped-receiver `Unknown` (R1169 types `self` by the written path only beside a
   local twin). Cost: a pure trait default called through `Self` with its trait in scope now reads `Unknown` (the walk
   does not join a pure union row), as the `use` spelling already did. NOT reached, all pre-existing and silent over an
   executed write: `Self::m` in a trait DEFAULT body naming a SUPERTRAIT's member (`trait P: Tally { fn a(self, p) {
   Self::tally_zz(self, p) } }`, a local supertrait too; `Self` there names the trait, R160, and supertraits are not
-  followed; `<Self as Tally>::m` is charged); a std self type named by its leaf through a `use` of the std type itself
-  (`use core::ops::Range; impl .. for Range<u32> { Self::sibling() }`; `Self` binds the std path and the sibling is not
-  reached); a module path a glob supplies when the glob is not the exclusive origin (two external globs, `use dep::*;
+  followed; `<Self as Tally>::m` is charged); a sibling from ANOTHER trait impl of the same std type reached through `Self::` where
+  `Self` binds the std path; a module path a glob supplies when the glob is not the exclusive origin (two external globs, `use dep::*;
   use std::collections::*;`; a crate-local glob of a globbing module, `mod pre { pub use dep::*; } use super::pre::*;`;
   an external glob beside `use super::*;`); and two entry edges next to `Self` that are
   not `Self` at all: a path call to a trait a `macro_rules!` DECLARES (the macro-made impl's unit is charged, the call to
@@ -114,7 +120,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `Self` had named thiserror's derive macro; `io::Error::other` and `io::Error::new` construct a value and are pure. The std
   reading kept beside a std-rooted `Self`: 0 rows changed on either corpus, reached at 40 chained and 11 standalone sites
   (`std::io::Error::{new, other, from_raw_os_error}`, `Arc::new`, `Cow::{Borrowed, Owned}`, `NonNull::new_unchecked`, all
-  pure constructors). R1835 reached no real-corpus call; its evidence is the executed fixtures.
+  pure constructors). The per-name rule that replaced the first guard: 0 rows changed chained; standalone, 2 rows newly
+  `Unknown` and 2 rows gaining a call edge, all borsh `impl BorshSchema for BTreeMap/BTreeSet/LinkedList/VecDeque` (named
+  by a `use` of the std type), whose `Self::declaration()` now reaches the impl's own `declaration` and its existing
+  `dispatch:` hedge. R1835 reached no real-corpus call; its evidence is the executed fixtures.
 
 - ⚠ **The hidden-twin cover now reads unexpanded macro text as a SUPERSET of what it can bind** (SOUNDNESS R1541 / R1831, I1
   stage 2b; closes silent under-reports pre-existing on 0.42.0). A cfg-gated item a crate's own macro produces, beside a
