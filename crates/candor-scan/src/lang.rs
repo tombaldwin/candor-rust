@@ -5560,6 +5560,49 @@ pub(crate) fn impl_self_binding(
     ex(leaf)
 }
 
+/// SOUNDNESS R1832 — the WRITTEN std/core/alloc path of an impl's self type, where `impl_self_binding` kept a LEAF
+/// reading for it instead (the impl's own units are keyed under the leaf). `Self::m` may equally name a std INHERENT
+/// (`Self::create` in `impl Tr for std::fs::File`), which the leaf reading cannot reach: written bare it names no rule,
+/// and where a `use` binds the leaf to another type (`use tokio::fs::File;`) the first rework's bare-leaf binding left it
+/// ABSENT over an executed `File::create` that the older wrong binding had charged (Fable's RE-CHECK 1, fx/h4 `sh5`,
+/// `sh5b`; `deny Fs` 1 → 0). The caller keeps this reading BESIDE the leaf one (`decls::IMPL_SELF_STD_KEY`). `None`
+/// where `Self` already binds the written path, or the self type is not a multi-segment std-rooted path.
+pub(crate) fn impl_self_std_reading(
+    ty: &syn::Type,
+    leaf: &str,
+    uses: &HashMap<String, String>,
+    follow: bool,
+) -> Option<String> {
+    let ex = |s: &str| if follow { expand(s, uses) } else { expand_noalias(s, uses) };
+    let syn::Type::Path(tp) = ty else { return None };
+    if tp.qself.is_some() || tp.path.segments.len() < 2 || r1832_off() || candor_report::env::switch("CANDOR_R1832B_OFF") {
+        return None;
+    }
+    let written = ex(&path_to_string_lc(&tp.path));
+    let root = written.trim_start_matches("::").split("::").next().unwrap_or("");
+    if !matches!(root, "std" | "core" | "alloc") {
+        return None;
+    }
+    let bound = impl_self_binding(ty, leaf, uses, follow);
+    (bound != written).then_some(written)
+}
+
+/// SOUNDNESS R1832 — the value stored under `decls::IMPL_SELF_STD_KEY`: the written std path, then `\u{2}`, then the
+/// impl block's OWN fn member names joined by `\u{1}`. A `Self::m` naming one of them is the impl's own unit, and its
+/// std reading (`std::fs::File::m`) must not be pushed: the classifier charges `std::fs::*` / `std::process::*` /
+/// `std::net::*` by PREFIX, so a pure sibling would read `Fs` / `Exec` / `Net` (EXECUTED rustagent-r1832 fx/g7 `pz_*`).
+pub(crate) fn impl_self_std_value(std_path: &str, items: &[syn::ImplItem]) -> String {
+    let own: Vec<String> = items
+        .iter()
+        .filter_map(|ii| match ii {
+            syn::ImplItem::Fn(m) => Some(m.sig.ident.to_string()),
+            syn::ImplItem::Macro(_) => Some("*".to_string()),
+            _ => None,
+        })
+        .collect();
+    format!("{std_path}\u{2}{}", own.join("\u{1}"))
+}
+
 fn r1832_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1832_OFF"))

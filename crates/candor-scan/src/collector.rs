@@ -12606,6 +12606,31 @@ impl<'a> CallCollector<'a> {
     fn leaves_are_callable(leaves: &[String]) -> bool {
         crate::lang::leaves_are_callable(leaves)
     }
+    /// SOUNDNESS R1832 — `Self::rest` in an impl whose self type is a WRITTEN std/core/alloc path that `Self` does not
+    /// bind (it keeps the leaf, the impl's own unit key): the std reading `std::fs::File::rest`, kept beside the leaf one so
+    /// a std inherent (`Self::create`) is classified while a sibling (`Self::helper`) still reaches the impl's own unit.
+    fn self_std_reading(&self, written: &str) -> Option<String> {
+        let rest = written.strip_prefix("Self::")?;
+        let (std_path, own) = self.uses.get(crate::decls::IMPL_SELF_STD_KEY)?.split_once('\u{2}')?;
+        // NOT a member this crate declares for the type: this impl's own fns, or any trait impl's member for the same leaf
+        // (`impl_members`, `*` = a member list a macro hides). Those are the impl's units, reached by the leaf reading, and
+        // a std reading of them would be charged by the classifier's std PREFIX rules (`std::fs::File::helper` → `Fs`).
+        let m = rest.split("::").next().unwrap_or(rest);
+        let leaf = std_path.rsplit("::").next().unwrap_or(std_path);
+        let crate_declares = own.split('\u{1}').any(|o| o == m || o == "*")
+            || self.impl_members.iter().any(|k| {
+                let mut p = k.split('\u{1f}');
+                matches!((p.next(), p.next(), p.next()), (Some(_), Some(ty), Some(km))
+                    if (ty == leaf || ty.ends_with(&format!("::{leaf}"))) && (km == m || km == "*"))
+            });
+        if crate_declares {
+            return None;
+        }
+        if candor_report::env::trace("CANDOR_R1832_INSTR") {
+            eprintln!("R1832STD\t{std_path}::{rest}"); // §E1 REACH COUNTER
+        }
+        Some(format!("{std_path}::{rest}"))
+    }
     /// Whether a bare NAME in this body refers to a LOCAL binding rather than to a module-level
     /// `static`/`const` of the same name. The ONE definition of that question: a same-named param, `let`,
     /// loop var or closure param shadows the static, and a consumer that skips this test charges the
@@ -13310,6 +13335,8 @@ impl<'a> CallCollector<'a> {
                     .unwrap_or_else(|| {
                         let written = expand(&crate::lang::path_to_string_lc(&p.path), &s.uses);
                         let mut targets = vec![written.clone()];
+                        // R1832 — `let f = Self::create;` keeps the std reading beside the leaf one.
+                        targets.extend(s.self_std_reading(&crate::lang::path_to_string_lc(&p.path)));
                         let head = p.path.segments.first().map(|x| x.ident.to_string());
                         let rest: Vec<String> =
                             p.path.segments.iter().skip(1).map(|x| x.ident.to_string()).collect();
@@ -13850,8 +13877,24 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let outer_p = std::mem::take(&mut self.trait_quals_by_param);
         // SOUNDNESS R175 — …and `Self`, which is the one binding in this list that is NOT empty on entry.
         // SOUNDNESS R1832 — a path-written self type binds its written path (`impl_self_binding`).
-        let bound = crate::lang::impl_type_name(&node.self_ty).map(|t| crate::lang::impl_self_binding(&node.self_ty, &t, &self.uses, true));
+        let leaf_name = crate::lang::impl_type_name(&node.self_ty);
+        let bound = leaf_name.as_deref().map(|t| crate::lang::impl_self_binding(&node.self_ty, t, &self.uses, true));
+        let std_reading = leaf_name.as_deref()
+            .and_then(|t| crate::lang::impl_self_std_reading(&node.self_ty, t, &self.uses, true))
+            .map(|sp| crate::lang::impl_self_std_value(&sp, &node.items));
         let outer_self = self.rebind_self(bound);
+        // R1832 — the nested impl's std reading replaces (or clears) the enclosing one; restored on exit.
+        let outer_std = self.uses.get(crate::decls::IMPL_SELF_STD_KEY).cloned();
+        if outer_std != std_reading {
+            match &std_reading {
+                Some(t) => {
+                    self.uses.to_mut().insert(crate::decls::IMPL_SELF_STD_KEY.to_string(), t.clone());
+                }
+                None => {
+                    self.uses.to_mut().remove(crate::decls::IMPL_SELF_STD_KEY);
+                }
+            }
+        }
         // R570/R576(a) — a nested impl's methods are not the enclosing trait's default bodies, and its
         // own generics are already installed in `generic_bounds` above.
         let outer_ts = self.trait_self.take();
@@ -13897,6 +13940,16 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         self.trait_self = outer_ts;
         self.impl_generic_bounds = outer_ig;
         self.restore_self(outer_self);
+        if self.uses.get(crate::decls::IMPL_SELF_STD_KEY) != outer_std.as_ref() {
+            match outer_std {
+                Some(t) => {
+                    self.uses.to_mut().insert(crate::decls::IMPL_SELF_STD_KEY.to_string(), t);
+                }
+                None => {
+                    self.uses.to_mut().remove(crate::decls::IMPL_SELF_STD_KEY);
+                }
+            }
+        }
         self.dyn_sig_traits = outer;
         self.dyn_local_traits = outer_l;
         self.mono_recv_traits = outer_m;
@@ -14264,6 +14317,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     if unfollowed != e && unfollowed.starts_with("crate::") {
                                         extras.push(unfollowed);
                                     }
+                                    if let Some(x) = self.self_std_reading(&written) {
+                                        extras.push(x);
+                                    }
                                     for extra in extras {
                                         let leaf2 = extra.rsplit("::").next().unwrap_or(&extra).to_string();
                                         self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: extra,
@@ -14288,6 +14344,14 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         // (`method:true` → resolve_target None): an honest under-report, never a fabrication.
                         let mut method = false;
                         if p.qself.is_some() && !path.contains("::") {
+                            // R1832 — `<Self>::create(..)` keeps the std reading beside the leaf one, as `Self::create` does.
+                            let self_qself = p.qself.as_ref().is_some_and(|q| matches!(&*q.ty, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self")));
+                            if let Some(extra) = self_qself.then(|| self.self_std_reading(&format!("Self::{path}"))).flatten() {
+                                let leaf2 = extra.rsplit("::").next().unwrap_or(&extra).to_string();
+                                self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: extra,
+                                    leaf: leaf2, str_arg: None, typed: false, method: false,
+                                    is_macro: false, path_lits_partial: false, path_lit2: None });
+                            }
                             match p.qself.as_ref().and_then(|q| type_path(&q.ty, &self.uses)) {
                                 Some(ty) => path = format!("{ty}::{path}"),
                                 None => method = true,
@@ -16097,7 +16161,8 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             let name = path_to_string(&p.path);
                             // R271 — every target of a fan-out alias, for the same reason the direct-call
                             // site edges to each: the adapter invokes ONE of them and the row is a union.
-                            let paths = self.fn_alias.get(&name).cloned().unwrap_or_else(|| vec![expand(&name, &self.uses)]);
+                            let mut paths = self.fn_alias.get(&name).cloned().unwrap_or_else(|| vec![expand(&name, &self.uses)]);
+                            paths.extend(self.self_std_reading(&name)); // R1832 — `map(Self::create)` beside `File::create`
                             for path in paths {
                                 let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
                                 self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false, path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });

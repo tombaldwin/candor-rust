@@ -172,6 +172,20 @@ const R1832_APP: &str = "#![allow(unused_imports)]\n\
     pub use shm::S11;\n\
     pub fn s_glob_zq(p: &str) { G9::g9_a(sqlx_core::d::lone(\"q\"), p) }\n\
     pub fn s_shadow_zq(p: &str) { <std::ops::Range<u8> as S11>::s11_a(p) }\n\
+    mod sh5 { use sqlx_core::d::Lone as File; pub trait Sh5 { fn sh5_a(p: &str); fn sh5_q(p: &str); fn sh5_f(p: &str); }\n\
+     impl Sh5 for std::fs::File { fn sh5_a(p: &str) { let _ = Self::create(format!(\"{p}.a\")); } fn sh5_q(p: &str) { let _ = <Self>::create(format!(\"{p}.q\")); }\n\
+      fn sh5_f(p: &str) { let f = Self::create; let _ = f(format!(\"{p}.f\")); } } }\n\
+    pub use sh5::Sh5;\n\
+    mod stdi { pub trait Si { fn si_a(p: &str); } impl Si for std::fs::File { fn si_a(p: &str) { let _ = Self::create(format!(\"{p}.si\")); } } }\n\
+    pub use stdi::Si;\n\
+    mod pz { pub trait Pz { fn pz_a(p: &str) -> usize; fn pz_pure(p: &str) -> usize; }\n\
+     impl Pz for std::fs::File { fn pz_a(p: &str) -> usize { Self::pz_pure(p) } fn pz_pure(p: &str) -> usize { p.len() } } }\n\
+    pub use pz::Pz;\n\
+    pub fn s_sh5_zq(p: &str) { <std::fs::File as Sh5>::sh5_a(p) }\n\
+    pub fn s_sh5q_zq(p: &str) { <std::fs::File as Sh5>::sh5_q(p) }\n\
+    pub fn s_sh5f_zq(p: &str) { <std::fs::File as Sh5>::sh5_f(p) }\n\
+    pub fn s_stdinh_zq(p: &str) { <std::fs::File as Si>::si_a(p) }\n\
+    pub fn s_stdpure_zq(p: &str) -> usize { <std::fs::File as Pz>::pz_a(p) }\n\
     pub fn l_crate_zq(p: &str) { <crate::lm::Loc2 as L1>::l_crate(p) }\n\
     pub fn l_super_zq(p: &str) { <crate::lm::Loc2 as L3>::l_super(p) }\n";
 
@@ -198,6 +212,13 @@ fn r1832_self_in_an_impl_written_on_a_dependency_path_reaches_the_dependency() {
     // …and where a `use` binds that leaf to ANOTHER type, the bare leaf (the impl's own unit key) is bound instead
     assert!(eff(&on, "s_shadow_zq").iter().any(|x| x == "Fs"), "s_shadow_zq: {:?}", eff(&on, "s_shadow_zq"));
     assert!(!eff(&off, "s_shadow_zq").iter().any(|x| x == "Fs"), "s_shadow_zq OFF: {:?}", eff(&off, "s_shadow_zq"));
+    // a std INHERENT through `Self` on a std-rooted self type reads the std effect in every position, with or without a
+    // `use` that rebinds the leaf (Fable RE-CHECK 1, fx/h4 `sh5b`); a PURE own sibling there is never charged by the
+    // classifier's std prefix rules
+    for f in ["s_sh5_zq", "s_sh5q_zq", "s_sh5f_zq", "s_stdinh_zq"] {
+        assert!(eff(&on, f).iter().any(|x| x == "Fs"), "{f}: {:?}", eff(&on, f));
+    }
+    assert!(concrete(&on, "s_stdpure_zq").is_empty(), "s_stdpure_zq: {:?}", eff(&on, "s_stdpure_zq"));
     // local types written with a path are unchanged: `Self::hit2` still reaches the local body
     for f in ["l_crate_zq", "l_super_zq"] {
         assert_eq!(eff(&on, f), eff(&off, f), "{f}");

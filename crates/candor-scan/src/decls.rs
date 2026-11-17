@@ -195,6 +195,9 @@ pub(crate) fn scan_items(
                     let prev = uses.insert(SELF_KEY.to_string(), alias.clone());
                     debug_assert!(prev.is_none(), "`Self` is a reserved word: nothing else can bind it");
                 }
+                if let Some(std_path) = self_name.as_deref().and_then(|t| crate::lang::impl_self_std_reading(&im.self_ty, t, uses, false)) {
+                    uses.insert(IMPL_SELF_STD_KEY.to_string(), crate::lang::impl_self_std_value(&std_path, &im.items)); // R1832 — the std reading kept beside the leaf
+                }
                 // SOUNDNESS R1494 — the impl's self type WRITTEN as a full std I/O handle path (`impl Wr for
                 // std::fs::File`). `Self` binds the LEAF (`File`), which expands to nothing without a `use`, so
                 // `self_io_receiver_spelled` could not see the handle: `std::io::Write::write_all(self, b)` in the body
@@ -310,6 +313,7 @@ pub(crate) fn scan_items(
                 uses.remove(IMPL_TARGS_KEY);
                 uses.remove(IMPL_TRAIT_KEY);
                 uses.remove(IMPL_STD_HANDLE_KEY);
+                uses.remove(IMPL_SELF_STD_KEY);
             }
             // SOUNDNESS R894 — A PUBLISHED FOREIGN DECLARATION IS A UNIT THE REPORT MUST ANSWER FOR. Its body
             // is in another language, so in-crate analysis already answers a call to it with `Unknown` +
@@ -674,6 +678,9 @@ pub(crate) const IMPL_TARGS_KEY: &str = "*impltargs";
 pub(crate) const IMPL_TRAIT_KEY: &str = "*impltrait";
 /// SOUNDNESS R1494 — the impl self type's full path when it is WRITTEN as a std I/O handle (`std::fs::File`).
 pub(crate) const IMPL_STD_HANDLE_KEY: &str = "*implstdhandle";
+/// SOUNDNESS R1832 — the impl self type's WRITTEN std/core/alloc path where `Self` keeps the leaf reading
+/// (`lang::impl_self_std_reading`); a `Self::m` call keeps this reading beside it (`CallCollector`).
+pub(crate) const IMPL_SELF_STD_KEY: &str = "*implselfstd";
 
 /// The key `submodule_uses` plants to say "this map is the enclosing module's scope" — see R378 there
 /// and in `lang::collect_use`'s `rebound`. Not an identifier, so it cannot collide with a bound name.
