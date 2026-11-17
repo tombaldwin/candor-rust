@@ -162,6 +162,9 @@ const R1832_APP: &str = "#![allow(unused_imports)]\n\
     pub fn s_gen_zq(p: &str) { D::d_path(sqlx_core::g::Gen(0u8), p) }\n\
     pub fn s_nested_zq(p: &str) { trait Nn { fn nn(self, p: &str); } impl Nn for sqlx_core::d::Lone { fn nn(self, p: &str) { use sqlx_core::Tally; Self::tally_zz(self, p) } } Nn::nn(sqlx_core::d::lone(\"q\"), p) }\n\
     pub fn s_pure_zq(p: &str) -> usize { A::a_pure(sqlx_core::d::lone(\"q\"), p) }\n\
+    pub trait Rr { fn r_a(p: &str); fn r_b(p: &str); }\n\
+    impl Rr for core::ops::Range<u8> { fn r_a(p: &str) { Self::r_b(p) } fn r_b(p: &str) { std::fs::write(format!(\"{p}.rb\"), \"b\").unwrap(); } }\n\
+    pub fn s_coresib_zq(p: &str) { <core::ops::Range<u8> as Rr>::r_a(p) }\n\
     pub fn l_crate_zq(p: &str) { <crate::lm::Loc2 as L1>::l_crate(p) }\n\
     pub fn l_super_zq(p: &str) { <crate::lm::Loc2 as L3>::l_super(p) }\n";
 
@@ -182,6 +185,9 @@ fn r1832_self_in_an_impl_written_on_a_dependency_path_reaches_the_dependency() {
     assert_eq!(deny(&app, "Fs", "s_path_zq", Some(&reps), &[]), 1);
     // the pure twin is never charged a concrete effect
     assert!(concrete(&on, "s_pure_zq").is_empty(), "s_pure_zq: {:?}", eff(&on, "s_pure_zq"));
+    // a std/core-rooted self type keeps the leaf binding: `Self::r_b` still reaches the impl's own sibling (a first cut
+    // bound `core::ops::Range` and the sibling edge was lost in every position, fx/g5 `core_*`)
+    assert!(eff(&on, "s_coresib_zq").iter().any(|x| x == "Fs"), "s_coresib_zq: {:?}", eff(&on, "s_coresib_zq"));
     // local types written with a path are unchanged: `Self::hit2` still reaches the local body
     for f in ["l_crate_zq", "l_super_zq"] {
         assert_eq!(eff(&on, f), eff(&off, f), "{f}");

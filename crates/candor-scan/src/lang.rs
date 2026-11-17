@@ -5475,8 +5475,8 @@ pub(crate) fn impl_type_name(ty: &syn::Type) -> Option<String> {
 ///
 /// So a multi-segment written path is expanded AS WRITTEN — exactly what the `use`-import spelling of the same
 /// impl already produced, which is R160's own stated rule (`Self::…` resolves "byte-identically to the same code
-/// written `<Type>::…`"). A one-segment self type, a qualified self type, and a non-path self type keep the leaf
-/// reading `leaf` (the caller's). `follow` selects `expand` or `expand_noalias`, matching each caller's existing
+/// written `<Type>::…`"). A one-segment self type, a qualified self type, a non-path self type and a std/core/alloc
+/// path keep the leaf reading `leaf` (the caller's). `follow` selects `expand` or `expand_noalias`, matching each caller's existing
 /// choice. Switch `CANDOR_R1832_OFF=1`.
 pub(crate) fn impl_self_binding(
     ty: &syn::Type,
@@ -5492,6 +5492,15 @@ pub(crate) fn impl_self_binding(
             && !r1832_off()
         {
             let written = ex(&path_to_string_lc(&tp.path));
+            // NOT a std/core/alloc path. The impl's own units are keyed under its LEAF, and a std-rooted path is never
+            // resolved to a crate unit, so `impl R for core::ops::Range<u8> { fn a() { Self::b() } }` lost its edge to
+            // the sibling `Range::b`, in every position (`Self::b()`, `<Self>::b()`, `let f = Self::b`, `map(Self::b)`):
+            // `Fs` on 0.42.0 and main, ABSENT on the first cut (EXECUTED rustagent-r1832 fx/g5 `core_*`). A dependency or
+            // crate-local root keeps the sibling edge (g5 `dep_*`, `loc_*`). The std root keeps the leaf reading, as before.
+            let root = written.trim_start_matches("::").split("::").next().unwrap_or("");
+            if matches!(root, "std" | "core" | "alloc") {
+                return ex(leaf);
+            }
             if candor_report::env::trace("CANDOR_R1832_INSTR") {
                 let old = ex(leaf);
                 if old != written {
