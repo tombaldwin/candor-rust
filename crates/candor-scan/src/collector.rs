@@ -12606,30 +12606,25 @@ impl<'a> CallCollector<'a> {
     fn leaves_are_callable(leaves: &[String]) -> bool {
         crate::lang::leaves_are_callable(leaves)
     }
-    /// SOUNDNESS R1832 — `Self::rest` in an impl whose self type is a WRITTEN std/core/alloc path that `Self` does not
-    /// bind (it keeps the leaf, the impl's own unit key): the std reading `std::fs::File::rest`, kept beside the leaf one so
-    /// a std inherent (`Self::create`) is classified while a sibling (`Self::helper`) still reaches the impl's own unit.
+    /// SOUNDNESS R1832 — the second reading of `Self::rest` in an impl on a std type (`lang::impl_self_extra`): the std
+    /// inherent `std::fs::File::m` where `Self` binds the leaf and std has an inherent `m` (Rust resolves it first), or the
+    /// impl's own sibling `Range::m` where `Self` binds the std path and this impl declares `m` and std has no inherent `m`.
     fn self_std_reading(&self, written: &str) -> Option<String> {
         let rest = written.strip_prefix("Self::")?;
-        let (std_path, own) = self.uses.get(crate::decls::IMPL_SELF_STD_KEY)?.split_once('\u{2}')?;
-        // NOT a member this crate declares for the type: this impl's own fns, or any trait impl's member for the same leaf
-        // (`impl_members`, `*` = a member list a macro hides). Those are the impl's units, reached by the leaf reading, and
-        // a std reading of them would be charged by the classifier's std PREFIX rules (`std::fs::File::helper` → `Fs`).
+        let (head, own) = self.uses.get(crate::decls::IMPL_SELF_STD_KEY)?.split_once('\u{2}')?;
+        let (mode, path) = head.split_once('\u{3}')?;
         let m = rest.split("::").next().unwrap_or(rest);
-        let leaf = std_path.rsplit("::").next().unwrap_or(std_path);
-        let crate_declares = own.split('\u{1}').any(|o| o == m || o == "*")
-            || self.impl_members.iter().any(|k| {
-                let mut p = k.split('\u{1f}');
-                matches!((p.next(), p.next(), p.next()), (Some(_), Some(ty), Some(km))
-                    if (ty == leaf || ty.ends_with(&format!("::{leaf}"))) && (km == m || km == "*"))
-            });
-        if crate_declares {
-            return None;
-        }
+        let leaf = path.rsplit("::").next().unwrap_or(path);
+        let inherent = crate::std_assoc::has_inherent(leaf, m);
+        let out = match mode {
+            "L" if inherent => format!("{path}::{rest}"),
+            "S" if !inherent && own.split('\u{1}').any(|o| o == m) => format!("{leaf}::{rest}"),
+            _ => return None,
+        };
         if candor_report::env::trace("CANDOR_R1832_INSTR") {
-            eprintln!("R1832STD\t{std_path}::{rest}"); // §E1 REACH COUNTER
+            eprintln!("R1832STD\t{out}"); // §E1 REACH COUNTER
         }
-        Some(format!("{std_path}::{rest}"))
+        Some(out)
     }
     /// Whether a bare NAME in this body refers to a LOCAL binding rather than to a module-level
     /// `static`/`const` of the same name. The ONE definition of that question: a same-named param, `let`,
@@ -13880,8 +13875,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let leaf_name = crate::lang::impl_type_name(&node.self_ty);
         let bound = leaf_name.as_deref().map(|t| crate::lang::impl_self_binding(&node.self_ty, t, &self.uses, true));
         let std_reading = leaf_name.as_deref()
-            .and_then(|t| crate::lang::impl_self_std_reading(&node.self_ty, t, &self.uses, true))
-            .map(|sp| crate::lang::impl_self_std_value(&sp, &node.items));
+            .and_then(|t| crate::lang::impl_self_extra(&node.self_ty, t, &self.uses, true, &node.items));
         let outer_self = self.rebind_self(bound);
         // R1832 — the nested impl's std reading replaces (or clears) the enclosing one; restored on exit.
         let outer_std = self.uses.get(crate::decls::IMPL_SELF_STD_KEY).cloned();

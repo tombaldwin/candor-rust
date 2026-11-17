@@ -186,6 +186,18 @@ const R1832_APP: &str = "#![allow(unused_imports)]\n\
     pub fn s_sh5f_zq(p: &str) { <std::fs::File as Sh5>::sh5_f(p) }\n\
     pub fn s_stdinh_zq(p: &str) { <std::fs::File as Si>::si_a(p) }\n\
     pub fn s_stdpure_zq(p: &str) -> usize { <std::fs::File as Pz>::pz_a(p) }\n\
+    mod own { pub trait Own { fn own_a(p: &str); fn create(p: String) -> usize; }\n\
+     impl Own for std::fs::File { fn own_a(p: &str) { let _ = Self::create(format!(\"{p}.own\")); } fn create(p: String) -> usize { p.len() } } }\n\
+    pub use own::Own;\n\
+    mod other { pub struct File; pub trait Mk { fn create(p: String) -> usize; } impl Mk for File { fn create(p: String) -> usize { p.len() } } }\n\
+    mod oth { pub trait Oth { fn oth_a(p: &str); } impl Oth for std::fs::File { fn oth_a(p: &str) { let _ = Self::create(format!(\"{p}.oth\")); } } }\n\
+    pub use oth::Oth;\n\
+    mod ucm { use core::ops::Range; pub trait U3 { fn u3_a(p: &str); fn u3_b(p: &str); }\n\
+     impl U3 for Range<u32> { fn u3_a(p: &str) { Self::u3_b(p) } fn u3_b(p: &str) { std::fs::write(format!(\"{p}.u3b\"), \"b\").unwrap(); } } }\n\
+    pub use ucm::U3;\n\
+    pub fn s_owninh_zq(p: &str) { <std::fs::File as Own>::own_a(p) }\n\
+    pub fn s_otherleaf_zq(p: &str) { <std::fs::File as Oth>::oth_a(p) }\n\
+    pub fn s_usecore_zq(p: &str) { <core::ops::Range<u32> as U3>::u3_a(p) }\n\
     pub fn l_crate_zq(p: &str) { <crate::lm::Loc2 as L1>::l_crate(p) }\n\
     pub fn l_super_zq(p: &str) { <crate::lm::Loc2 as L3>::l_super(p) }\n";
 
@@ -215,7 +227,10 @@ fn r1832_self_in_an_impl_written_on_a_dependency_path_reaches_the_dependency() {
     // a std INHERENT through `Self` on a std-rooted self type reads the std effect in every position, with or without a
     // `use` that rebinds the leaf (Fable RE-CHECK 1, fx/h4 `sh5b`); a PURE own sibling there is never charged by the
     // classifier's std prefix rules
-    for f in ["s_sh5_zq", "s_sh5q_zq", "s_sh5f_zq", "s_stdinh_zq"] {
+    // Rust's rule decides: an inherent `create` of the std type runs even where this impl's own trait member, or another
+    // type of the same leaf, is named `create` (Fable RE-CHECK 2, fx/h6a, h6b); a one-segment self type bound by `use` of
+    // the std type reaches this impl's own sibling (fx/g5 `usecore_sib`)
+    for f in ["s_sh5_zq", "s_sh5q_zq", "s_sh5f_zq", "s_stdinh_zq", "s_owninh_zq", "s_otherleaf_zq", "s_usecore_zq"] {
         assert!(eff(&on, f).iter().any(|x| x == "Fs"), "{f}: {:?}", eff(&on, f));
     }
     assert!(concrete(&on, "s_stdpure_zq").is_empty(), "s_stdpure_zq: {:?}", eff(&on, "s_stdpure_zq"));

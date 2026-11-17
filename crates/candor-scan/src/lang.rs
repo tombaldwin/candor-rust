@@ -5560,47 +5560,63 @@ pub(crate) fn impl_self_binding(
     ex(leaf)
 }
 
-/// SOUNDNESS R1832 — the WRITTEN std/core/alloc path of an impl's self type, where `impl_self_binding` kept a LEAF
-/// reading for it instead (the impl's own units are keyed under the leaf). `Self::m` may equally name a std INHERENT
-/// (`Self::create` in `impl Tr for std::fs::File`), which the leaf reading cannot reach: written bare it names no rule,
-/// and where a `use` binds the leaf to another type (`use tokio::fs::File;`) the first rework's bare-leaf binding left it
-/// ABSENT over an executed `File::create` that the older wrong binding had charged (Fable's RE-CHECK 1, fx/h4 `sh5`,
-/// `sh5b`; `deny Fs` 1 → 0). The caller keeps this reading BESIDE the leaf one (`decls::IMPL_SELF_STD_KEY`). `None`
-/// where `Self` already binds the written path, or the self type is not a multi-segment std-rooted path.
-pub(crate) fn impl_self_std_reading(
+/// SOUNDNESS R1832 — THE SECOND READING OF `Self` FOR A STD-ROOTED SELF TYPE, decided by Rust's own rule.
+///
+/// For an impl of a local trait on a std type, `Self::m` has two possible meanings: a std INHERENT associated fn of the
+/// type (`File::create`) or a member of a trait impl the crate wrote for it (this impl's own `a8_sib`, or another
+/// trait's). Rust resolves a path `Ty::m` to the inherent FIRST: an inherent `m` of the type wins over every trait
+/// member, the impl's own included (fx/h6a: the impl's own trait fn is named `create`, `Self::create(String)` runs the
+/// inherent). Only a name with no inherent reaches a trait member. One `Self` binding cannot carry both meanings, so the
+/// binding keeps one and the other is kept beside it at every `Self::` position, chosen by that rule, per NAME:
+///
+/// * `L` — `Self` binds the impl's LEAF (a multi-segment written std path, `impl Tr for std::fs::File`): the std reading
+///   `std::fs::File::m` is added exactly where std has an inherent `m` for that type (`std_assoc::has_inherent`, the
+///   table generated from rust-src). A first cut decided it from a crate-wide, leaf-keyed index of members the crate
+///   declares, which withheld a std inherent that really runs whenever ANY type of that leaf, ANY other trait impl of
+///   the type, or a macro-hidden member list declared the name (Fable's RE-CHECK 2, fx/h6a/b/e/f/g: `deny Fs` 1 → 0 or
+///   never 1). A name that is not an inherent is never given the std reading, so a pure own sibling cannot be charged
+///   by the classifier's `std::fs`/`std::process`/`std::net` prefix rules (fx/g7 `pz_*`).
+/// * `S` — `Self` binds the std PATH (the self type is its leaf, bound by a `use` of the std type: `use core::ops::Range;
+///   impl Tr for Range<u32>`): the leaf reading `Range::m` is added for a member THIS impl declares that std has no
+///   inherent of, which is the impl's own sibling (fx/g5 `usecore_sib`, h4 `sh6`: ABSENT on every arm before).
+///
+/// Encoded `"<L|S>\u{3}<path or leaf>\u{2}<this impl's fn names, \u{1}-joined>"` under `decls::IMPL_SELF_STD_KEY`;
+/// `None` for anything else. Switch `CANDOR_R1832B_OFF`.
+pub(crate) fn impl_self_extra(
     ty: &syn::Type,
     leaf: &str,
     uses: &HashMap<String, String>,
     follow: bool,
+    items: &[syn::ImplItem],
 ) -> Option<String> {
+    if r1832_off() || candor_report::env::switch("CANDOR_R1832B_OFF") {
+        return None;
+    }
     let ex = |s: &str| if follow { expand(s, uses) } else { expand_noalias(s, uses) };
     let syn::Type::Path(tp) = ty else { return None };
-    if tp.qself.is_some() || tp.path.segments.len() < 2 || r1832_off() || candor_report::env::switch("CANDOR_R1832B_OFF") {
+    if tp.qself.is_some() || tp.path.segments.last().is_none_or(|s| s.ident != leaf) {
         return None;
     }
-    let written = ex(&path_to_string_lc(&tp.path));
-    let root = written.trim_start_matches("::").split("::").next().unwrap_or("");
-    if !matches!(root, "std" | "core" | "alloc") {
-        return None;
-    }
-    let bound = impl_self_binding(ty, leaf, uses, follow);
-    (bound != written).then_some(written)
-}
-
-/// SOUNDNESS R1832 — the value stored under `decls::IMPL_SELF_STD_KEY`: the written std path, then `\u{2}`, then the
-/// impl block's OWN fn member names joined by `\u{1}`. A `Self::m` naming one of them is the impl's own unit, and its
-/// std reading (`std::fs::File::m`) must not be pushed: the classifier charges `std::fs::*` / `std::process::*` /
-/// `std::net::*` by PREFIX, so a pure sibling would read `Fs` / `Exec` / `Net` (EXECUTED rustagent-r1832 fx/g7 `pz_*`).
-pub(crate) fn impl_self_std_value(std_path: &str, items: &[syn::ImplItem]) -> String {
+    let std_root = |p: &str| matches!(p.trim_start_matches("::").split("::").next().unwrap_or(""), "std" | "core" | "alloc");
     let own: Vec<String> = items
         .iter()
         .filter_map(|ii| match ii {
             syn::ImplItem::Fn(m) => Some(m.sig.ident.to_string()),
-            syn::ImplItem::Macro(_) => Some("*".to_string()),
             _ => None,
         })
         .collect();
-    format!("{std_path}\u{2}{}", own.join("\u{1}"))
+    let own = own.join("\u{1}");
+    let bound = impl_self_binding(ty, leaf, uses, follow);
+    if std_root(&bound) {
+        return Some(format!("S\u{3}{leaf}\u{2}{own}"));
+    }
+    if tp.path.segments.len() >= 2 {
+        let written = ex(&path_to_string_lc(&tp.path));
+        if std_root(&written) && bound != written {
+            return Some(format!("L\u{3}{written}\u{2}{own}"));
+        }
+    }
+    None
 }
 
 fn r1832_off() -> bool {
