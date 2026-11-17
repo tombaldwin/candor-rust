@@ -1040,6 +1040,10 @@ pub(crate) const MBE_TWIN_DEF_ATTR: &str = "__candor_i1_twin_def";
 pub(crate) const MBE_EMITTED_DEF_ATTR: &str = "__candor_i1_emitted_def";
 /// I1 stage 3 — the key prefix of an emitted definition in `local_macros` / `macro_twins` / `CrateMacros`.
 pub(crate) const EMITTED_MACRO_PREFIX: &str = "\u{4}emitted:";
+/// I1 stage 3 (Fable stage-3 review D3) — a `macro_twins` key: ONE FILE holds both a source and an emitted definition of the
+/// name, so which one a body-position invocation sees depends on textual order the crate-wide table does not keep. The collector
+/// discloses `ambiguous:` at every body-position invocation of the name and still expands the source arm (nothing withdrawn).
+pub(crate) const EMITTED_SHADOW_PREFIX: &str = "\u{4}shadow:";
 pub(crate) const MBE_PRIM_ATTR: &str = "candor_mbe_prim_op";
 /// SOUNDNESS R1180 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is
 /// NOMINAL (R1146), so `scan.rs` can keep its units from contesting a hand-written impl's `Type::method` tail.

@@ -35,7 +35,7 @@ fn scan(dir: &Path, policy: Option<&str>, off: &[&str]) -> (i32, serde_json::Val
         std::fs::write(&pf, p).unwrap();
         cmd.arg("--policy").arg(&pf);
     }
-    for v in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1685_OFF"] {
+    for v in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1685_OFF", "CANDOR_I1S3_TRAITITEM_OFF"] {
         cmd.env_remove(v);
     }
     for v in off {
@@ -93,7 +93,9 @@ fn r1685_a_path_call_to_a_macro_declared_trait_member_dispatches_over_the_impls(
         let (code, _) = scan(&d, Some(&format!("deny Fs {f}\n")), &[]);
         assert_eq!(code, 1, "`deny Fs {f}` must fire");
     }
-    let (_, off) = scan(&d, None, &["CANDOR_R1685_OFF"]);
+    // I1 stage 3 splices the trait-item invocation (`unimpl! { period }`), so `Prov::period` is a declared member and the path
+    // call dispatches without R1685's reading; the calibration therefore turns BOTH off to show the fixture reaches R1685.
+    let (_, off) = scan(&d, None, &["CANDOR_R1685_OFF", "CANDOR_I1S3_TRAITITEM_OFF"]);
     for f in ["Stamp::period", "stamp_period_untyped", "typed_ufcs"] {
         assert!(field(&off, f, "inferred").is_empty(), "the switch restores the silence on `{f}` (proves the fixture reaches the code)");
     }

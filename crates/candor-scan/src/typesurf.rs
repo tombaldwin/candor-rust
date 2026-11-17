@@ -108,10 +108,16 @@ fn path_segs(p: &syn::Path) -> Vec<String> {
 fn attr_is_builtin(a: &syn::Attribute) -> bool {
     let segs = path_segs(a.path());
     match segs.as_slice() {
-        [one] => BUILTIN_ATTRS.contains(&one.as_str()) || one.starts_with("rustc_"),
+        [one] => BUILTIN_ATTRS.contains(&one.as_str()) || one.starts_with("rustc_") || is_stage3_marker(one),
         [root, ..] => TOOL_ATTR_ROOTS.contains(&root.as_str()),
         [] => true,
     }
+}
+
+/// I1 stage 3 — candor's own emitted-definition and produced-twin marks (`model::MBE_EMITTED_DEF_ATTR`, `MBE_TWIN_DEF_ATTR`) are
+/// not attribute macros. Read as one, every crate with an emitted `macro_rules!` was held unclosable (Fable stage-3 review D2).
+fn is_stage3_marker(one: &str) -> bool {
+    one == crate::model::MBE_EMITTED_DEF_ATTR || one == crate::model::MBE_TWIN_DEF_ATTR
 }
 
 /// `cfg_attr(pred, a, b)`: the attributes it may apply, as (path, is a `derive`, the derive names).
@@ -185,7 +191,12 @@ fn scan_attrs(attrs: &[syn::Attribute]) -> (bool, bool, Vec<syn::Path>) {
     for inner in helpers {
         let segs: Vec<&str> = inner.split("::").collect();
         let builtin = match segs.as_slice() {
-            [one] => BUILTIN_ATTRS.contains(one) || one.starts_with("rustc_") || (*one == "serde" && !serde.is_empty()),
+            [one] => {
+                BUILTIN_ATTRS.contains(one)
+                    || one.starts_with("rustc_")
+                    || is_stage3_marker(one)
+                    || (*one == "serde" && !serde.is_empty())
+            }
             [root, ..] => TOOL_ATTR_ROOTS.contains(root),
             [] => true,
         };

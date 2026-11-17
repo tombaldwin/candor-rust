@@ -1441,6 +1441,59 @@ impl Ctx<'_> {
         *items = out;
     }
 
+    /// I1 stage 3 (Fable stage-3 review D1) — a TRAIT-ITEM-position invocation (`pub trait AsyncWriteExt { write_impl! { fn
+    /// write_u8(..); } }`, tokio) expanded to the trait items it declares, under the impl-item rule (`expand_impl_items`). Left
+    /// unexpanded, the provided methods it writes had no unit and a call to one read ABSENT; main hid that behind R452's
+    /// name-keyed hedge only while R1784 kept the DEFINER partial. A RESOLUTION: the generated members are the trait's own.
+    fn expand_trait_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::TraitItem>> {
+        use syn::parse::Parser;
+        let (ts, cross_file) = self.expand_tokens(mac, depth)?;
+        let mut gen = (|input: syn::parse::ParseStream| {
+            let mut v = Vec::new();
+            while !input.is_empty() {
+                v.push(input.parse::<syn::TraitItem>()?);
+            }
+            Ok(v)
+        })
+        .parse2(ts)
+        .ok()?;
+        let xcfg = cross_file
+            && gen.iter().any(|ti| trait_item_attrs(ti).iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr")));
+        if xcfg && xcfg_off() {
+            return None;
+        }
+        self.budget -= 1;
+        self.splice_trait_items(&mut gen, depth + 1);
+        Some(gen)
+    }
+
+    fn splice_trait_items(&mut self, items: &mut Vec<syn::TraitItem>, depth: usize) {
+        if trait_item_off() || !items.iter().any(|ti| matches!(ti, syn::TraitItem::Macro(_))) {
+            return;
+        }
+        let mut out: Vec<syn::TraitItem> = Vec::with_capacity(items.len());
+        for it in std::mem::take(items) {
+            if let syn::TraitItem::Macro(m) = &it {
+                if let Some(mut gen) = self.expand_trait_items(&m.mac, depth) {
+                    for g in &mut gen {
+                        if let Some(a) = trait_item_attrs_mut(g) {
+                            let mut na = m.attrs.clone();
+                            na.append(a);
+                            *a = na;
+                        }
+                    }
+                    if candor_report::env::trace("CANDOR_I1_INSTR") {
+                        eprintln!("I1S3TRAITITEM\t{}", m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default()); // §E1 REACH COUNTER
+                    }
+                    out.extend(gen);
+                    continue;
+                }
+            }
+            out.push(it);
+        }
+        *items = out;
+    }
+
     fn splice(&mut self, items: &mut Vec<syn::Item>, depth: usize) {
         let mut out: Vec<syn::Item> = Vec::with_capacity(items.len());
         // I1 stage 2 — which items of `out` the splice PRODUCED (`mark_hidden_twins`), index for index.
@@ -1514,7 +1567,13 @@ impl Ctx<'_> {
                                 "CANDOR_I1_SEED_BODY",
                                 candor_report::env::Selects::AnyOf(&[seed_name.as_str()]),
                             );
-                        let full = gen.iter().all(|g| !i1_refused(g) || matches!(g, syn::Item::Trait(_)));
+                        // I1 stage 3 (D1) — a produced trait that still holds an unexpanded trait-item invocation keeps the invocation
+                        // PARTIAL: its text stays hidden evidence (R452), the cover main read through, since no unit stands for
+                        // the members it would write.
+                        let full = gen.iter().all(|g| match g {
+                            syn::Item::Trait(t) => !t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Macro(_))),
+                            _ => !i1_refused(g),
+                        });
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
                             for (g, k) in gen.iter().filter_map(|g| stage2_kind(g).map(|k| (g, k))) {
                                 if !i1_refused(g) {
@@ -1636,6 +1695,8 @@ impl Ctx<'_> {
                 }
                 // R1245 — a hand-written impl whose members a local macro declares.
                 syn::Item::Impl(im) => self.splice_impl_items(&mut im.items, depth),
+                // I1 stage 3 (D1) — a trait whose members a local macro declares.
+                syn::Item::Trait(t) => self.splice_trait_items(&mut t.items, depth),
                 syn::Item::Mod(md) => {
                     if let Some((_, inner)) = &mut md.content {
                         // R1156 — a child sees the parent's textual scope; its own definitions leave with it
@@ -1730,6 +1791,9 @@ struct BodyRead {
     impls: Vec<syn::ItemImpl>,
     /// an invocation of a CRATE-LOCAL macro whose bodies write `impl` could not be expanded or parsed
     unread: bool,
+    /// every name an EXPANSION declares as an item (fn, type, const, static, trait, module, `macro_rules!`), at any block depth,
+    /// and `\u{1}use` when one writes a `use` (Fable stage-3 review D4: the refusal read the host's text only)
+    declared: std::collections::HashSet<String>,
 }
 
 /// I1 stage 3 (R1813) — the visitor over a host item's bodies. `overlay` is the body-local `macro_rules!` scope (R142's, and
@@ -1811,6 +1875,9 @@ impl BodyWalk<'_, '_> {
             match st {
                 syn::Stmt::Item(syn::Item::Macro(m)) if m.ident.is_some() && m.mac.path.is_ident("macro_rules") => {
                     let n = m.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    if self.in_expansion {
+                        self.out.declared.insert(n.clone());
+                    }
                     let gated = crate::lang::has_cfg(&m.attrs);
                     self.overlay.insert(n, (!gated).then(|| m.mac.tokens.to_string()));
                 }
@@ -1835,6 +1902,33 @@ impl<'ast> syn::visit::Visit<'ast> for BodyWalk<'_, '_> {
         }
         syn::visit::visit_item_impl(self, im);
     }
+    // I1 stage 3 (D4) — what an expansion DECLARES, read by the hoist's refusal beside the host's own declarations.
+    fn visit_item(&mut self, it: &'ast syn::Item) {
+        if self.in_expansion {
+            match it {
+                syn::Item::Use(_) => {
+                    self.out.declared.insert("\u{1}use".to_string());
+                }
+                syn::Item::Impl(_) => {}
+                syn::Item::Macro(m) => {
+                    if let Some(i) = &m.ident {
+                        self.out.declared.insert(i.to_string());
+                    }
+                }
+                other => {
+                    if let Some(n) = crate::decls::declared_item_name(other, true) {
+                        self.out.declared.insert(n);
+                    }
+                }
+            }
+        }
+        syn::visit::visit_item(self, it);
+    }
+    // An IMPL-ITEM / TRAIT-ITEM invocation is not a statement: its expansion is members of that impl or trait (read by
+    // `splice_impl_items` on the hoisted impl), not items of the block. Read as statements, rand 0.10's
+    // `impl Fill for $t { impl_fill!(fill_slice! ..) }` counted `fill_slice` as a block declaration and refused its own impl.
+    fn visit_impl_item_macro(&mut self, _: &'ast syn::ImplItemMacro) {}
+    fn visit_trait_item_macro(&mut self, _: &'ast syn::TraitItemMacro) {}
     // a module nested in a body is its own scope: not read here (the residual is counted, `I1S3BODYMOD`)
     fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
         if candor_report::env::trace("CANDOR_I1_INSTR") {
@@ -1882,6 +1976,31 @@ fn body_declared(it: &syn::Item) -> std::collections::HashSet<String> {
         d.0.insert("\u{1}use".to_string());
     }
     d.0
+}
+
+/// Does the host body declare a type (struct, enum, union, alias) named `leaf`, at any block depth?
+fn body_declared_type(host: &syn::Item, leaf: &str) -> bool {
+    struct T<'a>(&'a str, bool);
+    impl<'ast> syn::visit::Visit<'ast> for T<'_> {
+        fn visit_stmt(&mut self, st: &'ast syn::Stmt) {
+            if let syn::Stmt::Item(i) = st {
+                let n = match i {
+                    syn::Item::Struct(x) => Some(&x.ident),
+                    syn::Item::Enum(x) => Some(&x.ident),
+                    syn::Item::Union(x) => Some(&x.ident),
+                    syn::Item::Type(x) => Some(&x.ident),
+                    _ => None,
+                };
+                if n.is_some_and(|n| n == self.0) {
+                    self.1 = true;
+                }
+            }
+            syn::visit::visit_stmt(self, st);
+        }
+    }
+    let mut t = T(leaf, false);
+    syn::visit::Visit::visit_item(&mut t, host);
+    t.1
 }
 
 /// Every name a `use` tree binds (leaf or rename), and `*` for a glob.
@@ -1934,7 +2053,15 @@ impl Ctx<'_> {
         if host_attrs.iter().any(|a| a.path().is_ident("test")) {
             carry.push(syn::parse_quote!(#[cfg(test)]));
         }
-        let declared = body_declared(host);
+        // THE REFUSAL'S SUPERSET ARGUMENT. Hoisting moves an impl from block scope to module scope, and only a NAME can resolve
+        // differently between the two: a name the block declares (an item, a `macro_rules!`) or binds (a `use`, which may be a
+        // glob and so bind any name). The block is the host body AND every expansion read in it, since an expansion's items are
+        // the block's items (`struct LS2; impl LS2 { .. }` from one invocation: `flocaltwin2`). So: any `use` in either refuses
+        // every impl; otherwise an impl naming no declared identifier resolves every name as module scope does. Fable stage-3
+        // review D4 measured the hole when the expansion's half was missing (`ls2_call_q` charged over a pure body).
+        let mut declared = body_declared(host);
+        let local_decl = read.declared.clone();
+        declared.extend(read.declared);
         let mut out = Vec::new();
         let mut refused = read.unread;
         for mut im in read.impls {
@@ -1944,9 +2071,19 @@ impl Ctx<'_> {
                 if candor_report::env::trace("CANDOR_I1_INSTR") {
                     eprintln!("I1S3BODYREFUSE\t{}", ty_key(&im.self_ty)); // §E1 REACH COUNTER
                 }
-                refused = true;
+                // An INHERENT impl of a type the block itself declares has no caller outside the block (the type is not
+                // nameable there), so refusing it hides nothing a caller elsewhere could reach: no disclosure is owed. A trait
+                // impl of such a type still is one (dispatch through a returned value), so it discloses.
+                let self_leaf = ty_key(&im.self_ty).rsplit("::").next().unwrap_or_default().to_string();
+                let block_local = local_decl.contains(&self_leaf) || body_declared_type(host, &self_leaf);
+                if !(block_local && im.trait_.is_none() && !declared.contains("\u{1}use")) {
+                    refused = true;
+                }
                 continue;
             }
+            // D5 — a hoisted impl whose member is an impl-item invocation (rand 0.10's `impl_fill!`) is read as a hand-written
+            // impl's is (`splice_impl_items`, R1245), so the member is a unit and not an opaque block.
+            self.splice_impl_items(&mut im.items, depth + 1);
             if candor_report::env::trace("CANDOR_I1_INSTR") {
                 eprintln!("I1S3BODYHOIST\t{}", ty_key(&im.self_ty)); // §E1 REACH COUNTER, on the CHANGED branch only
             }
@@ -1983,6 +2120,32 @@ impl Ctx<'_> {
             out.push(syn::Item::Macro(ph));
         }
         out
+    }
+}
+
+/// I1 stage 3 (D1) — the opt-out of trait-item splicing (`CANDOR_I1S3_TRAITITEM_OFF`); it implies `mdef_off` (see there).
+pub(crate) fn trait_item_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_I1S3_TRAITITEM_OFF"))
+}
+
+fn trait_item_attrs(ti: &syn::TraitItem) -> &[syn::Attribute] {
+    match ti {
+        syn::TraitItem::Fn(x) => &x.attrs,
+        syn::TraitItem::Const(x) => &x.attrs,
+        syn::TraitItem::Type(x) => &x.attrs,
+        syn::TraitItem::Macro(x) => &x.attrs,
+        _ => &[],
+    }
+}
+
+fn trait_item_attrs_mut(ti: &mut syn::TraitItem) -> Option<&mut Vec<syn::Attribute>> {
+    match ti {
+        syn::TraitItem::Fn(x) => Some(&mut x.attrs),
+        syn::TraitItem::Const(x) => Some(&mut x.attrs),
+        syn::TraitItem::Type(x) => Some(&mut x.attrs),
+        syn::TraitItem::Macro(x) => Some(&mut x.attrs),
+        _ => None,
     }
 }
 
@@ -3219,6 +3382,9 @@ const BUILTIN: &[&str] = &[
     // R1157/R1180 operator-impl marks and the R1146 synthesised-derive mark. Read as attribute macros they held every R828
     // hedge in any crate with a macro-made operator impl or a synthesised comparison (Fable stage-2 review, finding (c)).
     "candor_i1_hidden_twin", "candor_mbe_op", "candor_mbe_prim_op", "candor_derive_synth",
+    // I1 stage 3 — the emitted-definition and produced-twin marks (`model::MBE_EMITTED_DEF_ATTR`, `MBE_TWIN_DEF_ATTR`). Unlisted,
+    // they held every crate with an emitted `macro_rules!` unclosable (Fable stage-3 review D2, `fmarkerhold2`).
+    "__candor_i1_emitted_def", "__candor_i1_twin_def",
 ];
 const STD_ITEM_MACROS: &[&str] = &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm"];
 fn derive_hides(list: &syn::punctuated::Punctuated<syn::Path, syn::Token![,]>) -> bool {
@@ -3860,7 +4026,7 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
 /// (`m_binh`, `Unknown` on 0.42.0) is then answered only by the body hoist. Measured: MDEF on with the hoist off read ABSENT.
 pub(crate) fn mdef_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_I1S3_MDEF_OFF") || body_off())
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_I1S3_MDEF_OFF") || body_off() || trait_item_off())
 }
 
 pub(crate) fn xcfg_off() -> bool {
@@ -3931,7 +4097,14 @@ mod tests {
     /// "attribute" is one of them holds no R828 hedge; a real attribute macro beside them still does.
     #[test]
     fn candor_marker_attributes_are_not_a_hidden_impl_surface() {
-        for m in ["candor_mbe_op", "candor_mbe_prim_op", "candor_derive_synth", "candor_i1_hidden_twin"] {
+        for m in [
+            "candor_mbe_op",
+            "candor_mbe_prim_op",
+            "candor_derive_synth",
+            "candor_i1_hidden_twin",
+            crate::model::MBE_EMITTED_DEF_ATTR,
+            crate::model::MBE_TWIN_DEF_ATTR,
+        ] {
             let f: syn::File = syn::parse_str(&format!("#[{m}] impl X {{ #[{m}] fn f(&self) {{}} }} pub struct X;")).unwrap();
             assert!(!super::has_hidden_impl_surface(&f.items), "{m} read as an attribute macro");
         }

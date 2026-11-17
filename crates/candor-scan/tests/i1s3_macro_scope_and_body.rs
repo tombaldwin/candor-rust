@@ -44,6 +44,8 @@ fn scan_json(dir: &Path, env: &[(&str, &str)], deps: Option<&Path>) -> serde_jso
         "CANDOR_I1S3_MDEF_OFF",
         "CANDOR_I1S3_BMDEF_OFF",
         "CANDOR_I1S3_BODY_OFF",
+        "CANDOR_I1S3_TRAITITEM_OFF",
+        "CANDOR_I1S3_SHADOW_OFF",
     ] {
         cmd.env_remove(k);
     }
@@ -204,4 +206,91 @@ fn a_deref_a_body_position_invocation_emits_is_published_and_a_chained_consumer_
     let r = rows(&scan_json(&app, &[], Some(&prod.join("out"))));
     assert!(has(&r, "c_e2", "Fs"), "the chained consumer must read Fs through the published deref: {:?}", r.get("c_e2"));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Fable stage-3 review D1 (an INTRODUCED silence on the first cut): a macro-defined macro invoked at TRAIT-ITEM position inside
+/// its definer's expansion (tokio's `cfg_io_util! { macro_rules! write_impl .. pub trait AsyncWriteExt { write_impl! { .. } } }`).
+/// 0.42.0 and main hedged the call only through R452's name-keyed text of the PARTIAL definer; the first cut expanded the
+/// definer and left the trait-item invocation unexpanded, so the call read ABSENT. Trait-item invocations are now spliced; the
+/// same holds for a source macro (`fhidtrait2`) and an emitted macro in a source trait (`fhidtrait3`).
+#[test]
+fn a_trait_item_invocation_of_an_emitted_macro_writes_the_trait_members() {
+    let d = tmpdir("trait");
+    krate(
+        &d,
+        "i1s3trait",
+        "macro_rules! cfg_x { ($($i:item)*) => { $($i)* } }\npub struct Q;\n\
+         cfg_x! {\n    macro_rules! wimpl { ($(fn $name:ident(&mut self);)*) => { $( fn $name(&mut self) { EFF } )* } }\n\
+             pub trait ExtZ { wimpl! { fn write_zz(&mut self); } fn plain_zz(&mut self) {} }\n}\n\
+         impl ExtZ for Q {}\npub fn caller_e(x: &mut Q) { x.write_zz() }\npub fn zq_caller(x: &mut Q) { x.plain_zz() }\n\
+         macro_rules! simpl { ($(fn $name:ident(&self);)*) => { $( fn $name(&self) { EFF } )* } }\n\
+         pub trait SrcT { simpl! { fn src_zz(&self); } }\nimpl SrcT for Q {}\npub fn caller_src(x: &Q) { x.src_zz() }\n",
+    );
+    let r = rows(&scan_json(&d, &[], None));
+    for p in ["caller_e", "caller_src"] {
+        assert!(has(&r, p, "Fs"), "{p} must read Fs: {:?}", r.get(p));
+    }
+    assert!(r.get("zq_caller").is_none_or(|v| v.is_empty()), "the pure member is charged: {:?}", r.get("zq_caller"));
+    let off = rows(&scan_json(&d, &[("CANDOR_I1S3_TRAITITEM_OFF", "1")], None));
+    assert!(!has(&off, "caller_src", "Fs"), "the kill switch must restore the old reading: {:?}", off.get("caller_src"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Fable stage-3 review D4 (an INTRODUCED fabrication on the first cut): a type the EXPANSION declares beside its impl is local
+/// to the block; the impl must not be hoisted onto a same-named module-level type. And a `use` the expansion writes refuses
+/// the hoist and discloses (`fimpluse`).
+#[test]
+fn an_impl_of_a_type_the_expansion_declares_is_not_hoisted_onto_a_module_twin() {
+    let d = tmpdir("localtwin");
+    krate(
+        &d,
+        "i1s3local",
+        "pub struct LS2; impl LS2 { pub fn go(&self) {} }\npub fn ls2_call_q() { LS2.go() }\n\
+         macro_rules! mk_ls2 { () => { struct LS2; impl LS2 { pub fn go(&self) { EFF } } LS2.go(); } }\n\
+         fn host_ls2() { mk_ls2!(); }\n\
+         pub struct TU;\nmacro_rules! mk_tu { () => { use std::fs::write as wr; impl TU { pub fn tu_go(&self) { let _ = wr(\"/tmp/i1s3-never\", b\"x\"); } } } }\n\
+         fn host_tu() { mk_tu!(); }\npub fn tu_call() { TU.tu_go() }\n",
+    );
+    let r = rows(&scan_json(&d, &[], None));
+    assert!(r.get("ls2_call_q").is_none_or(|v| v.is_empty()), "the module-level pure twin is charged: {:?}", r.get("ls2_call_q"));
+    assert!(has(&r, "tu_call", "Unknown") || has(&r, "tu_call", "Fs"), "a refused hoist must disclose: {:?}", r.get("tu_call"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Fable stage-3 review D2: candor's own emitted-definition mark is not an attribute macro, so a crate whose only expansion
+/// the producer could not see was an emitted definition is closable once that definition is read (`fmarkerhold2`).
+#[test]
+fn an_emitted_definition_does_not_hold_the_crate_unclosable() {
+    let d = tmpdir("hold");
+    krate(
+        &d,
+        "i1s3hold",
+        "pub struct InnerZ; impl InnerZ { pub fn leak_z(&self) { EFF } }\npub struct WrapZ(pub InnerZ);\n\
+         macro_rules! def_dz { () => { macro_rules! mk_dz { ($t:ident, $u:ident) => { impl std::ops::Deref for $t { type Target = $u; fn deref(&self) -> &$u { &self.0 } } }; } }; }\n\
+         def_dz!();\nmk_dz!(WrapZ, InnerZ);\n",
+    );
+    let v = scan_json(&d, &[], None);
+    assert_eq!(v["typeSurface"]["types"]["i1s3hold#WrapZ"]["deref"].as_str(), Some("i1s3hold#InnerZ"), "{}", v["typeSurface"]);
+    let off = scan_json(&d, &[("CANDOR_I1S3_MDEF_OFF", "1")], None);
+    assert!(off["typeSurface"]["types"]["i1s3hold#WrapZ"]["supers"].is_null(), "MDEF off: the definer is unread, the crate unclosable");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Fable stage-3 review D3: a source and an emitted definition of one name in ONE file; which one a body-position invocation
+/// sees depends on textual order the crate-wide table does not keep, so it discloses (`fshadowbody`). A cross-file pair (mio's
+/// `syscall!`) is not touched: it keeps the source arm's charge.
+#[test]
+fn a_source_and_an_emitted_definition_in_one_file_disclose_at_body_position() {
+    let d = tmpdir("shadow");
+    krate(
+        &d,
+        "i1s3shadow",
+        "macro_rules! def_kb { () => { macro_rules! kb { () => { EFF }; } }; }\ndef_kb!();\npub fn kb_pre() { kb!(); }\n\
+         macro_rules! kb { () => { () }; }\npub fn zq_kb() { kb!(); }\n",
+    );
+    let r = rows(&scan_json(&d, &[], None));
+    assert!(has(&r, "kb_pre", "Unknown") || has(&r, "kb_pre", "Fs"), "kb_pre must not read pure: {:?}", r.get("kb_pre"));
+    let off = rows(&scan_json(&d, &[("CANDOR_I1S3_SHADOW_OFF", "1")], None));
+    assert!(off.get("kb_pre").is_none_or(|v| v.is_empty()), "the switch restores the old (silent) reading: {:?}", off.get("kb_pre"));
+    let _ = std::fs::remove_dir_all(&d);
 }

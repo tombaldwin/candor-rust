@@ -19,23 +19,30 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
     `#[macro_use] mod`) in others. An unbound `$name` in a transcriber is copied through as rustc does, which is what a
     definer's inner metavariables are. Such a definition is keyed apart from SOURCE definitions of the same name in the
     crate-wide tables, so it never turns a sibling module's definition into an R208 twin; cfg twins a macro emits disclose
-    `ambiguous:` as hand-written ones do;
+    `ambiguous:` as hand-written ones do, and so does a body-position invocation of a name ONE file defines both in source
+    and through an expansion (which one is in textual scope there is not kept), with the source arm still expanded;
+  - a TRAIT-ITEM-position invocation (`pub trait AsyncWriteExt { write_impl! { fn write_u8(..); } }`) is expanded into
+    the trait's members, as impl-item position already was; a macro-made trait whose member invocation cannot be expanded
+    keeps its definer as unexpanded text, so the name-keyed hedge over its members stands;
   - an `impl` a body-position invocation emits (in a fn, method, trait default, `const _: () = { .. }`, static, closure or
     nested block) is placed beside its host item, as rustc collects it crate-wide: it becomes a unit, joins dispatch, and its
-    type publishes `deref` / `supers` in `typeSurface`. Where module scope is not where its names resolve (the body writes a
-    `use`, or declares an item the impl names) it is not placed, and a disclosure stands in its place. A hand-written impl in
-    a body is unchanged (SOUNDNESS R1257).
+    type publishes `deref` / `supers` in `typeSurface`, and an impl-item invocation inside it is expanded as in any impl.
+    Where module scope is not where its names resolve (the body or the expansion writes a `use`, or declares an item the
+    impl names) it is not placed, and a disclosure stands in its place; an inherent impl of a type the block itself
+    declares is simply left in the block. A hand-written impl in a body is unchanged (SOUNDNESS R1257). candor's own
+    markers on an emitted definition are not attribute macros, so they do not hold a crate unclosable.
   Executed probes, `deny Fs` 0 on 0.42.0 and main and 1 now: a fn, statement, method and inherent impl from a macro-defined
   macro, two definer levels deep, in a module, in another file, and after a definer in textual order; a macro defined by a
   body-position expansion; inherent, trait and `Deref` impls emitted in a fn, method, trait default, `const`, `static`,
   closure, nested block and expression position; and a chained consumer following a body-emitted `Deref`. Pure twins stay
-  uncharged. On 181 crates against main: ADDED 115 rows, REMOVED 24 (12 units, each read pure: time `Weekday` arithmetic,
-  tokio's in-memory `AsyncWrite` for `Vec`/`Cursor`), 17 rows gain a concrete effect (mio's socket constructors `Net`/`Ipc`
-  through `syscall!`, rand 0.9 `fill` `Rand`, tokio `Log` through `trace_poll_op!`), 103 rows newly `Unknown` only (0.11%),
-  and one concrete effect lost: rand 0.10 `RngExt::fill` goes `Rand` → `Unknown dispatch:Fill.fill_slice`, because the
-  20 `Fill` impls rand writes in `const _: () = { impl_fill!(..) }` are now implementors and the dispatch passes the §4
-  bound. The chained census (138 entries) moves no probe. `CANDOR_I1S3_MDEF_OFF`, `CANDOR_I1S3_BMDEF_OFF` and
-  `CANDOR_I1S3_BODY_OFF` (which implies the first) restore the old readings. Cache rev 218.
+  uncharged. On 181 crates against main: ADDED 144 rows, REMOVED 7 units (each read pure: time `Weekday` arithmetic),
+  27 rows gain a concrete effect (mio's socket constructors `Net`/`Ipc` through `syscall!`, rand 0.9 `fill` and rand 0.10's
+  ten `fill_slice` units `Rand`, tokio `Log` through `trace_poll_op!`), 103 rows newly `Unknown` only (0.11%), and one
+  concrete effect lost: rand 0.10 `RngExt::fill` goes `Rand` → `Unknown dispatch:Fill.fill_slice`, because the 20 `Fill`
+  impls rand writes in `const _: () = { impl_fill!(..) }` are now implementors and the dispatch passes the §4 bound. The
+  chained census (138 entries) moves no probe. `CANDOR_I1S3_MDEF_OFF`, `CANDOR_I1S3_BMDEF_OFF`, `CANDOR_I1S3_BODY_OFF` and
+  `CANDOR_I1S3_TRAITITEM_OFF` (the last two imply the first) and `CANDOR_I1S3_SHADOW_OFF` restore the old readings.
+  Cache rev 218.
 
 - ⚠ **The hidden-twin cover now reads unexpanded macro text as a SUPERSET of what it can bind** (SOUNDNESS R1541 / R1831, I1
   stage 2b; closes silent under-reports pre-existing on 0.42.0). A cfg-gated item a crate's own macro produces, beside a

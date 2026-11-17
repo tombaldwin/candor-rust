@@ -1555,6 +1555,22 @@ pub(crate) fn retire_expanded(m: &mut MergedDecls, file_mods: &std::collections:
             }
         }
     }
+    // I1 stage 3 (Fable D1's blind spot) — the name-keyed hedge evidence as it stands after retirement, for an A/B of the
+    // EVIDENCE itself: a name that leaves it while its member still has no unit is the D1 shape, whether or not a caller exists.
+    if candor_report::env::trace("CANDOR_I1S3_EVIDENCE") {
+        let mut v: Vec<String> = m
+            .macro_hidden_fns
+            .iter()
+            .map(|n| format!("FN\t{n}"))
+            .chain(m.macro_hidden_types.iter().map(|n| format!("TY\t{n}")))
+            .chain(m.nested_impl_members.iter().map(|n| format!("L\t{n}")))
+            .chain(m.nested_impl_foreign.iter().map(|n| format!("F\t{n}")))
+            .collect();
+        v.sort();
+        for e in v {
+            eprintln!("I1S3EVID\t{e}");
+        }
+    }
     retired
 }
 

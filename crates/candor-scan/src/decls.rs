@@ -6466,12 +6466,15 @@ pub(crate) fn collect_decls(
                     // I1 stage 3 (R1784) — a definition an expansion emitted is keyed apart (`model::EMITTED_MACRO_PREFIX`): it
                     // must not become an R208 twin of a source definition of the name in another module, and the collector
                     // reads it only for a name no source definition has.
-                    let name = if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_EMITTED_DEF_ATTR)) {
-                        format!("{}{name}", crate::model::EMITTED_MACRO_PREFIX)
-                    } else {
-                        name.to_string()
-                    };
+                    let bare = name.to_string();
+                    let emitted = m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_EMITTED_DEF_ATTR));
+                    let name = if emitted { format!("{}{name}", crate::model::EMITTED_MACRO_PREFIX) } else { bare.clone() };
                     let tokens = m.mac.tokens.to_string();
+                    // I1 stage 3 (D3) — a source and an emitted definition of one name in ONE file (`model::EMITTED_SHADOW_PREFIX`).
+                    let other = if emitted { bare.clone() } else { format!("{}{bare}", crate::model::EMITTED_MACRO_PREFIX) };
+                    if local_macros.get(&other).is_some_and(|t| *t != tokens) && !candor_report::env::switch("CANDOR_I1S3_SHADOW_OFF") {
+                        macro_twins.insert(format!("{}{bare}", crate::model::EMITTED_SHADOW_PREFIX));
+                    }
                     // SOUNDNESS R208 — two `#[cfg]`-gated definitions of one name are the commonest
                     // spelling of this, and within ONE file they are the ONLY spelling of it. A plain
                     // sequential redefinition (`macro_rules! go { .. }` twice, no attribute) is NOT

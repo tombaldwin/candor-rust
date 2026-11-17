@@ -18228,7 +18228,10 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // read under that key, and only where no source definition of the name exists.
         let emitted_leaf = format!("{}{mleaf}", crate::model::EMITTED_MACRO_PREFIX);
         let emitted_only = !self.local_macros.contains_key(&mleaf) && self.local_macros.contains_key(&emitted_leaf);
-        if !mpath.contains("::") && (self.macro_twins.contains(&mleaf) || (emitted_only && self.macro_twins.contains(&emitted_leaf))) {
+        let shadowed = self.macro_twins.contains(&format!("{}{mleaf}", crate::model::EMITTED_SHADOW_PREFIX));
+        if !mpath.contains("::")
+            && (self.macro_twins.contains(&mleaf) || (emitted_only && self.macro_twins.contains(&emitted_leaf)) || shadowed)
+        {
             if candor_report::env::trace("CANDOR_ALIAS_DEBUG") {
                 eprintln!("R208DISCLOSE {mleaf}"); // §E1 HIT COUNTER
             }
