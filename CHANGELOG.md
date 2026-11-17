@@ -45,6 +45,45 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `CANDOR_I1S3_TRAITITEM_OFF` (the last two imply the first) and `CANDOR_I1S3_SHADOW_OFF` restore the old readings.
   Cache rev 218.
 
+- ⚠ **`Self` inside an impl written on a PATH names that path** (SOUNDNESS R1832; closes a silent under-report pre-existing
+  on 0.42.0). In `impl Go for dep::d::Lone { fn go(self, p) { Self::tally_zz(self, p) } }`, `Self` was bound to the bare
+  leaf `Lone`, which no `use` binds, so `Self::tally_zz` named no unit and no dependency and the call vanished: the row
+  read `[]` chained over a trait default that reads the environment and writes a file, while the same impl written
+  `use dep::d::Lone; impl Go for Lone` read `Env, Fs`. A multi-segment self type now binds `Self` to its written path,
+  which is what the `use` spelling already produced. Executed, `deny Fs` 0 on 0.42.0 and main and 1 now: `Self::m(..)`,
+  `<Self>::m(..)`, `Self::m` as a value, inside a closure, an associated fn with no receiver, a sibling method of the
+  same impl, a generic dependency type (`dep::g::Gen<u8>`), a module-path impl (`impl E for d::Lone`), and an impl nested
+  in a fn body. A classified member through `Self` now joins its row as well as the classifier's charge. Where a local
+  type shares the dependency type's leaf, the call no longer reaches only the local twin. A std/core/alloc-rooted self
+  type (`impl R for core::ops::Range<u8>`) keeps the leaf binding: the written std path is never resolved to the
+  impl's own units, and a first cut lost every `Self::sibling()` edge there (`Fs` on 0.42.0, ABSENT). `self.m()` on such a receiver
+  is unchanged: it was, and stays, the untyped-receiver `Unknown` (R1169 types `self` by the written path only beside a
+  local twin). Cost: a pure trait default called through `Self` with its trait in scope now reads `Unknown` (the walk
+  does not join a pure union row), as the `use` spelling already did. `CANDOR_R1832_OFF=1`.
+- ⚠ **A nested fn's callable parameter discloses when it is invoked** (SOUNDNESS R1833; pre-existing on 0.42.0). `{ fn
+  app<F: FnOnce(&str)>(f: F, p: &str) { f(p) } app(dep::wr_zz, p) }` read ABSENT, chained and unchained, over an executed
+  write, and so did the same shape with a LOCAL effectful fn, a `fn(&str)` pointer or a `&dyn Fn(&str)` parameter. The
+  identical helper at the top level read `Unknown` (`callback:`). A nested fn's callable parameters are now hedged as a
+  top-level fn's are. This is a hedge, not a resolution: neither helper is resolved to the fn passed in. A callable
+  parameter that is never invoked adds nothing. `CANDOR_R1833_OFF=1`.
+- ⚠ **An unclassified join no longer takes a same-tail sibling type's row** (SOUNDNESS R1835; pre-existing on 0.42.0).
+  `dep::c::Raw::tally_zz(..)`, where `tally_zz` is `Tally`'s provided body on `c::Raw`, asked the tail `Raw::tally_zz`
+  and joined `a::Raw::tally_zz`, an inherent that only writes, so the row read `[Fs]` and `deny Env` exited 0 over an
+  executed read (path and method spelling alike). Where every producer row under the tail belongs to a DIFFERENT
+  published type (R1807's rule for classified calls), the tail is not asked, and the walk from the written type reaches
+  the trait default (`Env, Fs`) or discloses. A full qual the producer carries keeps the old key. `CANDOR_R1835_OFF=1`.
+  Cache rev 218.
+- Cost of the three entries above, measured on 7425d9eb against the final build (corpus A/B, `--jobs 2`): 32 real
+  consumers chained over their own locks (22,152 rows): 9 rows gain a concrete effect (hickory-net's `impl UdpSocket for
+  tokio::net::UdpSocket`, whose `Self::bind` / `Self::poll_recv_from` / `Self::poll_send_to` run tokio's own `Net`; each
+  traced to the tokio body), 0 newly `Unknown`, 0 effects or `invisible` lost; 1 row removed (mysql_common
+  `binlog::jsonb::Value::try_from`, an `impl TryFrom<..> for serde_json::Value` whose only `Unknown` came from `Self`
+  resolving to the crate's own same-leaf `Value`; its body only converts JSON values, read pure). 141 census crates
+  standalone (72,397 rows): 9 concrete adds (hickory-net `Net`, tokio-util `Ipc` through `impl .. for
+  tokio::net::UnixListener`), 12 rows newly `Unknown` only (0.017%: borsh's nested `all(.., f_key: impl Fn ..)`, and
+  tokio-util's untyped-receiver hedges now naming a newly effectful candidate), 0 concrete or `invisible` lost, the same
+  one removal. R1835 reached no real-corpus call; its evidence is the executed fixtures.
+
 - ⚠ **The hidden-twin cover now reads unexpanded macro text as a SUPERSET of what it can bind** (SOUNDNESS R1541 / R1831, I1
   stage 2b; closes silent under-reports pre-existing on 0.42.0). A cfg-gated item a crate's own macro produces, beside a
   twin left as unexpanded text, is hedged where that text may define its name. The readings of such text were narrower than
