@@ -17278,24 +17278,25 @@
     },
     {
       "fn": "mbe::Ctx::<'_>::expand_items",
-      "loc": "crates/candor-scan/src/mbe.rs:683:5: 683:89",
+      "loc": "crates/candor-scan/src/mbe.rs:1320:5: 1320:89",
       "inferred": [
-        "Env"
-      ],
-      "direct": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "declared": [],
       "undeclared": [
         "Env"
       ],
       "overdeclared": [],
-      "hash": "7f07d505992c79d69ffebb2c5a0109ae",
+      "unresolved": true,
+      "hash": "cbe592f2c92ac495eba3ae71032e44ed",
       "calls": [
         "mbe::Ctx::<'_>::expand_tokens",
-        "mbe::Ctx::<'_>::splice"
+        "mbe::Ctx::<'_>::splice",
+        "mbe::xcfg_off"
       ],
       "invisible": [
+        "candor_report",
         "proc_macro2",
         "quote",
         "syn"
@@ -17338,25 +17339,34 @@
     },
     {
       "fn": "mbe::Ctx::<'_>::splice",
-      "loc": "crates/candor-scan/src/mbe.rs:792:5: 792:67",
+      "loc": "crates/candor-scan/src/mbe.rs:1497:5: 1497:67",
       "inferred": [
-        "Env"
-      ],
-      "direct": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "declared": [],
       "undeclared": [
         "Env"
       ],
       "overdeclared": [],
-      "hash": "7f07d505992c79d61792168ab7e14500",
+      "unresolved": true,
+      "hash": "cbe592f2c92ac4957072fd5a28d07974",
       "calls": [
         "mbe::Ctx::<'_>::expand_items",
+        "mbe::Ctx::<'_>::hoist_body_impls",
+        "mbe::Ctx::<'_>::read_hidden",
         "mbe::Ctx::<'_>::splice",
-        "mbe::Ctx::<'_>::splice_impl_items"
+        "mbe::Ctx::<'_>::splice_impl_items",
+        "mbe::Ctx::<'_>::splice_trait_items",
+        "mbe::i1_refused",
+        "mbe::mark_hidden_twins",
+        "mbe::mbe_trait_body_marker",
+        "mbe::mbe_trait_marker",
+        "mbe::mdef_off",
+        "mbe::seed_dropped"
       ],
       "invisible": [
+        "candor_report",
         "proc_macro2",
         "quote",
         "syn"
@@ -17425,13 +17435,27 @@
     },
     {
       "fn": "mbe::file_macro_defs",
-      "loc": "crates/candor-scan/src/mbe.rs:528:1: 528:84",
-      "inferred": [],
+      "loc": "crates/candor-scan/src/mbe.rs:585:1: 585:84",
+      "inferred": [
+        "Env",
+        "Unknown"
+      ],
       "declared": [],
-      "undeclared": [],
+      "undeclared": [
+        "Env"
+      ],
       "overdeclared": [],
-      "hash": "7f07d505992c79d686ce7f67e719db49",
+      "unresolved": true,
+      "hash": "cbe592f2c92ac4952042ea2dac34b7c5",
+      "calls": [
+        "mbe::collect_defs",
+        "mbe::mdef_off",
+        "mbe::splice_local_macros"
+      ],
       "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "quote",
         "syn"
       ]
     },
@@ -17607,20 +17631,25 @@
     },
     {
       "fn": "mbe::splice_local_macros",
-      "loc": "crates/candor-scan/src/mbe.rs:1233:1: 1233:83",
+      "loc": "crates/candor-scan/src/mbe.rs:3982:1: 3982:83",
       "inferred": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "declared": [],
       "undeclared": [
         "Env"
       ],
       "overdeclared": [],
-      "hash": "7f07d505992c79d6211cf151ebdab7e2",
+      "unresolved": true,
+      "hash": "cbe592f2c92ac495e5bd644d1a58f2ef",
       "calls": [
-        "mbe::Ctx::<'_>::splice"
+        "mbe::Ctx::<'_>::splice",
+        "mbe::body_off",
+        "mbe::collect_defs"
       ],
       "invisible": [
+        "candor_report",
         "proc_macro2",
         "quote",
         "syn"
