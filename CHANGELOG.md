@@ -58,15 +58,24 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   type (`impl R for core::ops::Range<u8>`) keeps the leaf binding: the written std path is never resolved to the
   impl's own units, and a first cut lost every `Self::sibling()` edge there (`Fs` on 0.42.0, ABSENT). Where a `use`
   binds that leaf to ANOTHER type (`use dep::d::Lone as Range; impl Tr for std::ops::Range<u8>`), `Self` binds the bare
-  leaf, the impl's own unit key: `Self::sibling()` reached nothing on every arm before. `self.m()` on such a receiver
+  leaf, the impl's own unit key: `Self::sibling()` reached nothing on every arm before. Wherever a std-rooted self type
+  keeps a leaf reading, every `Self::m` position (`Self::m(..)`, `<Self>::m(..)`, `let f = Self::m`, `map(Self::m)`)
+  also carries the written std path, so a std INHERENT is classified (`Self::create(..)` in `impl Tr for std::fs::File`
+  reads `Fs`): with no `use`, a silence on every arm before; beside `use tokio::fs::File;` (or any `use` rebinding the
+  leaf), a first rework cut read ABSENT where 0.42.0 had charged the same-named inherent of the rebound type (`deny Fs`
+  1 → 0, closed before release). A member the crate itself declares for the type is never given the std reading, so a
+  pure sibling of `impl Tr for std::fs::File` is not charged by the classifier's `std::fs` prefix (`CANDOR_R1832B_OFF=1`
+  removes the std reading). `self.m()` on such a receiver
   is unchanged: it was, and stays, the untyped-receiver `Unknown` (R1169 types `self` by the written path only beside a
   local twin). Cost: a pure trait default called through `Self` with its trait in scope now reads `Unknown` (the walk
   does not join a pure union row), as the `use` spelling already did. NOT reached, all pre-existing and silent over an
   executed write: `Self::m` in a trait DEFAULT body naming a SUPERTRAIT's member (`trait P: Tally { fn a(self, p) {
   Self::tally_zz(self, p) } }`, a local supertrait too; `Self` there names the trait, R160, and supertraits are not
-  followed; `<Self as Tally>::m` is charged); a std-rooted self type whose `Self::m` is a std inherent (`impl C for
-  std::fs::File { Self::create(..) }`) or whose leaf a `use` binds to the std type itself (`use core::ops::Range; impl ..
-  for Range<u32> { Self::sibling() }`), both needing two readings of `Self`; and two entry edges next to `Self` that are
+  followed; `<Self as Tally>::m` is charged); a std self type named by its leaf through a `use` of the std type itself
+  (`use core::ops::Range; impl .. for Range<u32> { Self::sibling() }`; `Self` binds the std path and the sibling is not
+  reached); a module path a glob supplies when the glob is not the exclusive origin (two external globs, `use dep::*;
+  use std::collections::*;`; a crate-local glob of a globbing module, `mod pre { pub use dep::*; } use super::pre::*;`;
+  an external glob beside `use super::*;`); and two entry edges next to `Self` that are
   not `Self` at all: a path call to a trait a `macro_rules!` DECLARES (the macro-made impl's unit is charged, the call to
   it forms no edge) and a UFCS call `<Box<i8> as Tr>::m(..)`. `CANDOR_R1832_OFF=1`.
 - ⚠ **A nested fn's callable parameter discloses when it is invoked** (SOUNDNESS R1833; pre-existing on 0.42.0). `{ fn
@@ -99,10 +108,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   Fn ..)` and its callers) and 6 are R1832's side effect (tokio-util's untyped-receiver hedges now naming the newly
   effectful `ListenerAcceptFut::poll`); 0 concrete or `invisible` lost, the same one removal. The merge-review rework
   (Option-binder and tuple callables, glob-supplied and leaf-shadowed self types), measured against the build before it:
-  0 rows added or newly `Unknown` on either corpus; 51 chained / 76 standalone `invisible: thiserror` elements and 19
-  standalone rows that carried only that element are gone. Every one traces to `impl From<..> for io::Error {
+  0 rows added or newly `Unknown` on either corpus; 51 chained / 76 standalone `invisible: thiserror` elements and 16
+  standalone rows that carried only that element (14 hickory-proto, 2 quinn) are gone. Every one traces to `impl From<..> for io::Error {
   Self::other(e) }` / `Self::new(kind, e)` in a file that also says `use thiserror::Error` (hickory-proto, quinn), where
-  `Self` had named thiserror's derive macro; `io::Error::other` and `io::Error::new` construct a value and are pure. R1835 reached no real-corpus call; its evidence is the executed fixtures.
+  `Self` had named thiserror's derive macro; `io::Error::other` and `io::Error::new` construct a value and are pure. The std
+  reading kept beside a std-rooted `Self`: 0 rows changed on either corpus, reached at 40 chained and 11 standalone sites
+  (`std::io::Error::{new, other, from_raw_os_error}`, `Arc::new`, `Cow::{Borrowed, Owned}`, `NonNull::new_unchecked`, all
+  pure constructors). R1835 reached no real-corpus call; its evidence is the executed fixtures.
 
 - ⚠ **The hidden-twin cover now reads unexpanded macro text as a SUPERSET of what it can bind** (SOUNDNESS R1541 / R1831, I1
   stage 2b; closes silent under-reports pre-existing on 0.42.0). A cfg-gated item a crate's own macro produces, beside a
