@@ -115,7 +115,16 @@ jobs:
     # runner blocks the release gate (preflight [10] reads CI green on HEAD) while looking
     # exactly like a slow job. Fixing the two that had failed and not their siblings is the
     # habit this repo keeps measuring.
-    timeout-minutes: 45
+    #
+    # THE DEADLINE IS A HANG DETECTOR, NOT A BUDGET — and 45 had stopped being one. Measured 2026-11-15..17 over
+    # 12 `push` runs of this job (it starts the second it is created): the eight that completed
+    # took 28.6 to 41.4 minutes (median ~33.5, mean ~33.9), leaving 3.6 minutes of headroom at the worst, and
+    # four were CANCELLED at exactly 45.2-45.3 minutes mid-suite. Where the cancelled run was inside, "Gate
+    # equivalence" took 23.4 min against 18.7 on a passing run (one slow runner, same code) and the
+    # soundness gates after it never started — so the job needs MORE than 45 on a slow runner, not that it hung.
+    # 75 keeps a hung step bounded at under half the old uncapped cost while giving a slow runner ~1.8x the
+    # slowest passing run; a genuine hang is still caught (the sibling jobs' deadlines are 10-20 minutes).
+    timeout-minutes: 75
     # ONE place for the pinned dylint version — the cache key and the install command both read it.
     # See the trap spelled out at the cache step: two spellings can drift, and the drift is silent.
     env:

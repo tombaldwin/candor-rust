@@ -11,6 +11,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **CI: `build-and-test` deadline 45 -> 75 minutes** (no engine change). Four of the last twelve runs were cancelled at the old limit while
+  the eight that passed took 28.6-41.4 minutes; the cancelled ones were slow runners, not hangs. Still a bounded deadline.
+
 - ⚠ **A `#[cfg]` module arm is checked against the hidden text in its twin arm, at every depth** (SOUNDNESS R1857; closes a
   silent under-report introduced after 0.42.0 by I1 stage 2, and the free-fn and `use` forms of the same shape that were
   silent on 0.42.0 too). An expansion that writes `#[cfg(unix)] mod sub { .. }` and `#[cfg(not(unix))] mod sub { .. }` now
