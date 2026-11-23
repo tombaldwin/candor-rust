@@ -2,7 +2,8 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # `lane/**`: a lane's branch is gated by CI before its join (Tom 2026-11-23: lane commits may be public before review).
+    branches: [main, 'lane/**']
   pull_request:
   workflow_dispatch:
 

@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- CI: `ci.yml` also runs on pushes to `lane/**` branches, so a lane's branch is gated by CI before it is joined.
+
 ## [0.43.0] — 2026-11-19
 
 - **Declares spec ⟨0.43⟩** (the chained-row / curated-entry union clause, SPEC §2; candor-scan unions since R1807). Docs and the two literal floor pins name 0.43.
