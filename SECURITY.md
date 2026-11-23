@@ -31,5 +31,6 @@ misclassified). If you'd rather report privately, email tom@polymorphism.co.uk.
 
 ## Supported versions
 
-candor is a prototype pinned to a specific nightly toolchain. There is no formal support window;
-fixes land on `main`.
+candor is a prototype. `candor-scan` (the user route) builds on stable Rust; the rustc lint in this repo, which
+is the family's oracle instrument and not a user route, is pinned to a specific nightly toolchain. There is no
+formal support window; fixes land on `main`.

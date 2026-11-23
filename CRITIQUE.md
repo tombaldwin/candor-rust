@@ -3,6 +3,10 @@
 Written deliberately against the project's own interest. If you're deciding whether to
 use or invest in candor, read this before the README's pitch.
 
+*Reading note (2026-11): this critique was written about the dylint lint. That lint is now the family's oracle
+instrument, not a user route; the user route is `candor-scan`, which is syntactic, needs no nightly (item 7), and
+has its own, different limits (see the README's Known limitations). Read the rest as a record of the lint.*
+
 ## Prior art — is this novel?
 
 Only partly. The space is occupied:

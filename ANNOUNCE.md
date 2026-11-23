@@ -49,15 +49,17 @@ propagates to these 6 callers — including the health probe that's supposed to 
    CI gate: a shared library that must stay free of app-coupling I/O; a domain layer that must reach no
    I/O even through a helper. The tool blocks the PR — which is the thing a model can't do for itself.
 
-**Honest about the limits.** There are two backends sharing one classifier:
+**Honest about the limits.** There are two producers sharing one classifier, and only the first is a user route:
 
 - `candor-scan` (the one you `cargo install`) is **syntactic** — it parses source, never builds, runs
   anywhere `cargo` does, even on a dependency you haven't compiled. It's calibrated to **never fabricate
   an effect** but it **under-reports**: it can't see through some trait-object dispatch or cross-crate
-  calls, and it does *not* emit `Unknown`. Its `--policy` gate is accordingly an **advisory floor** —
-  a clean run is necessary, never sufficient.
-- The full nightly lint (a [dylint](https://github.com/trailofbits/dylint)) adds the soundness
-  contract: anything it can't resolve is marked `Unknown`, never silently pure — enforced by a
+  calls, and nothing marks those misses. It does emit `Unknown` where it can see a boundary it cannot see
+  through (an invoked callback, an FFI call, an untrusted chained report). Its `--policy` gate is accordingly
+  an **advisory floor** — a clean run is necessary, never sufficient.
+- The oracle — a rustc-integrated [dylint](https://github.com/trailofbits/dylint) lint in the same repo, an
+  instrument rather than something you install — is what measures that gap. It marks anything it can't
+  resolve `Unknown`, never silently pure, enforced by a
   construction-based fuzzer that generates effect chains through the call forms that historically hide
   them (closures, `dyn` dispatch, operator overloads, `?` conversions, `.await`, RAII drops, opaque
   `impl Trait` returns) and fails if any function comes back silently pure.
@@ -130,12 +132,13 @@ honesty *is* the positioning.
   say so. The value rides on the call *graph* and the *gate*, which don't need every crate classified;
   the coverage check warns on the crates it doesn't know instead of guessing, and `Unknown` marks what
   the engine can't see. Under-report-and-say-so beats fabricate-and-look-complete.
-- **"Soundness? Static analysis always lies."** Two different promises, stated separately: the deep
-  engines (nightly lint, JVM) never report a function pure when they couldn't resolve its calls —
+- **"Soundness? Static analysis always lies."** Two different promises, stated separately: the JVM
+  engine and the Rust oracle lint never report a function pure when they couldn't resolve its calls —
   that's fuzzer-enforced (effect chains generated through closures, dyn dispatch, operators, `?`,
-  `.await`, drops, opaque returns; any silent-pure = red build). The quick-install scanner makes a
-  deliberately weaker promise — under-report rather than fabricate — and its gate is documented as a
-  floor. Treat the scanner as triage, the deep engines as the certificate.
+  `.await`, drops, opaque returns; any silent-pure = red build). The Rust user route, `candor-scan`, makes a
+  deliberately weaker promise — under-report rather than fabricate, with the misses unmarked — and its gate
+  is documented as a floor: necessary, never sufficient. The Rust oracle is what measures how far that floor
+  is from the truth; it is not something a user installs.
 - **"`Unknown` is a cop-out."** It's the honesty marker. The alternative is silently guessing pure
   (unsound) or flooding every generic call with warnings (unusable). `Unknown` is bounded — it
   appears where dispatch is genuinely unresolvable — and `explain` shows you exactly which call it is.

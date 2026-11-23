@@ -10,6 +10,10 @@ CC="$ROOT/cargo-candor"
 # cargo-candor `stash()` mirrors whichever candor-scan/candor-query it ran (a debug build from target/) into
 # $CANDOR_CACHE/bin. Unset, that is ~/.candor/bin, which `candor` and lanes treat as the PUBLISHED engine.
 CANDOR_CACHE="$(mktemp -d)/cache"; export CANDOR_CACHE
+# ORACLE LANE. The wrapper's default route is candor-scan, on which `snapshot`/`guard`/`policy`/`strict`/`risk`/
+# `explain` refuse. This lane drives the lint route on purpose, so it opts in; the section at the end runs with
+# the opt-in REMOVED and pins the default route (and the refusals) instead.
+export CANDOR_BACKEND=lint
 
 pass=0; fail=0
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
@@ -188,6 +192,82 @@ assert_rc "config-load refusal, sink = the positional policy" 2 "$rc"
   || bad "…the policy was destroyed through the config window"
 
 cd /; rm -rf "$(dirname "$D")"
+
+# ══ THE DEFAULT ROUTE: candor-scan is the ONLY user route (Tom's ruling 2026-11-23, BACKLOG §5.1 option A) ══
+# Everything above ran with CANDOR_BACKEND=lint (the oracle lanes' opt-in). Here the opt-in is REMOVED.
+# Each assertion is on bytes/exit, and each is paired with the control that would make it vacuous: a
+# refusal row is only evidence if the SAME verb succeeds under the opt-in (the sections above), and a
+# "scanner produced the report" row is only evidence if the lint did not (no non-.scan report file).
+echo "== default route: no opt-in => candor-scan, and the lint-only verbs refuse =="
+unset CANDOR_BACKEND
+R=$(mktemp -d)/route; mkdir -p "$R/src"
+printf '[package]\nname="route"\nversion="0.1.0"\nedition="2021"\n' > "$R/Cargo.toml"
+printf 'fn leaf(){ let _=std::fs::read("/tmp/x"); }\nfn domain_logic(){ leaf(); }\nfn main(){ domain_logic(); }\n' > "$R/src/main.rs"
+echo "deny Fs  domain" > "$R/deny.policy"
+cd "$R"
+# PLANT THE LINT ROUTE'S PRECONDITION: a findable dylib must NOT change the default. Put one in the cache the
+# wrapper searches (a copy of the real one when this lane built it; otherwise a placeholder file — find_lib
+# only has to FIND it for the route decision to be exercised, and the opt-in is absent so it is never loaded).
+CLONE="$(cd "$(dirname "$CC")" && pwd)"
+REALLIB="$(ls -t "$CLONE"/target/debug/libcandor@*.dylib "$CLONE"/target/debug/libcandor@*.so 2>/dev/null | head -1)"
+mkdir -p "$CANDOR_CACHE/lib"
+if [ -n "$REALLIB" ]; then cp -f "$REALLIB" "$CANDOR_CACHE/lib/"; else : > "$CANDOR_CACHE/lib/libcandor@nightly-0000-00-00-placeholder.dylib"; fi
+out=$("$CC" show domain_logic 2>&1); rc=$?
+assert_rc "show (default route)" 0 "$rc"
+ls .candor/ | grep -q '^report\.route\.scan\.json$' && ok "the report is the SCANNER's (report.route.scan.json) although a dylib is findable" \
+  || bad "default route did not produce a scan report: $(ls .candor/ 2>&1)"
+ls .candor/ | grep -E '^report\.route\.(Rlib|Executable|Cdylib|Staticlib|Dylib|ProcMacro)\.json$' >/dev/null 2>&1 && bad "a LINT-named report appeared on the default route" || ok "…and no lint-named report exists (the control)"
+assert_has "…and the answer reaches the Fs effect" "$out" "Fs"
+rc=0; "$CC" audit >/dev/null 2>&1 || rc=$?
+assert_rc "audit (default route)" 0 "$rc"
+rc=0; "$CC" whatif domain_logic Net >/dev/null 2>&1 || rc=$?
+assert_rc "whatif (default route, report-only verb)" 0 "$rc"
+for v in "strict" "no-ambient" "risk" "snapshot .candor/b" "explain domain_logic" "audit --all"; do
+  rc=0; out=$("$CC" $v 2>&1) || rc=$?
+  assert_rc "$v refuses without the opt-in" 2 "$rc"
+  assert_has "…naming the oracle opt-in" "$out" "CANDOR_BACKEND=lint"
+done
+rc=0; out=$("$CC" snapshot .candor/b 2>&1) || rc=$?
+assert_has "snapshot's refusal names the candor-scan equivalent" "$out" "candor-scan . --out"
+ls .candor/b.* >/dev/null 2>&1 && bad "snapshot refused but wrote a lint baseline" || ok "…and wrote no baseline"
+# policy / guard: refused AFTER the sink is armed — the bytes at the sink are the §3.3 refusal document
+printf '{"ok":true,"violations":[]}\n' > stale.json
+rc=0; out=$("$CC" policy deny.policy --gate-json stale.json 2>&1) || rc=$?
+assert_rc "policy refuses without the opt-in" 2 "$rc"
+assert_has "…and names candor-scan --policy" "$out" "candor-scan . --policy deny.policy"
+if grep -q '"refused": true' stale.json && grep -q '"ok": false' stale.json && ! grep -q '"violations"' stale.json; then
+  ok "…and the sink holds the refusal document, never a previous green"
+else bad "…sink content wrong: $(cat stale.json 2>/dev/null)"; fi
+printf '{"ok":true,"violations":[]}\n' > stale.json
+rc=0; out=$("$CC" guard .candor/b --gate-json stale.json 2>&1) || rc=$?
+assert_rc "guard refuses without the opt-in" 2 "$rc"
+assert_has "…and names CANDOR_BASELINE with candor-scan" "$out" "CANDOR_BASELINE=.candor/b candor-scan"
+grep -q '"refused": true' stale.json && ok "…and its sink holds the refusal document" || bad "…guard sink content wrong: $(cat stale.json 2>/dev/null)"
+rc=0; sout=$("$CC" policy deny.policy --gate-json - 2>/dev/null) || rc=$?
+printf '%s' "$sout" | grep -q '"refused": true' && ok "policy's stream form carries the refusal document on stdout" || bad "policy stream form empty: '$sout'"
+# the same verbs on the USER route do the job: candor-scan --policy / CANDOR_BASELINE, as the refusals say
+SCANBIN="$(ls -t "$CLONE"/target/debug/candor-scan "$CLONE"/target/release/candor-scan 2>/dev/null | head -1)"
+if [ -n "$SCANBIN" ]; then
+  rc=0; "$SCANBIN" . --policy deny.policy >/dev/null 2>&1 || rc=$?
+  assert_rc "the remedy works: candor-scan . --policy (violation)" 1 "$rc"
+  rc=0; "$SCANBIN" . --out .candor/sbase >/dev/null 2>&1 || rc=$?
+  assert_rc "the remedy works: candor-scan . --out <baseline>" 0 "$rc"
+  rc=0; out=$("$CC" diff .candor/sbase 2>&1) || rc=$?
+  assert_rc "diff against a candor-scan baseline (default route, no change)" 0 "$rc"
+  printf 'fn leaf(){ let _=std::fs::read("/tmp/x"); let _=std::net::TcpStream::connect("127.0.0.1:1"); }\nfn domain_logic(){ leaf(); }\nfn main(){ domain_logic(); }\n' > src/main.rs
+  out=$("$CC" diff .candor/sbase --json 2>&1); rc=$?
+  assert_has "diff names the GAINED effect (the control: not a vacuous 'no change')" "$out" "Net"
+  rm -f .candor/report.*.json .candor/state
+  # a baseline recorded by the OTHER backend is refused, never compared
+  printf '[{"fn":"leaf","loc":"src/main.rs:1","inferred":["Fs"],"direct":["Fs"],"unresolved":false}]\n' > .candor/lbase.route.Executable.json
+  rc=0; out=$("$CC" diff .candor/lbase 2>&1) || rc=$?
+  assert_rc "diff against an oracle-lint baseline is refused on the scanner route" 2 "$rc"
+  assert_has "…and says how to re-record" "$out" "candor-scan . --out .candor/lbase"
+fi
+# the opt-in still reaches the lint (the control for every refusal above)
+rc=0; out=$(CANDOR_BACKEND=lint "$CC" risk 2>&1) || rc=$?
+assert_rc "CANDOR_BACKEND=lint risk runs (the opt-in is the way in)" 0 "$rc"
+cd /; rm -rf "$(dirname "$R")"
 echo
 echo "wrapper smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -7,6 +7,10 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# ORACLE LANE. This file drives the rustc lint, directly (`cargo dylint`) and through `cargo-candor`. The wrapper's
+# default route is candor-scan (lint-only verbs refuse there), so the wrapper calls below opt in. ci/wrapper-smoke.sh
+# pins the default route itself.
+export CANDOR_BACKEND=lint
 
 echo "building candor lint + tooling…"
 # --workspace builds candor-query too (a member, not a lint dependency), so the query commands

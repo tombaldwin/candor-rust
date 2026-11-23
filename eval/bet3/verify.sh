@@ -10,6 +10,9 @@
 # detail requires cross-crate host propagation + CANDOR_REPORTS read-only resolution — so this is the
 # end-to-end Bet 3 "enforce at workspace scale" path.
 set -uo pipefail
+# ORACLE LANE: these scripts measure the rustc lint through the wrapper on purpose, so they opt in. The wrapper's
+# default is candor-scan; `policy` is a lint-only verb there and would refuse (exit 2) without this.
+export CANDOR_BACKEND=lint
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$ROOT/host-allowlist"
 cd "$WS"

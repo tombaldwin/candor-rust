@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# cargo-candor — ergonomic wrapper around `cargo dylint` for the candor lint.
+# cargo-candor — ergonomic wrapper around candor-scan (the user route) and candor-query.
 #
-# One-time:  ./install.sh  (or `cargo candor setup`) — builds + puts `cargo candor` on PATH. Then e.g.
-#   cargo candor scan               # STABLE backend: produce the report on stock cargo (no nightly)
-#   cargo candor audit              # at-a-glance effect profile of the whole project (nightly lint)
-#   cargo candor audit --all        # the full per-function lint (spans in context)
-#   cargo candor snapshot .candor/baseline
-#   cargo candor guard    .candor/baseline   # CI gate: fail on a gained effect
-#   cargo candor diff     .candor/baseline   # describe the per-function effect delta (--json)
+# THE ROUTE. candor-scan is the ONLY user route: every verb below that does not say otherwise runs on it.
+# The rustc dylint lint in this repo is the family's ORACLE instrument (soundness fuzzers, censuses, the
+# strace oracle, Self-guard), not something to reach for. A verb that exists only on the lint — strict,
+# no-ambient, snapshot, guard, policy, risk, explain, `audit --all` — refuses (exit 2, with the
+# candor-scan equivalent) unless an operator opts in with CANDOR_BACKEND=lint. That is what the oracle
+# lanes (tests/integration.sh, ci/wrapper-smoke.sh) set.
+#
+# One-time:  ./install.sh  (or `cargo candor setup`) — builds the stable tools + puts `cargo candor` on PATH.
+#            (`./install.sh --oracle` also builds the lint, for an operator running the oracle.) Then e.g.
+#   cargo candor scan               # produce the report on stock cargo (no nightly)
+#   cargo candor audit              # at-a-glance effect profile of the whole project
+#   cargo candor audit --all        # ORACLE ONLY (CANDOR_BACKEND=lint): the lint's per-function diagnostics
+#   cargo candor snapshot .candor/baseline   # ORACLE ONLY — on the user route: candor-scan . --out .candor/baseline
+#   cargo candor guard    .candor/baseline   # ORACLE ONLY — on the user route: CANDOR_BASELINE=… candor-scan .
+#   cargo candor diff     .candor/baseline   # describe the per-function effect delta vs a candor-scan baseline (--json)
 #   cargo candor watch                        # keep the report fresh in the background (fast `diff`)
 #   cargo candor show     my_function         # a function's effects, INSTANT (read from the report)
 #   cargo candor where    Net                 # which functions perform an effect, INSTANT
@@ -20,18 +28,18 @@
 #   cargo candor path     my_function Net     # the call chain by which a fn comes to perform an effect, INSTANT
 #   cargo candor impact   my_function         # blast radius: transitive callers + downstream entry points, INSTANT
 #   cargo candor explain  my_function        # trace WHY a function has each effect (the call path)
-#   cargo candor policy   .candor/policy      # enforce effect boundaries (deny/pure/allow/forbid rules)
-#   cargo candor risk                         # heuristic: effects on caller-derived input (advisory)
-#   cargo candor update                       # pull + rebuild the engine, refresh this project's baseline
-#   cargo candor strict   my_module           # conformance: inferred ⊆ declared (AS-EFF-001/002/003)
-#   cargo candor no-ambient my_module         # flag direct ambient-authority use (AS-EFF-004)
+#   cargo candor policy   .candor/policy      # ORACLE ONLY — on the user route: candor-scan . --policy <file>
+#   cargo candor risk                         # ORACLE ONLY: heuristic effects on caller-derived input (advisory)
+#   cargo candor update                       # pull + rebuild the tools (refreshes an oracle baseline only under CANDOR_BACKEND=lint)
+#   cargo candor strict   my_module           # ORACLE ONLY: conformance inferred ⊆ declared (AS-EFF-001/002/003)
+#   cargo candor no-ambient my_module         # ORACLE ONLY: flag direct ambient-authority use (AS-EFF-004)
 #   cargo candor setup                        # (re)build + install — same as ./install.sh
 #
 # `policy` and `guard` also take `--gate-json <path|->` — the candor-spec §3.3 structured verdict.
 # A `.candor/config` (spec §3.4) supplies the policy/baseline/deps defaults; see the README.
 #
-# It locates (building on first use) the toolchain-suffixed candor dylib and invokes
-# `cargo dylint --lib-path <dylib>` with the right environment for the chosen command.
+# Under CANDOR_BACKEND=lint (the oracle opt-in) it locates (building on first use) the toolchain-suffixed
+# candor dylib and invokes `cargo dylint --lib-path <dylib>` with the right environment for the verb.
 set -euo pipefail
 
 # Resolve the candor clone — this script lives at its root (follow symlinks, e.g. from ~/.cargo/bin).
@@ -400,35 +408,56 @@ case "$cmd" in
   *) load_config "$@" ;;
 esac
 
-# Resolve (building on first use) the lint dylib — UNLESS the command doesn't need it. `setup` is the
-# recovery path (it builds cleanly via install.sh), and help is free; neither should fail on a missing
-# or broken dylib first.
+# THE ORACLE OPT-IN. `CANDOR_BACKEND=lint` is the one explicit way to reach the rustc lint through this
+# wrapper. It exists for the oracle lanes and for an operator measuring the lint on purpose; a user has no
+# reason to set it. Anything else (unset, `scan`, a typo) is the scanner route.
+LINT_OPTIN=0
+[ "${CANDOR_BACKEND:-}" = "lint" ] && LINT_OPTIN=1
+
+# A verb that exists only on the lint, reached without the opt-in. Fail closed (exit 2): a refusal that
+# printed a scanner-derived answer under a lint verb's name would be a different claim than the one asked.
+# $1 = verb, $2 = what to run on the user route (or empty when the scanner has no equivalent).
+oracle_refuse() {
+  echo "candor: '$1' runs only on the rustc lint — the family's ORACLE instrument (soundness fuzzers, censuses), not a user route." >&2
+  if [ -n "${2:-}" ]; then
+    echo "candor: on the user route: $2" >&2
+  else
+    echo "candor: the scanner (candor-scan) has no equivalent of '$1'." >&2
+  fi
+  echo "candor: an operator running the oracle on purpose: CANDOR_BACKEND=lint cargo candor $1 …  (needs ./install.sh --oracle, or 'cargo build' in the clone)" >&2
+}
+
+# Resolve the lint dylib ONLY under the oracle opt-in. `setup` is the recovery path, help is free, and the
+# report-reading verbs (everything that is a query over a report) run on candor-scan by default.
 case "$cmd" in
-  setup|install|-h|--help|help|scan) LIB="" ;;
-  audit|show|where|callers|map|containment|reachable|path|impact|tour)
-    # Read-only queries: prefer the nightly lint (soundness, Unknown), but DON'T hard-fail without it —
-    # fall back to the stable scanner so these work zero-install. Use an existing dylib if present; only
-    # attempt a build when one's already around to refresh. If none, LIB stays empty and the command's
-    # report path (ensure_report / audit) uses candor-scan instead.
-    # `CANDOR_BACKEND=scan` forces the stable backend even when a dylib is present (CI/reproducibility).
-    if [ "${CANDOR_BACKEND:-}" = "scan" ]; then
-      LIB=""
-    else
+  setup|install|-h|--help|help|scan|update) LIB="" ;;
+  audit|show|where|callers|map|containment|reachable|path|impact|tour|whatif|fix|unverified|rewire|watch|diff)
+    # Read-only queries: candor-scan produces the report. Under the oracle opt-in an EXISTING dylib is
+    # used instead (and refreshed only when one is already around); none → the scanner, as ever.
+    if [ "$LINT_OPTIN" = 1 ]; then
       LIB="$(find_lib || true)"
       [ -n "${LIB:-}" ] && stash "$LIB" lib
+    else
+      LIB=""
     fi ;;
   *)
-    LIB="$(find_lib || true)"
-    if [ -z "${LIB:-}" ]; then
-      echo "candor: building the lint (first run; rustup may fetch the pinned toolchain once)…" >&2
-      ( cd "$CANDOR_DIR" && cargo build >&2 )
+    # strict|no-ambient|snapshot|guard|policy|risk|explain — lint-only verbs (diff rides the scanner by default,
+    # and takes the dylib only under the opt-in, like the queries do).
+    if [ "$LINT_OPTIN" = 1 ]; then
       LIB="$(find_lib || true)"
-    fi
-    [ -n "${LIB:-}" ] || {
-      echo "candor: could not build/find the lint dylib — run: $CANDOR_DIR/install.sh" >&2
-      exit 1
-    }
-    stash "$LIB" lib ;;
+      if [ -z "${LIB:-}" ]; then
+        echo "candor: building the lint (first run; rustup may fetch the pinned toolchain once)…" >&2
+        ( cd "$CANDOR_DIR" && cargo build >&2 )
+        LIB="$(find_lib || true)"
+      fi
+      [ -n "${LIB:-}" ] || {
+        echo "candor: could not build/find the lint dylib — run: $CANDOR_DIR/install.sh --oracle" >&2
+        exit 1
+      }
+      stash "$LIB" lib
+    else
+      LIB=""
+    fi ;;
 esac
 
 # The candor commit that produced (or is checking) a baseline. A baseline is only comparable to
@@ -539,7 +568,7 @@ case "$cmd" in
     # `--coverage`/`-c` → also list every external crate candor has no effect rules for (blind spots).
     # Default → an at-a-glance profile (candor-query), aggregated across the project's crates.
     if [ "${1:-}" = "--all" ] || [ "${1:-}" = "-a" ]; then
-      [ -n "${LIB:-}" ] || { echo "candor: 'audit --all' is the nightly lint view; none found. Run 'cargo candor audit' for the stable profile, or install the lint." >&2; exit 1; }
+      [ -n "${LIB:-}" ] || { oracle_refuse "audit --all" "cargo candor audit (the profile), or candor-query show/where on the report"; exit 2; }
       exec cargo dylint --lib-path "$LIB"
     fi
     cov=""; { [ "${1:-}" = "--coverage" ] || [ "${1:-}" = "-c" ]; } && cov="--coverage"
@@ -552,24 +581,29 @@ case "$cmd" in
       report_exists "$tmp/a" || { rm -rf target/dylint 2>/dev/null || true; run_json; }
     else
       # Zero-install: the stable scanner produces the same report JSON with no nightly toolchain.
-      echo "candor: using the stable backend (candor-scan)." >&2
-      # The stable backend writes no `.encountered`/`.calibrated` sidecars, so the coverage blind-spot
+      echo "candor: using candor-scan." >&2
+      # The scanner writes no `.encountered`/`.calibrated` sidecars, so the coverage blind-spot
       # list would come back EMPTY — a false all-clear. Don't pass --coverage; say it's unavailable.
-      [ -n "$cov" ] && { echo "candor: --coverage is unavailable on the stable backend (it needs the nightly lint's encountered-crate set)." >&2; cov=""; }
+      [ -n "$cov" ] && { echo "candor: --coverage is unavailable on the scanner route (it needs the lint's encountered-crate set — oracle only); the scan's own coverage ledger names uncovered dependencies." >&2; cov=""; }
       scan_run "$PWD" --out "$tmp/a" >/dev/null 2>&1 || true
     fi
     if ! report_exists "$tmp/a"; then
-      echo "candor: no report produced — did the crate build? Try 'cargo candor audit --all' to see errors." >&2
+      echo "candor: no report produced — does the crate parse? Run 'candor-scan .' directly to see the error." >&2
       exit 1
     fi
     # engine_ver returns `scan` on the stable backend now (never empty), so the audit header honestly
     # reads `@scan` rather than the clone's git hash — and the quoted slot can't collapse and shift argv.
     query audit "$tmp/a" "$(engine_ver)" "$CANDOR_DIR/candor-suspect" $cov
     exit 0 ;;
-  strict)     export CANDOR_STRICT="${1:-1}";      exec cargo dylint --lib-path "$LIB" ;;
-  no-ambient) export CANDOR_NO_AMBIENT="${1:-1}";  exec cargo dylint --lib-path "$LIB" ;;
+  strict)
+    [ "$LINT_OPTIN" = 1 ] || { oracle_refuse strict ""; exit 2; }
+    export CANDOR_STRICT="${1:-1}";      exec cargo dylint --lib-path "$LIB" ;;
+  no-ambient)
+    [ "$LINT_OPTIN" = 1 ] || { oracle_refuse no-ambient ""; exit 2; }
+    export CANDOR_NO_AMBIENT="${1:-1}";  exec cargo dylint --lib-path "$LIB" ;;
 
   snapshot)
+    [ "$LINT_OPTIN" = 1 ] || { oracle_refuse snapshot "candor-scan . --out .candor/baseline   (then commit the baseline.* files)"; exit 2; }
     # Write the baseline AND stamp the engine version beside it, so the guard later
     # knows which candor produced it.
     pre="${1:-${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}}"
@@ -674,6 +708,12 @@ case "$cmd" in
       echo "candor: $usage_err" >&2
       gate_exit2 "$usage_err"
     fi
+    # Not the user route: refused AFTER the sink is armed, so the §3.3 refusal document (never a previous
+    # run's verdict) is what a CI reads — the same fail-closed shape as every other exit-2 cause here.
+    if [ "$LINT_OPTIN" != 1 ]; then
+      oracle_refuse guard "CANDOR_BASELINE=$pre candor-scan . [--gate-json <f>]   (record the baseline first: candor-scan . --out $pre)"
+      gate_exit2 "guard runs only on the oracle lint (CANDOR_BACKEND=lint); the user route is candor-scan with CANDOR_BASELINE"
+    fi
     # No baseline AT ALL (never snapshotted, a typo'd prefix) is the same invalid-gate-input class as a
     # stale one: the engine would warn "guard NOT active" and exit 0 — an unbounded fail-open window.
     # Fail closed with the incantation instead (review §2 gap).
@@ -770,7 +810,8 @@ case "$cmd" in
     json=0; jflag=""; pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
     for a in "$@"; do case "$a" in --json) json=1; jflag="--json" ;; -*) ;; *) pre="$a" ;; esac; done
     if ! report_exists "$pre"; then
-      echo "candor: no baseline at '$pre.*' — create one with 'cargo candor snapshot $pre'." >&2
+      if [ "$LINT_OPTIN" = 1 ]; then echo "candor: no baseline at '$pre.*' — create one with 'cargo candor snapshot $pre'." >&2
+      else echo "candor: no baseline at '$pre.*' — create one with 'candor-scan . --out $pre'." >&2; fi
       exit 2
     fi
     # FAST PATH: if the Stop hook (or `cargo candor watch`) already kept .candor/report.* fresh for
@@ -778,11 +819,25 @@ case "$cmd" in
     # hash everything else does (content-based, so a stale report can never be mistaken for fresh; a
     # mismatch just falls back to the slow path).
     cur=""; rp=".candor/report"
-    # FAST PATH applies only to a LINT report: `diff` compares against a lint baseline, so a fresh but
-    # SCAN-produced `.candor/report` (e.g. the Stop hook ran the stable backend) must NOT be used as
-    # `cur` — its under-reporting would mask a real effect regression as 'no change'. Fall to the slow
-    # path (re-lint) when the cached report is a scan report.
-    if report_exists "$rp" && [ -f .candor/state ] && ! is_scan_report "$rp"; then
+    # A diff is only meaningful between two reports of the SAME backend: a scan report against an oracle-lint
+    # baseline (or the reverse) reads backend differences as effect changes, and the scanner's under-report
+    # would mask a real regression as 'no change'. The route is the scanner unless CANDOR_BACKEND=lint, so a
+    # baseline recorded by the other backend is refused (exit 2) with the remedy, never compared.
+    if [ "$LINT_OPTIN" = 1 ]; then want_scan=0; else want_scan=1; fi
+    pre_is_scan=0; is_scan_report "$pre" && pre_is_scan=1
+    if [ "$pre_is_scan" != "$want_scan" ]; then
+      if [ "$want_scan" = 1 ]; then
+        echo "candor: the baseline at '$pre' was recorded by the oracle lint, but this is the scanner route — a cross-backend diff is not a diff." >&2
+        echo "candor: re-record it on the user route: candor-scan . --out $pre   (review, then commit)." >&2
+      else
+        echo "candor: the baseline at '$pre' was recorded by candor-scan, but CANDOR_BACKEND=lint selects the oracle — a cross-backend diff is not a diff." >&2
+      fi
+      exit 2
+    fi
+    # FAST PATH applies only to a report of the SAME backend as the baseline: a fresh `.candor/report` from
+    # the other one must NOT be used as `cur`. Fall to the slow path when the cached report is the wrong kind.
+    rp_ok=0; if is_scan_report "$rp"; then [ "$want_scan" = 1 ] && rp_ok=1; else [ "$want_scan" = 0 ] && rp_ok=1; fi
+    if report_exists "$rp" && [ -f .candor/state ] && [ "$rp_ok" = 1 ]; then
       cur_hash="$(src_state)"
       [ -n "$cur_hash" ] && [ "$cur_hash" = "$(cat .candor/state 2>/dev/null)" ] && cur="$rp"
     fi
@@ -790,11 +845,15 @@ case "$cmd" in
       # SLOW PATH: re-lint to a temp prefix (no fresh report available).
       tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
       [ "$json" = 1 ] || echo "candor: analyzing…" >&2
-      run_json() { CANDOR_JSON="$tmp/cur" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
-      run_json
-      report_exists "$tmp/cur" || { rm -rf target/dylint 2>/dev/null || true; run_json; }
+      if [ -n "${LIB:-}" ]; then
+        run_json() { CANDOR_JSON="$tmp/cur" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || true; }
+        run_json
+        report_exists "$tmp/cur" || { rm -rf target/dylint 2>/dev/null || true; run_json; }
+      else
+        scan_run "$PWD" --out "$tmp/cur" >/dev/null 2>&1 || true
+      fi
       if ! report_exists "$tmp/cur"; then
-        echo "candor: no current report produced — did the crate build? Try 'cargo candor audit --all'." >&2
+        echo "candor: no current report produced — does the crate parse? Run 'candor-scan .' directly to see the error." >&2
         exit 1
       fi
       cur="$tmp/cur"
@@ -805,10 +864,10 @@ case "$cmd" in
     exit 0 ;;
 
   watch)
-    # Keep .candor/report.* fresh in the BACKGROUND so `cargo candor diff` (and the receipt) hit their
-    # fast path — the compile then happens concurrently with editing, OFF the agent's critical path.
+    # Keep .candor/report.* fresh in the BACKGROUND so the read-only queries (and the receipt) are served
+    # instantly — the scan happens concurrently with editing, OFF the agent's critical path.
     # Polls the source hash (identically to candor-run.sh) every CANDOR_WATCH_INTERVAL s (default 2)
-    # and re-lints on a real change. Long-running: run it in a side terminal, or `cargo candor watch &`.
+    # and re-scans (re-lints, under CANDOR_BACKEND=lint) on a real change. Long-running: run it in a side terminal, or `cargo candor watch &`.
     mkdir -p .candor
     sh_hash() { src_state; }
     last=""; cleared=0
@@ -822,9 +881,14 @@ case "$cmd" in
       cur="$(sh_hash)"
       if [ -n "$cur" ] && [ "$cur" != "$last" ]; then
         [ "$cleared" = 0 ] && { rm -rf target/dylint 2>/dev/null || true; cleared=1; }   # cold cache → force the first emit
-        clear_scan_reports "$PWD/.candor/report"   # drop any stale scan report so lint+scan never coexist
-        if CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 \
-           && report_exists .candor/report; then
+        if [ -n "${LIB:-}" ]; then
+          clear_scan_reports "$PWD/.candor/report"   # drop any stale scan report so lint+scan never coexist
+          wrc=0; CANDOR_JSON="$PWD/.candor/report" cargo dylint --lib-path "$LIB" >/dev/null 2>&1 || wrc=$?
+        else
+          cq reports "$PWD/.candor/report" --clear-other scan >/dev/null 2>&1 || true   # and drop a stale lint report
+          wrc=0; scan_run "$PWD" --out "$PWD/.candor/report" >/dev/null 2>&1 || wrc=$?
+        fi
+        if [ "$wrc" -eq 0 ] && report_exists .candor/report; then
           echo "$cur" > .candor/state                      # stamp ONLY on a successful build → fresh
           echo "candor: report fresh @${cur:0:8}" >&2
         else
@@ -1025,6 +1089,7 @@ case "$cmd" in
     # leaf call + location). `<query>` is a substring of the fully-qualified function name.
     q="${1:-}"
     [ -n "$q" ] || { echo "usage: cargo candor explain <function-name-substring>" >&2; exit 2; }
+    [ "$LINT_OPTIN" = 1 ] || { oracle_refuse explain "cargo candor path <fn> <Effect>   (the call chain by which a function comes to perform an effect)"; exit 2; }
     lint_fresh CANDOR_EXPLAIN="$q" \
       | grep -vaE '^ *(Checking|Compiling|Finished|Building|Blocking|Locking|Updating|Downloading|Downloaded|Fresh) ' \
       | grep -vaE '^(warning|error)[:[]' \
@@ -1078,6 +1143,10 @@ case "$cmd" in
     if [ -n "$usage_err" ]; then
       echo "candor: $usage_err" >&2
       gate_exit2 "$usage_err"
+    fi
+    if [ "$LINT_OPTIN" != 1 ]; then
+      oracle_refuse policy "candor-scan . --policy $pol [--gate-json <f>]"
+      gate_exit2 "policy runs only on the oracle lint (CANDOR_BACKEND=lint); the user route is candor-scan --policy"
     fi
     if [ ! -f "$pol" ]; then
       echo "candor: no policy at '$pol'. Rules: 'deny Net Db domain', 'pure parse', 'allow Net in billing api.stripe.com', 'forbid domain -> infra'." >&2
@@ -1166,6 +1235,7 @@ case "$cmd" in
     # Heuristic: flag injection-class effects (Fs/Exec/Db/Net/Env/Ipc) performed on a PARAMETER-derived
     # argument — path traversal / command injection / SSRF. ADVISORY (exit 0): an intraprocedural,
     # syntactic nudge, NOT sound taint analysis — it over- and under-flags. Review it, don't gate on it.
+    [ "$LINT_OPTIN" = 1 ] || { oracle_refuse risk ""; exit 2; }
     out="$(lint_fresh CANDOR_TAINT=1)"
     if printf '%s' "$out" | grep -q 'AS-EFF-007'; then
       printf '%s\n' "$out" | grep -aE '\[AS-EFF-007\]' >&2
@@ -1182,21 +1252,31 @@ case "$cmd" in
     ( cd "$CANDOR_DIR" && git pull --ff-only ) >&2
     # One build+stash+symlink path, shared with `setup` — don't re-implement it here.
     "$CANDOR_DIR/install.sh" >&2
-    LIB="$(find_lib || true)"; ev="$(engine_ver)"
+    LIB=""; [ "$LINT_OPTIN" = 1 ] && LIB="$(find_lib || true)"
+    ev="$(engine_ver)"
     echo "candor: engine now @$ev — scripts and AGENTS.md current too." >&2
     # Invalidate the cached read-only query report: it was produced by the OLD engine, but `.candor/state`
-    # still matches the (unchanged) source, so the query/diff fast-path would serve a stale-engine report
-    # against the new-engine baseline → spurious reclassification deltas. Clearing it forces a rebuild
-    # with the new engine on next use.
+    # still matches the (unchanged) source, so the query fast-path would serve a stale-engine report.
+    # Clearing it forces a rebuild with the new engine on next use.
     rm -f .candor/report.*.*.json .candor/state 2>/dev/null || true
-    # Auto-refresh a baseline in THIS project so the guard never false-fires after an upgrade —
+    pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
+    if [ "$LINT_OPTIN" != 1 ]; then
+      # A baseline is only comparable to the build that wrote it (§2.1): candor-scan refuses (exit 2) one
+      # recorded by a different build. The user-route baseline is re-recorded by the user, deliberately —
+      # the wrapper has no snapshot verb on this route (that one is the oracle's).
+      if report_exists "$pre"; then
+        echo "candor: a baseline exists at $pre — it was recorded by the previous build, so the AS-EFF-005 guard will REFUSE it (exit 2)" >&2
+        echo "candor: until you re-record it: candor-scan . --out $pre   (review 'git diff .candor/', then commit)." >&2
+      fi
+      exit 0
+    fi
+    # Oracle opt-in only. Auto-refresh a baseline in THIS project so the guard never false-fires after an upgrade —
     # through `snapshot` itself, so there is ONE baseline writer: staged, verified complete
     # (analysis_finished_despite_exit on a nonzero exit), and moved over the old set only on success.
     # This used to be its own copy: it wrote straight into the baseline prefix and required dylint exit
     # 0, so a refusal left the set half-rewritten by the NEW engine under the OLD stamp, and in the case
     # snapshot accepts (rustc failing after a complete analysis) it refused where snapshot wrote. The
     # prefix resolves exactly as snapshot's default does (CANDOR_BASELINE, then the config's `baseline`).
-    pre="${CANDOR_BASELINE:-${CFG_BASELINE:-.candor/baseline}}"
     if report_exists "$pre"; then
       old="$(cat "$pre".*.json 2>/dev/null | shasum 2>/dev/null | cut -d' ' -f1)"
       if "$SELF" snapshot "$pre" >&2; then

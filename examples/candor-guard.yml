@@ -5,9 +5,14 @@
 # No capability tokens, no rewrite required.
 #
 # One-time setup in your repo:
-#   1. build candor locally and run:  cargo candor snapshot .candor/baseline
-#   2. commit the .candor/ directory.
-#   3. refresh the baseline deliberately whenever a new effect is intended.
+#   1. cargo install candor-scan   (pin the version, and install the SAME version in CI below: a baseline
+#      recorded by a different scanner build is refused with exit 2, never silently compared)
+#   2. record the baseline:        candor-scan . --out .candor/baseline
+#   3. commit the .candor/ directory.
+#   4. re-record the baseline deliberately whenever a new effect is intended (review `git diff .candor/`).
+#
+# This is the syntactic FLOOR (candor-scan can miss effects it cannot resolve, and says nothing when it does):
+# a green run is necessary, never sufficient.
 
 name: candor guard
 on: [pull_request]
@@ -19,22 +24,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install dylint
-        run: cargo +stable install cargo-dylint dylint-link
-
-      - name: Fetch + build candor
-        run: |
-          git clone --depth 1 https://github.com/tombaldwin/candor-rust ~/candor
-          ( cd ~/candor && cargo build )
+      - name: Install candor-scan
+        run: cargo install candor-scan --locked   # add --version <the one that recorded your baseline>
 
       - name: Effect regression guard
-        # Fail only on AS-EFF-005 (an existing fn gained an effect) — not on unrelated
-        # warnings, which `-D warnings` would also trip on.
-        run: |
-          LIB=$(ls ~/candor/target/debug/libcandor@*.so)
-          out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LIB" 2>&1)
-          echo "$out"
-          if echo "$out" | grep -q "AS-EFF-005"; then
-            echo "::error::a function gained an effect vs .candor/baseline (refresh if intended)"
-            exit 1
-          fi
+        # Exit 1: an existing fn gained an effect, or a new fn performs one (AS-EFF-005).
+        # Exit 2: the guard could not evaluate (unparseable baseline, or one from a different scanner build).
+        run: CANDOR_BASELINE=.candor/baseline candor-scan .

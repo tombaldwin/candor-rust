@@ -11,6 +11,26 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **candor-scan is the ONLY user route; the rustc dylint lint is the family's oracle instrument** (decision 2026-11-23,
+  BACKLOG §5.1 option A). Report bytes are unchanged (no cache rev bump); this is help text, wrapper routing and docs.
+  - `candor-scan --help` no longer calls the nightly engine "the sound gate". It states what the scanner discloses
+    (`Unknown` at a callback, an FFI call, an untrusted chained report) and what it can miss silently (external-trait
+    dispatch, an uninferrable receiver, desugared operators/`?`/`.await`): a clean run is necessary, never sufficient.
+  - ⚠ `cargo candor`: the read-only verbs (`audit`, `show`, `where`, `callers`, `map`, `path`, `impact`, `whatif`, `fix`,
+    `unverified`, `rewire`, `diff`, `watch`) now run on candor-scan even when a dylib is installed. The lint-only verbs
+    (`strict`, `no-ambient`, `snapshot`, `guard`, `policy`, `risk`, `explain`, `audit --all`) **refuse with exit 2** and name
+    the candor-scan equivalent unless `CANDOR_BACKEND=lint` (the oracle opt-in) is set; `guard`/`policy` still leave the
+    §3.1 refusal document at a `--gate-json` sink. `diff` compares only same-backend reports and refuses a baseline
+    recorded by the other backend. `update` no longer re-snapshots a baseline unless the opt-in is set.
+  - `install.sh` builds the stable tools only (no nightly); `./install.sh --oracle` also builds the lint.
+  - The Claude Code receipt runs the scanner unless `CANDOR_BACKEND=lint`; its installer no longer pins a dylib.
+  - README, AGENTS.md (and its two crate copies), ANNOUNCE, examples (`candor-guard.yml`, `candor-pr-review.yml`,
+    `candor-policy`), crate READMEs and code comments no longer present the lint as a route or as "the sound gate";
+    the README's "silently, by design" is replaced by what the scanner discloses and what it can miss. The oracle lanes
+    (`tests/integration.sh`, `ci/wrapper-smoke.sh`, `eval/bet3/*`, `eval/scaled/harness.sh`) opt in explicitly;
+    `ci/wrapper-smoke.sh` gains a default-route section.
+
+
 - CI: `ci.yml` also runs on pushes to `lane/**` branches, so a lane's branch is gated by CI before it is joined.
 
 ## [0.43.0] — 2026-11-19

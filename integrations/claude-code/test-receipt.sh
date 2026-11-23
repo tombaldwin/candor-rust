@@ -66,7 +66,8 @@ if [ -n "$tag" ]; then
   echo '[{"fn":"a","loc":"src/lib.rs:1","inferred":["Fs"],"direct":["Fs"],"unresolved":false}]' > "$V/.candor/report.p.Rlib.json"
   echo "CANDOR_LIB=$LIBV" > "$V/.candor/config"
   "$QUERY" state "$V" > "$V/.candor/state"
-  outv=$("$RUN" "$V" 2>/dev/null)
+  # ORACLE OPT-IN: the receipt reaches the lint only under CANDOR_BACKEND=lint (candor-scan is the user route).
+  outv=$(CANDOR_BACKEND=lint "$RUN" "$V" 2>/dev/null)
   chk "receipt stamps the dylib's true build version (@$tag)"           "$outv" "@$tag"
   rm -rf "$(dirname "$V")"
 else
@@ -163,9 +164,14 @@ if [ -n "$SCANB" ]; then
     echo '{"candor":{"version":"v1"},"functions":[{"fn":"worker","inferred":["Fs","Net"],"direct":["Fs","Net"],"unresolved":false}]}' > "$SR/.candor/report.sr.Rlib.json"
     "$QUERY" state "$SR" > "$SR/.candor/state"
     printf 'stale-engine-xyz\n' > "$SR/.candor/engine-version"   # != VERX -> nudge must fire
-    outsr=$(CANDOR_LIB="$DYLIB" CANDOR_HOME="$(mktemp -d)" "$RUN" "$SR" 2>/dev/null); codsr=$?
+    outsr=$(CANDOR_BACKEND=lint CANDOR_LIB="$DYLIB" CANDOR_HOME="$(mktemp -d)" "$RUN" "$SR" 2>/dev/null); codsr=$?
     chk  "review+nudge: exits 11 on the review"                            "$codsr" '^11$'
     chk  "review+nudge: the contract-refresh nudge rides the review prompt" "$outsr" 're-read the contract'
+    # THE DEFAULT ROUTE IGNORES A FINDABLE DYLIB. Same fixture, same CANDOR_LIB, NO opt-in: the receipt must
+    # run the scanner (stable backend, no review) — a dylib on the machine is not a reason to reach the oracle.
+    outd=$(CANDOR_LIB="$DYLIB" CANDOR_HOME="$(mktemp -d)" CANDOR_SCAN="$SCANB" "$RUN" --force "$SR" 2>/dev/null); codd=$?
+    chk  "default route: a pinned dylib without CANDOR_BACKEND=lint is NOT used (stable backend)" "$outd" 'stable backend'
+    chk  "default route: no oracle self-review (exit is not 11)"                                 "$codd"  '^(0|10)$'
     rm -rf "$(dirname "$SR")"
   else
     echo "  skip review+nudge check (no dylib built)"

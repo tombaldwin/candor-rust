@@ -814,6 +814,8 @@ pub(crate) fn scan_main() {
                 println!("rustc-dev, no compile. Emits the same report every family engine speaks, through");
                 println!("the shared classifier, and it deliberately under-reports rather than fabricates:");
                 println!("Unknown marks only boundaries it can see (callbacks, FFI, untrusted chained reports).");
+                println!("What it cannot see through — external-trait dispatch, an uninferrable receiver,");
+                println!("desugared operators/`?`/`.await` — it can miss silently.");
                 println!();
                 println!("USAGE");
                 println!("  candor-scan [<dir>] [options]        scan a crate (default: .). A [workspace] root");
@@ -842,8 +844,9 @@ pub(crate) fn scan_main() {
                 println!("                       exit 1 on a violation");
                 println!("  --gate-json <f|->    write the structured gate verdict {{ spec, ok, violations }} as JSON");
                 println!("                       over this scan; `-` streams it to stdout; exit 1 on violation.");
-                println!("                       ADVISORY FLOOR: the syntactic backend under-reports, so a miss can");
-                println!("                       pass — the nightly engine is the sound gate");
+                println!("                       ADVISORY FLOOR: the syntactic backend can MISS an effect reached");
+                println!("                       through external-trait dispatch or an uninferrable receiver, and");
+                println!("                       such a miss is silent — a clean run is necessary, never sufficient");
                 println!("  -V, --version        print the installed build and its contract version (offline), and");
                 println!("                       the upgrade line");
                 println!("  -h, --help           print this help");

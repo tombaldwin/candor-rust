@@ -26,8 +26,8 @@ STATE="$STATE_DIR/state"
 REPORT_PREFIX="$STATE_DIR/report"
 CONFIG="$STATE_DIR/config"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
-# Per-project config (written by install.sh) pins CANDOR_HOME (the candor clone) and
-# CANDOR_LIB (the dylib). The clone is the single source of truth for the engine, these
+# Per-project config (written by install.sh) pins CANDOR_HOME (the candor clone) and, for an
+# operator who opted into the oracle, CANDOR_LIB (the dylib). The clone is the single source of truth for the engine, these
 # scripts, and AGENTS.md — `git pull` / `cargo candor update` updates all three together.
 [ -f "$CONFIG" ] && . "$CONFIG"
 
@@ -60,23 +60,23 @@ src_hash() { [ -n "$QUERY" ] && "$QUERY" state 2>/dev/null; }
 CUR="$(src_hash)"; SHORT="${CUR:0:8}"
 PREV=""; [ -f "$STATE" ] && PREV="$(cat "$STATE" 2>/dev/null)"
 
-# ---- locate the candor dylib ----
-# The nightly dylib (newest-mtime; an explicit CANDOR_LIB override wins). After a pinned-toolchain bump
-# the previous `libcandor@<old>.dylib` lingers beside the new one and sorts first alphabetically; loading
-# it runs a stale engine — newest_of avoids that.
+# ---- locate the candor dylib (ORACLE OPT-IN ONLY) ----
+# candor-scan is the ONLY user route. The rustc dylint lint is the family's oracle instrument, so this
+# script reaches it only when an operator sets CANDOR_BACKEND=lint (parity with cargo-candor). Without
+# that the receipt always runs the scanner, even when a dylib happens to be findable on the machine.
+# Under the opt-in: the newest-mtime dylib (an explicit CANDOR_LIB override wins). After a pinned-toolchain
+# bump the previous `libcandor@<old>.dylib` lingers beside the new one and sorts first alphabetically;
+# loading it runs a stale engine — newest_of avoids that.
 find_lib() {
-  # CANDOR_BACKEND=scan forces the stable backend even when a dylib is findable (parity with
-  # cargo-candor; also makes tests deterministic on machines with a stray /tmp/candor clone).
-  [ "${CANDOR_BACKEND:-}" = "scan" ] && return 1
+  [ "${CANDOR_BACKEND:-}" = "lint" ] || return 1
   [ -n "${CANDOR_LIB:-}" ] && [ -e "${CANDOR_LIB:-}" ] && { echo "$CANDOR_LIB"; return 0; }
   newest_of "${CANDOR_HOME:-}"/target/debug/libcandor@*.dylib "${CANDOR_HOME:-}"/target/debug/libcandor@*.so \
             "$DIR"/../candor/target/debug/libcandor@*.dylib "$DIR"/../candor/target/debug/libcandor@*.so \
             /tmp/candor/target/debug/libcandor@*.dylib /tmp/candor/target/debug/libcandor@*.so
 }
 
-# The STABLE backend (candor-scan) — the zero-install fallback. When no nightly dylib is present (fresh
-# machine, stable-only CI, locked-down box), the receipt still works: candor-scan produces the same
-# report JSON on stock `cargo`. An explicit CANDOR_SCAN override wins.
+# The scanner (candor-scan) — the user route: it produces the report on stock `cargo`, no nightly. An
+# explicit CANDOR_SCAN override wins.
 find_scan() {
   [ -n "${CANDOR_SCAN:-}" ] && [ -x "${CANDOR_SCAN}" ] && { printf '%s\n' "$CANDOR_SCAN"; return 0; }
   newest_of "${CANDOR_HOME:-}"/target/release/candor-scan "${CANDOR_HOME:-}"/target/debug/candor-scan \
@@ -134,11 +134,11 @@ is_scan_report() {
 need_run=$FORCE
 [ "$CUR" != "$PREV" ] && need_run=1
 report_exists || need_run=1
-# Backend transition: if a cached report was produced by the stable scanner but a nightly dylib is NOW
-# available, regenerate with the lint — otherwise the receipt would attribute the syntactic scan report
-# to the nightly engine (and never self-correct until the source changes).
+# Backend transition (oracle opt-in only): if a cached report was produced by the scanner but the lint is
+# selected NOW, regenerate with the lint — otherwise the receipt would attribute the syntactic scan report
+# to the lint (and never self-correct until the source changes).
 [ -n "$LIBP" ] && is_scan_report && need_run=1
-# The reverse, forced: CANDOR_BACKEND=scan (CI/reproducibility) makes find_lib decline the dylib, so a
+# The reverse, forced: an explicit CANDOR_BACKEND=scan (CI/reproducibility) means a
 # CACHED LINT report would otherwise be served unchanged — attributed to a clone HEAD no loaded binary
 # produced. Regenerate it with the scanner so the served report and its @scan stamp are truthful.
 [ "${CANDOR_BACKEND:-}" = scan ] && report_exists && ! is_scan_report && need_run=1
@@ -169,8 +169,9 @@ clear_scan_reports() { [ -n "$QUERY" ] && "$QUERY" reports "$REPORT_PREFIX" --cl
 clear_lint_reports() { [ -n "$QUERY" ] && "$QUERY" reports "$REPORT_PREFIX" --clear-other scan >/dev/null 2>&1 || true; }
 run_lint() { clear_scan_reports; CANDOR_JSON="$REPORT_PREFIX" cargo dylint --lib-path "$LIB" >/dev/null 2>"$STATE_DIR/last-error.log"; }
 # The stable backend: produce the report with no nightly toolchain. candor-scan parses sources (it does
-# NOT build the crate), so it can't fail on a compile error — but it under-reports vs the lint (no
-# Unknown; misses some method/macro/cross-crate effects). Marked clearly so the receipt stays honest.
+# NOT build the crate), so it can't fail on a compile error — but it is syntactic: it can miss effects reached
+# through external-trait dispatch, operators/`?`/`.await`, or cross-crate identity, and says nothing when it
+# does. Marked clearly so the receipt stays honest.
 run_scan() { clear_lint_reports; "$SCAN" "$DIR" --out "$REPORT_PREFIX" >/dev/null 2>"$STATE_DIR/last-error.log"; }
 
 ran_ok=1; surfaced=0
@@ -179,7 +180,7 @@ if [ "$need_run" = 1 ]; then
   MARK="$STATE_DIR/.mark"; : > "$MARK"
   emitted() { [ -n "$(find "$STATE_DIR" -name 'report.*.*.json' -newer "$MARK" 2>/dev/null)" ]; }
   if [ -n "$LIBP" ]; then
-    # Preferred: the nightly lint (soundness contract, Unknown, conformance).
+    # Oracle opt-in (CANDOR_BACKEND=lint): the rustc lint, for an operator measuring it on purpose.
     LIB="$LIBP"
     if run_lint && emitted; then
       echo "$CUR" > "$STATE"; ran_ok=1
@@ -195,9 +196,9 @@ if [ "$need_run" = 1 ]; then
       fi
     fi
   elif [ -n "$SCANP" ]; then
-    # Zero-install fallback: the stable scanner. No nightly, no dylint — works anywhere `cargo` does.
+    # The user route: candor-scan. No nightly, no dylint — works anywhere `cargo` does.
     SCAN="$SCANP"
-    BACKEND=" · stable backend (syntactic — install the nightly lint for Unknown/soundness)"
+    BACKEND=" · stable backend (syntactic scan — can miss effects it cannot resolve, without saying so; not a certificate)"
     # Stamp the report as `@scan` UNCONDITIONALLY (override any clone-HEAD VER set above): the report was
     # produced by the syntactic scanner, not the nightly lint at that commit, so the receipt must say so.
     VER="scan"; VERSTAMP=" @scan"
@@ -207,14 +208,14 @@ if [ "$need_run" = 1 ]; then
       ran_ok=0
     fi
   else
-    echo "candor$VERSTAMP ⚠ not installed — no candor backend found. Build candor (cargo build in the clone, or 'cargo candor setup') or set CANDOR_HOME in .candor/config.$NUDGE"
+    echo "candor$VERSTAMP ⚠ not installed — no candor-scan found. Install it (cargo install candor-scan, or 'cargo candor setup' in the clone) or set CANDOR_HOME in .candor/config.$NUDGE"
     exit 10
   fi
 fi
 # If we're SERVING a cached scan report (no rerun this turn, no dylib), keep the receipt honest: mark it
 # the stable backend and stamp `@scan`, regardless of any clone-HEAD VER computed above.
 if [ -z "$LIBP" ] && is_scan_report; then
-  [ -z "$BACKEND" ] && BACKEND=" · stable backend (syntactic — install the nightly lint for Unknown/soundness)"
+  [ -z "$BACKEND" ] && BACKEND=" · stable backend (syntactic scan — can miss effects it cannot resolve, without saying so; not a certificate)"
   VER="scan"; VERSTAMP=" @scan"
 fi
 
@@ -324,7 +325,7 @@ fi
 if [ "${CALIB_SIDECAR:-0}" != 1 ] && [ -z "$LIBP" ] && is_scan_report; then
   # The stable backend writes no calibrated sidecar, so the gap check can't run — say so plainly rather
   # than "deferred (arrives with the first report)", which never comes true on a scan-only machine.
-  COV="coverage: n/a on the stable backend (install the nightly lint for blind-spot detection)"
+  COV="coverage: n/a on the stable backend (it writes no calibrated sidecar; the scan's own coverage ledger names uncovered dependencies)"
 elif [ "${CALIB_SIDECAR:-0}" != 1 ]; then
   COV="coverage: deferred (calibrated set arrives with the first report)"
 elif [ -n "$gaps" ]; then
@@ -344,7 +345,8 @@ BASELINE_PREFIX="$STATE_DIR/baseline"
 # Skip the review when the CURRENT report is a SCAN report (`! is_scan_report`): the baseline is
 # lint-produced and carries `Unknown`, so diffing a syntactic scan report against it would false-fire
 # (scan-only artifacts read as "gained") or silently defeat the review (a real effect scan can't see
-# makes the report show FEWER effects). The self-review needs the lint's soundness on both sides.
+# makes the report show FEWER effects). The self-review compares like with like, so it runs only when the
+# current report and the baseline come from the SAME backend — i.e. the oracle opt-in.
 if [ "${CANDOR_REVIEW:-0}" != 0 ] && [ "$ran_ok" = 1 ] && ! is_scan_report \
    && ls "$BASELINE_PREFIX".*.*.json >/dev/null 2>&1 && [ -n "$QUERY" ]; then
   bver=""; [ -f "$BASELINE_PREFIX.candor-version" ] && bver="$(cat "$BASELINE_PREFIX.candor-version" 2>/dev/null)"

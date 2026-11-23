@@ -12,7 +12,7 @@
 #   .claude/candor/candor-run.sh, stop-hook.sh   stubs -> $CANDOR_HOME/integrations/...
 #   .claude/commands/candor.md                   the /candor slash command
 #   .claude/settings.json                        merges in the Stop hook (auto-refresh)
-#   .candor/config                               pins CANDOR_HOME (clone) + CANDOR_LIB
+#   .candor/config                               pins CANDOR_HOME (clone) + CANDOR_QUERY
 #
 # Idempotent: re-running re-points stubs and re-merges the hook. Run it again after you
 # move the clone or to migrate an older copy-based install to the reference model.
@@ -48,29 +48,33 @@ EOF
 done
 cp "$SRC/commands/candor.md" "$TARGET/.claude/commands/"
 
-# --- pin the clone (and the resolved dylib + query binary) in the project config ---
-LIB="$(ls "$CANDOR_HOME"/target/debug/libcandor@*.dylib "$CANDOR_HOME"/target/debug/libcandor@*.so 2>/dev/null | head -1 || true)"
-# candor-query powers the receipt's effect breakdown + self-review. A bare `cargo build` builds the
-# dylib but NOT candor-query (it's not a dependency of the lint), so build it here if it's missing —
-# it's a small stable crate, quick to compile.
+# --- pin the clone (and the resolved candor-query) in the project config ---
+# candor-scan is the ONLY user route, so no dylib is pinned: the receipt runs the scanner. (An operator
+# measuring the rustc lint on purpose sets CANDOR_BACKEND=lint, plus CANDOR_LIB if the dylib is not in the clone.)
+# candor-query powers the receipt's effect breakdown + self-review, and candor-scan produces the report;
+# both are small stable crates, so build whichever is missing.
 QUERY=""
+SCANB=""
 for q in "$CANDOR_HOME"/target/release/candor-query "$CANDOR_HOME"/target/debug/candor-query \
          "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-query; do
   [ -x "$q" ] && { QUERY="$q"; break; }
 done
-if [ -z "$QUERY" ]; then
-  echo "  building candor-query (receipt breakdown + self-review)…"
-  ( cd "$CANDOR_HOME" && cargo build -q -p candor-query ) 2>/dev/null || true
+for q in "$CANDOR_HOME"/target/release/candor-scan "$CANDOR_HOME"/target/debug/candor-scan \
+         "${CANDOR_CACHE:-$HOME/.candor}"/bin/candor-scan; do
+  [ -x "$q" ] && { SCANB="$q"; break; }
+done
+if [ -z "$QUERY" ] || [ -z "$SCANB" ]; then
+  echo "  building candor-scan + candor-query (the receipt's report + breakdown)…"
+  ( cd "$CANDOR_HOME" && cargo +stable build -q -p candor-scan -p candor-query ) 2>/dev/null || true
   [ -x "$CANDOR_HOME/target/debug/candor-query" ] && QUERY="$CANDOR_HOME/target/debug/candor-query"
+  [ -x "$CANDOR_HOME/target/debug/candor-scan" ] && SCANB="$CANDOR_HOME/target/debug/candor-scan"
 fi
 {
   printf 'CANDOR_HOME=%q\n' "$CANDOR_HOME"
-  [ -n "$LIB" ] && printf 'CANDOR_LIB=%q\n' "$LIB"
   [ -n "$QUERY" ] && printf 'CANDOR_QUERY=%q\n' "$QUERY"
 } > "$TARGET/.candor/config"
-if [ -n "$LIB" ]; then echo "  pinned CANDOR_HOME and CANDOR_LIB"; else
-  echo "  pinned CANDOR_HOME. No dylib built yet — run 'cargo candor update' (or 'cargo build' in the clone)."
-fi
+echo "  pinned CANDOR_HOME"
+[ -n "$SCANB" ] || echo "  ⚠ candor-scan unavailable — run 'cargo install candor-scan' (or 'cargo candor setup' in the clone) so the receipt can produce a report."
 [ -n "$QUERY" ] && echo "  pinned CANDOR_QUERY ($(basename "$(dirname "$(dirname "$QUERY")")")/$(basename "$(dirname "$QUERY")")/candor-query)" \
   || echo "  ⚠ candor-query unavailable — the receipt will show a crude count until you run 'cargo candor setup'."
 

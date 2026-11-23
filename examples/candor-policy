@@ -1,5 +1,7 @@
-# Example candor effect policy.  Run with:  cargo candor policy examples/candor-policy
-# (or drop it at .candor/policy and run `cargo candor policy`).
+# Example candor effect policy.  Run with:  candor-scan . --policy examples/candor-policy
+# (or drop it at .candor/policy and run `candor-scan . --policy .candor/policy`; a `policy` line in
+# .candor/config makes a bare `candor-scan .` enforce it). A clean run is the syntactic floor: necessary,
+# never sufficient.
 #
 # Each rule constrains the effects a function may *transitively* perform — so it catches a layer that
 # reaches an effect through a helper, not just a direct call. That's the architectural invariant an
@@ -20,7 +22,7 @@
 #                                dependency-direction rule (AS-EFF-009). "domain must not reach infra."
 #
 # `#` comments and blank lines are ignored. Enforce a whole workspace in one command with
-# `cargo candor policy` (it snapshots every crate, then enforces with siblings loaded).
+# `candor-scan <workspace-root> --policy <file>` (it scans every member, then enforces over all of them).
 
 # The domain / business-logic layer must not reach the network, a database, or the filesystem.
 deny Net Db Fs   domain

@@ -6,6 +6,10 @@ candor silently wrong.** A change that adds a false "this is pure" is worse than
 
 ## Build & test
 
+The root crate is the rustc dylint lint, which the family uses as its ORACLE instrument (fuzzers, censuses, the
+strace oracle, Self-guard) — not a user product. `candor-scan` is the user route. Work on the lint only to keep the
+oracle honest; a change a user should see belongs in `candor-scan`/`candor-classify`.
+
 ```sh
 cargo install cargo-dylint dylint-link   # once
 cargo build --workspace                  # the lint + the tooling crates (candor-report, candor-query);

@@ -153,7 +153,7 @@ pub(crate) fn parse_config_text(
                 eprintln!(
                     "candor-scan: config key '{key}' is recognized by the candor family but not \
                      implemented by candor-scan — that gate/mode is NOT active on this scan \
-                     (the nightly lint / another engine enforces it)"
+                     (another family engine may implement it; candor-scan does not)"
                 );
             }
             continue;

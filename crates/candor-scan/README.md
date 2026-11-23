@@ -15,15 +15,14 @@ candor-scan . --json                   # print the report to stdout instead
 candor-scan workspace-root             # one report per workspace MEMBER, all under the same prefix
 ```
 
-The report is the same JSON the full [candor](https://github.com/tombaldwin/candor-rust) nightly lint
-produces, so the candor CLI's read-only queries (`show`/`where`/`callers`/`map`) read it identically.
+The report is the candor report JSON (spec §2), so the candor CLI's read-only queries (`show`/`where`/`callers`/`map`) read it identically.
 
 ## What it does well, and where it stops
 
 `candor-scan` is **syntactic** — it sees what's *written*, not what the compiler *resolves*. It is
 calibrated to **never fabricate an effect** (validated across 1294 real crates: zero false positives on
-a curated-pure set). When it can't see an effect, it stays silent rather than guessing — an honest
-under-report, never a wrong label.
+a curated-pure set). When it can't see an effect, it stays silent rather than guessing — an
+under-report, never a wrong label — which also means a miss is not marked: see *Misses* below.
 
 - **Catches:** path-qualified effect calls (`std::fs::read`, `Command::new`, `reqwest::Client::execute`),
   `use`-aliases, transitive propagation, calls hidden in macros (`try_call!`, `println!`), four C-library
@@ -48,9 +47,11 @@ under-report, never a wrong label.
   to the type owning `run`), **generic-parameter fields** (`struct B<S>(S)` — `self.0.method()` can't be
   typed without instantiating `S`), overloaded operators / `?` / `.await` desugars, RAII drops (an
   effectful `Drop::drop` has no call expression — it runs at scope end), a custom `Iterator::next`
-  reached only via a `for`-loop desugar, and cross-crate propagation by stable identity. These need the
-  semantic resolution only the nightly lint has (the soundness fuzzer locks the desugar forms against
-  the lint: `op_add`/`index`/`deref`/`try_from`/`await_poll`/`drop`/`iterator`/`eq`/`add_assign`).
+  reached only via a `for`-loop desugar, and cross-crate propagation by stable identity. These need
+  semantic resolution the scanner does not have; the family's oracle (a rustc-integrated lint in the
+  [candor-rust](https://github.com/tombaldwin/candor-rust) repo, an instrument rather than a user route)
+  is what measures them (the soundness fuzzer locks the desugar forms against it:
+  `op_add`/`index`/`deref`/`try_from`/`await_poll`/`drop`/`iterator`/`eq`/`add_assign`).
   Named explicitly because neither looks like a call: an operator on a GENERIC type parameter
   (`fn f<T: PartialEq>(a: T, b: T) { a == b }` runs `T`'s `eq`, which may be effectful) and the implicit
   `Drop` of a value of a generic type `T` (`fn eat<T>(_t: T) {}`) are SILENT in that generic body — the
@@ -83,7 +84,7 @@ under-report, never a wrong label.
   names what's invisible; one dep scan closes it — the classifier only ever has to know the std/builtin frontier.
 
 **The policy gate floor.** `candor-scan <dir> --policy <file>` (or `CANDOR_POLICY=…`) enforces a
-spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid` — parsed by the same shared grammar as the nightly and
+spec-§6.2 policy (`deny`/`pure`/`allow`/`forbid` — parsed by the same shared grammar as the oracle lint and
 JVM gates) over the scan and exits 1 on violation. It is the **syntactic floor**: resolution-heavy code can
 under-report silently, so a missed effect can pass — a clean run is necessary, never sufficient. Measured:
 **0 silent-pure across 19 syscall-oracle drivers** on executed Fs/Net/Exec, and **0 fabrications across 76
@@ -102,10 +103,10 @@ envelope `candor.version`) → exit 2 *without* evaluating — a stale baseline 
 (spec §2.1), never a silent skip, never a stale compare. Record one: `candor-scan <dir> --out
 .candor/baseline` and commit the files. Same advisory-floor caveat as the policy gate.
 
-For the soundness contract (`Unknown` over-approximation), conformance checking, and the **sound**
-policy/guard CI gates, use the full nightly [candor](https://github.com/tombaldwin/candor-rust) lint. The
-two share one classifier and one policy parser, so they never disagree on what counts as an effect or
-what a rule means.
+This scanner is the one user route for candor on Rust, and both gates above are floors, not certificates.
+The family's oracle lint in [candor-rust](https://github.com/tombaldwin/candor-rust) shares this scanner's
+classifier and policy parser, so they never disagree on what counts as an effect or what a rule means; it is
+how the scanner's misses are measured, and it is not something to install to gate a project.
 
 ## Usage
 

@@ -13,6 +13,9 @@
 # Tasks: minicache (Fs), geoip (Net), renderer (Exec). Each is a 5-file crate where one natural edit
 # makes a low-level fn gain an effect that propagates to 7 functions across 4 files (see GROUND_TRUTH.md).
 set -euo pipefail
+# ORACLE LANE: these scripts measure the rustc lint through the wrapper on purpose, so they opt in. The wrapper's
+# default is candor-scan; `policy` is a lint-only verb there and would refuse (exit 2) without this.
+export CANDOR_BACKEND=lint
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CANDOR="$(cd "$SELF/../.." && pwd)"
 CC="$CANDOR/cargo-candor"

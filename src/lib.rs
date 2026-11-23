@@ -3,6 +3,12 @@
 
 // candor — a type-aware capability/effect detector for Rust.
 //
+// THIS LINT IS THE FAMILY'S ORACLE INSTRUMENT, NOT A USER ROUTE (decision 2026-11-23, BACKLOG §5.1 option A).
+// `candor-scan` is the only user route; this lint is what the soundness fuzzers, the censuses, the strace
+// oracle and Self-guard run, and what the scanner is measured against. Its report is not spec-current
+// (SOUNDNESS R456). Nothing here is a claim to a user that it is "the sound gate"; the SOUNDNESS comment
+// below describes the property the oracle is held to, not a product guarantee.
+//
 // Stateful. We record, per function, (a) the effects it performs DIRECTLY and (b) the
 // local functions it calls. After the whole crate is seen, we compute a transitive
 // fixpoint so each function reports its FULL effect set — including effects inherited
@@ -1544,7 +1550,7 @@ fn mem_drop_local_edge<'tcx>(
 /// partial_cmp) to its concrete LOCAL impl method, pinned by the operand type. Comparison operators don't
 /// record a `type_dependent_def_id` even when overloaded, so resolve_callee can't see them via the normal
 /// operator path — without this an effectful PartialEq/PartialOrd impl reached through comparison sugar is
-/// invisible (a silent under-report in the sound gate). Mirrors the `From` resolver above (two type
+/// invisible (a silent under-report in the oracle lint). Mirrors the `From` resolver above (two type
 /// params). A non-local/std impl resolves to std (pure calibration); an unresolvable generic stays dynamic.
 fn resolve_cmp_op<'tcx>(
     cx: &LateContext<'tcx>,
@@ -3597,7 +3603,7 @@ impl Candor {
                     // SOUNDNESS R808 — …OR a spawn whose program is its RECEIVER (R460). This arm asked
                     // only `is_cmd_naming_method`, so `fn go(cmd: &mut Command) { Command::new("git")
                     // .status(); cmd.spawn(); }` was FLAGGED by `candor-scan` and PASSED here, EXECUTED
-                    // spawning a real program while this engine — the one `--help` calls the sound gate —
+                    // spawning a real program while this engine — then billed as "the sound gate" —
                     // answered `ok: true`. It now asks the shared `masks_locator`, which carries R460's
                     // receiver arm and R806's libc `system`/`exec*`/`posix_spawn*` arm. The DETERMINED
                     // receiver is excused by `exec_recv_named_here`: a chain rooted at `Command::new(..)`
@@ -3625,7 +3631,7 @@ impl Candor {
                     // RECEIVER, and both are the call's own. `p.exists()` reaches the filesystem against
                     // the path it is invoked ON.
                     //
-                    // THIS ENGINE IS THE ONE `--help` CALLS "the sound gate", AND IT WAS THE ONE STILL
+                    // THIS ENGINE WAS BILLED AS "the sound gate" (until the 2026-11 route decision made it the oracle instrument), AND IT WAS THE ONE STILL
                     // EXEMPTING THE SHAPE — while declaring the rung that forbids it, from the shared
                     // SPEC_VERSION constant. (Written as a literal `spec 0.37` until the ⟨0.38⟩ bump,
                     // where it became the third thing a floor bump has to triage by hand. A version
@@ -4263,7 +4269,7 @@ impl Candor {
         // `is_local()` ALSO excludes it from the floor-disclosure branch (deliberately non-local-only —
         // that branch's whole point is flagging an unreviewed EXTERNAL crate). Both honest-disclosure
         // routes miss it, so the call fell through to silent-pure — strictly worse than rust-scan gives
-        // the identical source, though rust-deep is billed as the sound gate.
+        // the identical source, though rust-deep was then billed as the sound gate.
         //
         // `return` before `add_edge`: a foreign item has no HIR body, so recursing into it as a local
         // call edge would only ever be a dead edge in the fixpoint (never a real one to propagate
@@ -5109,7 +5115,7 @@ impl<'tcx> LateLintPass<'tcx> for Candor {
                                  nothing (⟨0.40⟩: no function is exempt). New code, or a function whose key \
                                  changed (a rename reads as absent). Review what moved: candor diff \
                                  <this run's report> {prefix}.{krate}.{kinds}.json — then, if intended, \
-                                 re-record: cargo candor snapshot {prefix}",
+                                 re-record: CANDOR_BACKEND=lint cargo candor snapshot {prefix}",
                                 real.join(", ")
                             );
                             self.record_violation_origin("AS-EFF-005", &name, &real, &detail, origin);

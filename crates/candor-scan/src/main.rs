@@ -1,5 +1,5 @@
-//! candor-scan — a STABLE-Rust effect scanner. Produces the same candor report JSON the nightly
-//! `rustc_private` lint does, but with a purely syntactic backend: walk the crate's `.rs` files, parse
+//! candor-scan — a STABLE-Rust effect scanner, and the ONE user route for candor on Rust. Produces the
+//! candor report JSON (SPEC §2) with a purely syntactic backend: walk the crate's `.rs` files, parse
 //! with `syn`, build a name-resolved-enough call graph, classify path-qualified calls with the shared
 //! `candor-classify`, and propagate transitively. No nightly, no `rustc-dev`, no dylint — `cargo install`
 //! and run anywhere.
@@ -9,12 +9,13 @@
 //! `Command::new`), including `use`-aliased prefixes; intra-crate calls (matched by name) for transitive
 //! propagation; macro bodies; and local-type/local-trait method dispatch. It DISCLOSES `Unknown` where it
 //! can see the boundary it can't see through: an invoked fn-value/callback (scan.rs), an FFI `extern`
-//! call (scan.rs), an untrusted chained dep report (deps.rs). It MISSES (silently, by design — no
-//! `Unknown`): effects reached only through external-trait dispatch or an uninferrable receiver,
+//! call (scan.rs), an untrusted chained dep report (deps.rs). It MISSES (silently — no
+//! `Unknown` marks it): effects reached only through external-trait dispatch or an uninferrable receiver,
 //! desugared operators/`?`/`.await`/Drop-glue of external types, and cross-crate propagation by stable
-//! identity. So on resolution-heavy code it under-reports relative to the lint. Use the lint when you
-//! need the soundness contract; use this when you need zero-friction, stable, installable triage.
-//! Shares the lint's classifier — one source of truth.
+//! identity. So on resolution-heavy code it can under-report, and a miss in that class is silent: a clean
+//! run is necessary, never sufficient. (The nightly dylint lint at the repo root is the family's ORACLE
+//! instrument — what the soundness fuzzers and censuses measure this scanner against — not a second route
+//! for users; this binary is the user route.) Shares the lint's classifier — one source of truth.
 //!
 //! CALL RESOLUTION. The local call graph is name-resolved, not type-resolved. A qualified `Type::method`
 //! call (or an associated-fn call `RequestBuilder::new()`) is matched on its 2-segment tail, but ONLY when

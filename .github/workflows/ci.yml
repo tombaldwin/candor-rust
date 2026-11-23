@@ -326,7 +326,9 @@ jobs:
 
       # Dogfood: candor guards its OWN effect surface against regressions.
       # If candor starts performing a new effect, this fails until .candor/baseline
-      # is refreshed deliberately (`cargo candor snapshot .candor/baseline`).
+      # is refreshed deliberately: splice the one function's entry into the affected `.candor/baseline.*.json` (a bulk
+      # `CANDOR_BACKEND=lint cargo candor snapshot .candor/baseline` rewrites every baseline and widens the surface
+      # this gate protects). `cargo candor snapshot` is a lint-only verb, so it needs that opt-in.
       #
       # `--workspace` is REQUIRED (SOUNDNESS R1633). This root is a package that also declares a workspace, so a
       # bare `cargo dylint` analyses only the root's dependency closure (the lint, candor-classify, candor-report):

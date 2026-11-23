@@ -198,6 +198,6 @@ pub(crate) fn cmd_audit(args: &[String]) -> i32 {
     if !coverage {
         println!("  classifier blind spots:  cargo candor audit --coverage");
     }
-    println!("  guard against new effects:  cargo candor snapshot .candor/baseline");
+    println!("  guard against new effects:  candor-scan . --out .candor/baseline   (then CANDOR_BASELINE=.candor/baseline candor-scan .)");
     0
 }

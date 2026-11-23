@@ -3,7 +3,7 @@
 The **read-only query surface** over [candor](https://github.com/tombaldwin/candor-rust) effect
 reports — one typed binary answering the questions an agent (or a human) asks of a finished scan,
 *instantly*, without recompiling anything. It is the engine behind `cargo candor show/where/callers/…`
-and works identically over reports from **any** candor backend (the stable scanner, the nightly lint,
+and works identically over reports from **any** candor backend (the stable scanner, the oracle lint,
 or a sibling engine emitting the same [candor-spec](https://github.com/tombaldwin/candor-spec) shape).
 
 ```sh

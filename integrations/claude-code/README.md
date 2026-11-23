@@ -66,10 +66,11 @@ From the Rust project you want instrumented:
 
 It installs the scripts under `.claude/candor/`, the `/candor` command under `.claude/commands/`,
 merges a `Stop` hook into `.claude/settings.json` (non-destructively — existing hooks are kept), and
-pins the candor dylib path in `.candor/config`. Re-running is safe and idempotent.
+pins the clone (and `candor-query`) in `.candor/config`. Re-running is safe and idempotent.
 
-**Prerequisite:** a built candor dylib in the clone. Either build candor (`cargo build` / `cargo
-candor update` in the clone) or set `CANDOR_HOME`/`CANDOR_LIB` in `.candor/config`. `python3` is used
+**Prerequisite:** `candor-scan` (`cargo install candor-scan`, or `./install.sh` in the clone) — the receipt
+runs the scanner, which is the one user route. The rustc lint is the family's oracle instrument and is reached
+only when an operator sets `CANDOR_BACKEND=lint` (plus `CANDOR_LIB` if its dylib is not in the clone). `python3` is used
 for JSON handling and recommended; without it the receipt degrades to a plain function count.
 
 ## Updates — the clone is the single source of truth
@@ -89,8 +90,8 @@ git), the clone *is* the distribution; this just makes refreshing it atomic.
 The receipt is honest about its own version, the same way it's honest about freshness and coverage:
 
 - every line is stamped `candor @<sha>` — the exact engine commit that produced this map;
-- if the **dylib is older than the engine source** (you pulled but didn't rebuild), it appends
-  `⚠ dylib older than source — rebuild: cargo candor update` (cheap mtime check, every run);
+- if the **engine is older than the clone** (you pulled but didn't rebuild), it appends
+  `⚠ engine @<ver> but clone @<head> — rebuild: cargo candor update`;
 - `/candor` additionally does a network check and appends `⚠ candor update available` when the clone
   is behind its remote (the per-turn Stop hook stays offline and fast, so it never blocks on git).
 
@@ -109,7 +110,7 @@ of the GitHub URL if you want the instructions to update in lockstep with the en
 - **It can't prove the agent *relied* on the report** vs. re-deriving from source. It proves the map
   exists, is current, and what's in it. Making the report authoritative is a workflow choice (read
   `.candor/report.*.json`), not something a hook can force.
-- **Auto-refresh adds latency** to turns that changed Rust (a `cargo dylint` run — seconds to tens of
+- **Auto-refresh adds latency** to turns that changed Rust (a `candor-scan` run — a fraction of a second to a few
   seconds on a real crate). Turns that didn't touch Rust cost nothing. To make it asynchronous
   instead, run the hook in the background and read the prior turn's receipt — a future option.
 - **Coverage is heuristic, but now ground-truthed.** The check runs over the external crates candor

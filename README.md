@@ -3,11 +3,13 @@
 <p align="center"><img src="https://raw.githubusercontent.com/tombaldwin/candor/main/assets/beaky.svg" alt="Beaky, the candor canary" width="180"></p>
 
 **Enforce the capability and architectural boundaries that AI-generated code silently crosses — as a
-CI gate you can trust.** candor is a Rust capability/effect checker built as a
-[dylint](https://github.com/trailofbits/dylint) lint implementing
-[candor-spec](https://github.com/tombaldwin/candor-spec) (the family's deep Rust engine; the
-reference engine is [candor-java](https://github.com/tombaldwin/candor-java)). It knows which
-functions reach the network,
+CI gate you can trust.** candor is a Rust capability/effect checker implementing
+[candor-spec](https://github.com/tombaldwin/candor-spec) (the reference engine is
+[candor-java](https://github.com/tombaldwin/candor-java)). **The user route is `candor-scan`** —
+`cargo install candor-scan`, stable Rust, no nightly. This repository also holds a rustc
+[dylint](https://github.com/trailofbits/dylint) lint: that is the family's **oracle instrument** (what the
+soundness fuzzers, the censuses and the `strace` oracle measure the scanner against), not a second route
+for users. candor knows which functions reach the network,
 filesystem, a database, a subprocess, the clock, or the environment — *transitively, across crates* —
 and turns invariants like *"this layer stays pure," "this service may only talk to Stripe," "the
 domain layer must not depend on infra"* into rules that **fail the PR** when an edit breaks them.
@@ -24,14 +26,18 @@ transitive, cross-crate analysis catches it and the gate blocks it — the one f
 [pre-registered trial](eval/bet2/RESULTS.md), when the locally-simplest edit crossed a pure boundary,
 candor took the shipped-violation rate from **80% to 0%**.
 
-**A gate is only worth trusting if it never lies.** candor's contract is that it *never* silently
-reports a function pure when it actually reaches an effect: anything it can't resolve becomes
-`Unknown` (a sound over-approximation), never a false "clean." That contract is held by an adversarial
-**soundness fuzzer in CI** that threads a known effect through every way Rust can hide a call — operator
-overloads, `?`, `.await`, dynamic dispatch, closures and callbacks, macros, cross-crate boundaries —
-and fails the build if any reachable function comes back pure. So when candor certifies a boundary
-clean, you can act on it. `cargo candor policy` is the gate itself: forbidden effects, network host
-allowlists, and layer-dependency rules (AS-EFF-006/008/009), enforced across a whole workspace.
+**A gate is only worth trusting if it says what it cannot see.** `candor-scan` is syntactic: it sees what is
+written, not what the compiler resolves. It is calibrated never to fabricate an effect, and it marks `Unknown`
+at the boundaries it can see but not see through (an invoked fn-value or callback, an FFI `extern` call, a
+trait with no visible implementor, an untrusted chained report). What it can still **miss, silently**, is an
+effect reached through external-trait dispatch, an uninferrable receiver, a desugared operator, `?` or
+`.await`, or cross-crate identity when the dependency is not chained (`--deps`). So a clean scan is
+necessary, never sufficient. What measures that gap is the oracle: the rustc lint in this repo, whose
+"never silently pure" contract is held by an adversarial **soundness fuzzer in CI** that threads a known
+effect through every way Rust can hide a call (operator overloads, `?`, `.await`, dynamic dispatch, closures
+and callbacks, macros, cross-crate boundaries), plus `strace` ground truth. `candor-scan --policy` is the gate
+itself: forbidden effects, network host allowlists and layer-dependency rules (AS-EFF-006/008/009), enforced
+across a whole workspace as a **syntactic floor**.
 
 **It maps, too.** The same analysis answers "what does this function transitively touch?" and "who
 reaches `Net`?" instantly from a cached report — a cheap blast-radius tool for an agent or a human in
@@ -92,10 +98,10 @@ deliberately *not* a few things: not a security boundary ([SECURITY.md](SECURITY
 codebase-quality grade (effect counts are domain-dependent — there is no "candor score" to chase);
 this repo is Rust-only (the JVM — Java/Kotlin/Scala/Groovy — has
 [candor-java](https://github.com/tombaldwin/candor-java), same spec, same report shape, same gate);
-and the *sound* backend needs nightly — the zero-install [stable scanner](#two-backends-stable-scanner-zero-friction-vs-the-nightly-lint-soundness)
-is best-effort and under-reports. Residual unsoundness (generic dispatch over non-local traits
-assumed to honour its bound) is marked by `Unknown` and coverage warnings and listed under
-[Known limitations](#known-limitations). A sharp, narrow, trustworthy instrument, not a quality platform.
+and the [scanner](#the-scanner-the-user-route-and-the-oracle-lint) is syntactic, so it can miss — silently — an
+effect it cannot resolve. What it does disclose is marked by `Unknown` and coverage warnings; what it can
+miss is listed under [Known limitations](#known-limitations). A sharp, narrow instrument that states its
+limits, not a quality platform.
 
 *Humans:* [Quick start](#quick-start-humans) · *Detail:* [what it detects](#what-it-detects) ·
 [PRINCIPLES](PRINCIPLES.md) · [CRITIQUE](CRITIQUE.md)
@@ -104,41 +110,48 @@ assumed to honour its bound) is marked by `Unknown` and coverage warnings and li
 
 | Path | What |
 |---|---|
-| `src/lib.rs` | the entire lint — classifier, per-function call-graph fixpoint, the three modes |
+| `src/lib.rs` | the rustc dylint lint — the family's **oracle instrument** (call-graph fixpoint over typechecked bodies); not a user route |
 | `crates/candor-classify` | the effect classifier (`crate × path → effect`) — pure string logic, no `rustc`; the one source of truth the lint **and** the stable scanner both call |
-| `crates/candor-scan` | the **stable-Rust** backend: a `syn`-based scanner that produces the same report JSON on stock `cargo`, no nightly/dylint (see below) |
+| `crates/candor-scan` | **the user route**: a stable-Rust, `syn`-based scanner that produces the report JSON on stock `cargo`, no nightly/dylint (see below) |
 | `crates/candor-report` | the report types + parsing, shared by every backend and the CLI (no `rustc_private`) |
 | `crates/candor-query` | `cargo-candor`'s read-only queries (`audit`/`show`/`where`/`callers`/`map`/`diff`/`whatif`/`rewire`/`containment`/`reachable`/`path`/`impact`) as one typed binary — plus ⟨0.24⟩ `gate --report <locator> --policy <file>`, which applies a policy to an EXISTING report with no scan (the supply-chain verb; SPEC §3.1) |
-| `cargo-candor` | the CLI wrapper — thin bash that orchestrates the backend (`cargo dylint` or `candor-scan`) and dispatches queries to `candor-query` |
+| `cargo-candor` | the CLI wrapper — thin bash that runs `candor-scan` and dispatches queries to `candor-query`; it reaches the lint only under the `CANDOR_BACKEND=lint` oracle opt-in |
 | `sample/` | a small crate written in the capability discipline, for trying conformance mode |
-| `rust-toolchain` | pins the nightly the lint links against (`rustc-dev`) |
+| `rust-toolchain` | pins the nightly the oracle lint links against (`rustc-dev`) |
 
 ## Setup
 
 ```sh
-cargo install cargo-dylint dylint-link   # once per machine
-./install.sh                             # build + install — then `cargo candor` works in any project
+cargo install candor-scan          # the user route — https://crates.io/crates/candor-scan (stable Rust, no nightly)
 ```
 
-`install.sh` is one-shot and idempotent: it builds the lint (rustup auto-fetches the pinned nightly +
-`rustc-dev` from `rust-toolchain` — you never manage the toolchain by hand), stashes the dylib +
-the `candor-query` binary under `~/.candor` (a stable home that survives a `cargo clean` in this
-clone), and symlinks `cargo-candor` into `~/.cargo/bin` so `cargo candor …` resolves everywhere. Re-run
-it (or `cargo candor setup`) any time to refresh; `cargo candor update` pulls + rebuilds + refreshes.
-The pinned nightly is inherent to dylint (it links rustc internals) and runs only for the lint — it
-does not touch your projects' toolchains.
-
-### Two backends: stable scanner (zero-friction) vs the nightly lint (soundness)
-
-candor produces the **same report JSON** two ways, and every read-only query (`show`/`where`/`callers`/`map`)
-reads either one identically:
+That is the whole install. If you also want the `cargo candor` wrapper (queries over the report, `watch`,
+`whatif`, `fix`) from a clone:
 
 ```sh
-cargo candor scan      # STABLE: a syntactic scan on stock `cargo` — no nightly, no dylint, no rustc-dev
-cargo candor audit     # NIGHTLY lint: the full rustc-backed analysis with the soundness contract
+./install.sh                       # builds candor-scan + candor-query on stable, stashes them under ~/.candor,
+                                   # and symlinks `cargo-candor` into ~/.cargo/bin so `cargo candor …` resolves
 ```
 
-The stable scanner is the friction-killer, and it's a **one-line install** — no clone, no nightly:
+`install.sh` is one-shot and idempotent, and it needs **no nightly**: the stable tools survive a `cargo clean`
+in this clone because they are stashed under `~/.candor`. Re-run it (or `cargo candor setup`) any time to
+refresh; `cargo candor update` pulls and rebuilds. The rustc lint is built only on request
+(`./install.sh --oracle`) and is for an operator running the oracle (below), never a prerequisite.
+
+### The scanner (the user route) and the oracle lint
+
+This repository holds two producers of the **same report JSON**:
+
+- **`candor-scan`** — the user route. A syntactic scan on stock `cargo`: no nightly, no dylint, no rustc-dev.
+  Every verb of the `cargo candor` wrapper runs on it by default.
+- **the rustc dylint lint** (`src/lib.rs`, "rust-deep") — the family's **oracle instrument**. It is what the
+  soundness fuzzers, the censuses, the `strace` oracle and candor's own Self-guard run, and what the scanner is
+  measured against. It is **not a user route**: its report is not spec-current (SOUNDNESS R456 — it stamps
+  `spec: 0.43` while writing a pre-⟨0.21⟩ envelope with no `analyzed` manifest, so `candor-query gate` answers
+  its output with *"re-scan with a current engine"*), and it is calibrated and shipped as an instrument, not a
+  product. An operator who runs it on purpose sets `CANDOR_BACKEND=lint`; nothing else reaches it through the wrapper.
+
+The scanner is the friction-killer, and it's a **one-line install** — no clone, no nightly:
 
 ```sh
 cargo install candor-scan          # https://crates.io/crates/candor-scan
@@ -150,22 +163,19 @@ candor-scan .                      # writes .candor/report.<crate>.scan.json   (
 
 It walks the crate's `.rs` files, parses them with [`syn`](https://docs.rs/syn), resolves `use`-aliased
 call paths, and classifies them through the **same [`candor-classify`](crates/candor-classify) the lint
-uses** — one source of truth, so the two backends can't drift on what counts as an effect. It needs
+uses** — one source of truth, so the scanner and the oracle can't drift on what counts as an effect. It needs
 nothing but a stable toolchain, so it runs anywhere `cargo` does (CI without a nightly, a locked-down
-box). Within a full candor install it's also `cargo candor scan`.
+box). Within a clone install it's also `cargo candor scan`.
 
-**Stable by default — you don't pick the backend.** The read-only queries (`show`/`where`/`callers`/`map`/
-`audit`) and the [Claude Code receipt](integrations/claude-code/) prefer the nightly lint when it's
-installed (for the soundness contract) and **automatically fall back to the stable scanner when it
-isn't** — so candor works with zero install on any machine, and the receipt says `· stable backend` when
-it's using the syntactic path. The wrapper's enforcement commands (`guard`/`policy`/`snapshot`/`diff`)
-still require the lint — blocking a PR needs the soundness guarantee — while the scanner offers its own
-**syntactic floor** for both gates (`--policy`, and the AS-EFF-005 baseline guard below). One caveat on the
-lint, recorded as SOUNDNESS R456: it is sound on the effect lattice but its report is **not spec-current**
-— it stamps `spec: 0.43` while writing a pre-⟨0.21⟩ envelope with no `analyzed` manifest, so
-`candor-query gate` answers its output with *"re-scan with a current engine"*. Treat it as the soundness
-ORACLE it is used as (`soundness/run.sh`, `realworld/run_deep.sh`), not as a drop-in replacement for the
-scanner's report.
+**One route — you don't pick a backend.** The read-only queries (`show`/`where`/`callers`/`map`/`audit`/`path`/
+`impact`/`whatif`/`fix`/`diff`/`watch`) and the [Claude Code receipt](integrations/claude-code/) all run on
+`candor-scan`, and the receipt says `· stable backend` so a reader knows which route produced it. The verbs
+that exist only on the oracle lint — `strict`, `no-ambient`, `snapshot`, `guard`, `policy`, `risk`, `explain` and
+`audit --all` — **refuse** (exit 2, naming the scanner equivalent) unless an operator sets
+`CANDOR_BACKEND=lint`. A refused gate is fail-closed, as everywhere in the family: with `--gate-json` the sink
+holds the §3.1 refusal document, never a previous run's verdict. The scanner equivalents are `candor-scan . --policy
+<file>` for the policy gate and `candor-scan . --out <prefix>` then `CANDOR_BASELINE=<prefix> candor-scan .`
+for the regression guard (both below).
 
 The trade is **precision, disclosed**. The scanner is syntactic, so it sees what's *written*, not
 what the compiler *resolves*. It catches path-qualified effect calls (`std::fs::read`, `Command::new`,
@@ -178,42 +188,51 @@ dependencies, the receipt **names what the classifier can't see** (the coverage 
 `candor's classifier doesn't cover N dependencies this code calls into…`) and `--deps` **closes it**:
 scan the whole `Cargo.lock` tree once (unbuilt registry sources, ~0.23s/dep measured) and the root
 scan chains over the reports — effects cross every crate boundary without the classifier knowing the
-crates (spec §2 report chaining). It **misses** — *silently*, by design — effects reached only through
+crates (spec §2 report chaining). It **misses** — and nothing in the report says so — effects reached only through
 external-trait dispatch or an uninferrable receiver, desugared operators/`?`/`.await`, and cross-crate
-propagation by stable identity (unless chained). So on resolution-heavy code it **under-reports**
-relative to the lint. Use `scan` for zero-friction triage and CI on stable; use the nightly lint when
-you need the soundness contract (`Unknown` over-approximation, conformance, the sound policy/guard gates).
+propagation by stable identity (unless chained). So on resolution-heavy code it can **under-report**, and a
+clean scan or a green `--policy` run is necessary, never sufficient. Use `scan` for triage and for CI on
+stable, and treat a miss as possible wherever the code leans on those forms; the oracle (above) is how the
+family measures how often that happens.
 
 By default `scan` reports only the crate's **library/binary** source — it skips `tests/`, `benches/`,
 `examples/`, `build.rs`, and `#[cfg(test)]` modules, so the report is what the *crate* does, not what its
 harness does (`--include-tests` keeps them). A [calibration on 35 real crates](eval/calibration/CALIBRATION.md)
 found that with this in place the scanner has **no false positives in library code** — every effect it
-reports is real; its only errors are under-reports through FFI, method dispatch, and macros (the lint's
-job). E.g. it correctly catches chrono reading `/etc/localtime`+`$TZ` and `which` resolving `$PATH`,
+reports is real; its only errors are under-reports through FFI, method dispatch, and macros. E.g. it correctly catches chrono reading `/etc/localtime`+`$TZ` and `which` resolving `$PATH`,
 and correctly shows `Net: 0` on reqwest (whose socket I/O hides behind hyper's resolved method calls).
 
 ## Quick start (humans)
 
-After `install.sh`, use the wrapper from any Rust project (it self-heals — rebuilding the dylib if it
-ever goes missing):
+After `install.sh`, use the wrapper from any Rust project. Every verb below runs on `candor-scan` unless it is
+marked **oracle only** — those exist only on the rustc lint, and refuse (exit 2, naming the scanner equivalent)
+unless an operator sets `CANDOR_BACKEND=lint`:
 
 ```sh
-cargo candor scan                       # STABLE backend: produce the report on stock cargo (no nightly)
-cargo candor audit                      # at-a-glance effect profile of the whole project (nightly lint)
-cargo candor audit --all                # the full per-function lint (spans in context)
-cargo candor snapshot .candor/baseline  # write a JSON report
-cargo candor guard    .candor/baseline  # fail on functions that gained an effect
-cargo candor diff     .candor/baseline  # describe the per-function effect delta (--json)
-cargo candor watch                      # keep the report fresh in the background → instant `diff`
+cargo candor scan                       # produce the report on stock cargo (no nightly)
+cargo candor audit                      # at-a-glance effect profile of the whole project
+cargo candor diff     .candor/baseline  # describe the per-function effect delta vs a candor-scan baseline (--json)
+cargo candor watch                      # keep the report fresh in the background → instant queries
 cargo candor show     my_function       # a function's effects, instant (read from the report)
 cargo candor where    Net               # which functions perform an effect, instant
 cargo candor callers  my_function       # which functions call this one, instant (who depends on it)
-cargo candor explain  my_function       # trace WHY a function has each effect (the call path)
 cargo candor containment [baseline]     # effect-leakage diagnostic; with a baseline, a CI ratchet
 cargo candor reachable                  # what the program does at runtime (union over entry points)
 cargo candor path     my_fn Net         # the call chain by which a fn comes to perform an effect
 cargo candor impact   my_fn             # blast radius: transitive callers + downstream entry points
-cargo candor policy   .candor/policy     # enforce effect boundaries (deny/pure rules)
+cargo candor whatif   my_fn Net         # PRE-EDIT: what would propagate, and would it break policy?
+
+# the gates are candor-scan's own flags (the user route):
+candor-scan . --policy .candor/policy                      # enforce effect boundaries (deny/pure/allow/forbid rules)
+candor-scan . --out .candor/baseline                       # record a baseline (commit it) …
+CANDOR_BASELINE=.candor/baseline candor-scan .             # … and fail on a function that gained an effect
+
+# oracle only (CANDOR_BACKEND=lint):
+cargo candor audit --all                # the lint's per-function diagnostics (spans in context)
+cargo candor snapshot .candor/baseline  # the lint's baseline writer     (user route: candor-scan . --out)
+cargo candor guard    .candor/baseline  # the lint's AS-EFF-005 guard    (user route: CANDOR_BASELINE=… candor-scan .)
+cargo candor policy   .candor/policy    # the lint's policy gate         (user route: candor-scan . --policy)
+cargo candor explain  my_function       # trace WHY a function has each effect (user route: `cargo candor path`)
 cargo candor risk                       # heuristic: effects on caller-derived input (advisory)
 cargo candor strict   my_module         # conformance, scoped to a module
 cargo candor no-ambient my_module       # flag direct ambient-authority use
@@ -274,8 +293,8 @@ Three boundary kinds, all checked *transitively* so they catch what a local diff
 
 - **`accept <fn> <Effect>… for <rule> because <reason>`** (SPEC §6.2 ⟨0.41⟩) — a *known* violation, written down
   where a reviewer reads it. The `for … because` span must be the rule line's own tokens, and the entry names ONE
-  function by exact name (`candor-scan` and `candor-query gate --report`; the `cargo candor` lint route does not
-  evaluate it and leaves the violation red). The row leaves `violations`, appears in the verdict's `accepted`
+  function by exact name (`candor-scan` and `candor-query gate --report` evaluate it; the oracle lint route does not
+  and leaves the violation red). The row leaves `violations`, appears in the verdict's `accepted`
   list, and the human channel prints `N violation(s) accepted by policy; M new`. A function that now does *more*
   than was accepted stays red; an entry that matches nothing is itself a violation (`AS-EFF-012`, delete the line);
   a closure's `{closure#N}` key cannot be accepted — accept the enclosing function. `allow` and `only` rules
@@ -290,12 +309,12 @@ crate, then enforces with the siblings loaded, so an effect or endpoint that liv
 still gets caught at the boundary that forbids it. See [examples/candor-policy](examples/candor-policy)
 and [eval/bet3](eval/bet3/RESULTS.md).
 
-**Machine-readable verdict — `--gate-json` (both backends, candor-spec §3.3).** The gate's verdict as
+**Machine-readable verdict — `--gate-json` (candor-spec §3.3).** The gate's verdict as
 JSON, from the *same* check that sets the exit code, for CI annotations / the PR-native SARIF reporter:
 
 ```sh
-cargo candor policy .candor/policy --gate-json verdict.json    # deep engine (also: guard --gate-json)
-candor-scan . --policy .candor/policy --gate-json verdict.json # stable scanner — identical shape
+candor-scan . --policy .candor/policy --gate-json verdict.json   # the user route
+CANDOR_BACKEND=lint cargo candor policy .candor/policy --gate-json verdict.json   # the oracle lint — same shape (also: guard)
 # → { "spec": "0.43", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
 ```
 
@@ -310,8 +329,8 @@ check anything.
 
 ### AS-EFF-005 on the stable scanner — the zero-install regression guard
 
-The deep engine's [regression guard](#ci-guardrail-lowest-friction-adoption) has a stable floor:
-`candor-scan` enforces the same AS-EFF-005 ratchet with no nightly. Record a baseline, commit it,
+The [regression guard](#ci-guardrail-lowest-friction-adoption) runs on `candor-scan` with no nightly:
+the AS-EFF-005 ratchet. Record a baseline, commit it,
 and a PR that makes an *existing* function gain an effect fails:
 
 ```sh
@@ -332,8 +351,8 @@ functions were exempt ("reviewed as new code"), and code review does not read ef
 file** (and no file under the prefix for any crate) → a stderr note, guard inactive, exit unchanged; a baseline that is **unparseable or produced by a different scanner build** (the envelope
 `candor.version`) → exit 2 *without evaluating* — a stale baseline is invalid gate input (spec §2.1):
 never a silent skip, never a stale compare. The same advisory-floor caveat as the scan policy gate
-applies: the syntactic backend under-reports, so a clean ratchet is necessary, never sufficient — the
-nightly guard is the sound one.
+applies: the syntactic backend can miss an effect it cannot resolve, and says nothing when it does, so a
+clean ratchet is necessary, never sufficient.
 
 ### `.candor/config` — check in the configuration
 
@@ -393,9 +412,14 @@ boundary **and** its one documented exception, the `app:2` leak.) Given a baseli
 Deliberately a **diagnostic + trend gate, not a single grade** — the absolute level is domain-dependent
 and gameable, but "did a boundary effect leak into a new layer?" is a real, enforceable quality signal.
 
-## All modes (explicit invocation)
+## Oracle instrument: invoking the lint directly (operators only)
 
-From any Rust project root, with `LINT` set to the dylib's absolute path:
+**This is not a user route.** It is how the soundness lanes, the censuses and Self-guard drive the rustc lint, kept
+here as the operator's reference. Its report is not spec-current (SOUNDNESS R456), its policy route does not
+evaluate `accept` lines, and nothing here should be read as a recommendation to install a nightly toolchain to
+gate a project: use `candor-scan` (above). Build it with `./install.sh --oracle` (or `cargo build` in the clone).
+
+From a Rust project root, with `LINT` set to the dylib's absolute path:
 
 ```sh
 # AUDIT (default): every function's transitive effect set. No code changes needed.
@@ -425,18 +449,8 @@ CANDOR_PARANOID=1          cargo dylint --lib-path "$LINT"   # treat generic tra
 that key (exit 2). Read the PARANOID report with `candor-query` verbs that answer no `ok` (`where`, `show`, `fix`), or
 re-run without the variable to gate.
 
-Or register it in a project's `Cargo.toml` so plain `cargo dylint` finds it — by local path,
-or **straight from git with no clone** (dylint fetches and builds it against candor's pinned
-toolchain). This is dylint's equivalent of a dependency; dylint loads libraries only from `git` or
-`path` sources, not crates.io, so candor is **not** (and need not be) published there.
-
-```toml
-[workspace.metadata.dylint]
-# clone-free — pin the CURRENT release tag (see this repo's Releases page) for reproducibility:
-libraries = [{ git = "https://github.com/tombaldwin/candor-rust", tag = "v<version>" }]
-# …or a local checkout:
-libraries = [{ path = "/abs/path/to/candor" }]
-```
+Registering the lint in a project's `[workspace.metadata.dylint]` (clone-free, from git) is deliberately not
+documented here: it would make the oracle a user route, which is what this section says it is not.
 
 ## What it detects
 
@@ -449,11 +463,16 @@ candor answers two questions about a codebase:
 2. **Are the signatures honest?** — once you thread capability tokens (or use cap-std) through a
    module, it flags any function performing an effect it doesn't declare.
 
-It resolves every call's `DefId` and classifies the crate/path it lands in. That type resolution is
-the point: a bare `.send()` is meaningless syntactically, but the resolved method tells us it belongs
-to `aws_sdk_*` → a network effect.
+The scanner reads call paths syntactically — `use`-aliases, local call graph, local-trait dispatch — and
+classifies the crate/path each lands in. The oracle lint instead resolves every call's `DefId`, and that
+type resolution is why it is the oracle: a bare `.send()` is meaningless syntactically, but the resolved
+method tells it the call belongs to `aws_sdk_*` → a network effect. The difference between the two is
+exactly what the scanner can miss.
 
-## The capability discipline (conformance mode)
+## The capability discipline (conformance mode — oracle only)
+
+Conformance mode (`strict`, `no-ambient`; AS-EFF-001..004) exists only on the oracle lint
+(`CANDOR_BACKEND=lint`); `candor-scan` has no equivalent. AS-EFF-005 and the policy rules run on both.
 
 A function declares the effects it may perform by taking the matching **capability token** as a
 parameter (`&Fs`, `&Env`, …). Tokens are unforgeable — a private field means they can only be
@@ -471,8 +490,9 @@ point. See `sample/src/main.rs` for the pattern. The checker then flags:
   `std::fs`. The fix is to route the call through an injected capability (e.g. a cap-std handle).
 - **AS-EFF-005** (`CANDOR_BASELINE`) — an existing function *gained* an effect it didn't have in a
   saved snapshot. The lowest-friction adoption path: no token threading, no rewrite — just catch the
-  PR that makes a previously-pure function start doing network/disk/etc. I/O. (New functions are not
-  flagged; they're reviewed as new code.)
+  PR that makes a previously-pure function start doing network/disk/etc. I/O. (⟨0.40⟩ a function ABSENT from the
+  baseline that performs a real effect is flagged too, on the scanner route; the oracle lint's own guard is the
+  older shape.)
 
 Adopt incrementally: scope `CANDOR_STRICT` / `CANDOR_NO_AMBIENT` to one module, fix until it reports
 zero, then move to the next.
@@ -494,11 +514,10 @@ guard: snapshot the effect report, commit it, and fail CI when a function's effe
 
 ```sh
 # once, on a known-good commit — then `git add .candor/`
-CANDOR_JSON=.candor/baseline cargo dylint --lib-path "$LINT"
+candor-scan . --out .candor/baseline
 
-# in CI: fail only on AS-EFF-005 (a function gained an effect) — see examples/candor-guard.yml
-out=$(CANDOR_BASELINE=.candor/baseline cargo dylint --lib-path "$LINT" 2>&1); echo "$out"
-echo "$out" | grep -q AS-EFF-005 && { echo "effect surface grew"; exit 1; } || true
+# in CI: exit 1 if a function gained an effect (AS-EFF-005) — see examples/candor-guard.yml
+CANDOR_BASELINE=.candor/baseline candor-scan .
 ```
 
 Now a PR that makes a parser suddenly open a socket, or a render function start reading the
@@ -506,12 +525,12 @@ filesystem, fails review automatically — no tokens, no rewrite. Refresh the ba
 (re-run the snapshot command) when a new effect is intended. This is equally useful to a human
 reviewer and to an AI agent reviewing a diff.
 
-**The guard fails closed (exit 2) on invalid gate input** — it never silently skips: a baseline made
-by a *different engine version* (stale after `git pull` — refresh with `cargo candor update`), a
-baseline with **no** `.candor-version` provenance sidecar, **no baseline at all** (never snapshotted /
-typo'd prefix), or a workspace member with no per-crate baseline file. Exit 2 means "the gate could
-not evaluate", distinct from exit 1 ("a function gained an effect"). Every case prints the exact
-refresh incantation.
+**The guard fails closed (exit 2) on a baseline it cannot trust** — it never silently compares one: a baseline
+**unparseable or recorded by a different scanner build** (stale after an upgrade: re-record it with
+`candor-scan . --out .candor/baseline`, review `git diff .candor/`, commit). With **no baseline at all** the guard is
+inactive and says so on stderr (exit unchanged), so a typo'd prefix is a note, not a gate: keep the baseline checked
+in, and put `baseline` in `.candor/config` so a missing file is visible. Exit 2 means "the gate could not evaluate",
+distinct from exit 1 ("a function gained an effect"); see [AS-EFF-005 on the stable scanner](#as-eff-005-on-the-stable-scanner--the-zero-install-regression-guard).
 
 ## How well does it actually help an agent? (the measured version)
 
@@ -552,6 +571,12 @@ Match the actual I/O boundary, not the whole crate — e.g. only `.send()` for a
 
 ## Known limitations
 
+- **`candor-scan` can miss effects silently** — effects reached only through external-trait dispatch or an
+  uninferrable receiver, desugared operators/`?`/`.await`/drop glue of external types, and cross-crate
+  propagation by identity unless the dependency is chained (`--deps`). Nothing in the report marks a miss.
+  What it *does* disclose: an invoked fn-value/callback, an FFI `extern` call, a trait with no visible implementor
+  and an untrusted chained report read `Unknown`, and the coverage ledger names uncovered dependencies. The
+  bullets below describe the oracle lint's own residuals.
 - **Dynamic dispatch / fn-pointers / callbacks** can't be resolved to a concrete callee. These are
   surfaced as `Unknown` (→ AS-EFF-003) rather than silently dropped, but candor still can't
   tell you *which* effects hide behind them. Exception: `dyn` over conventionally-pure std traits
@@ -615,23 +640,24 @@ effects the kernel actually observed — ground truth that trusts nothing about 
 
 ## Status
 
-Beta — the candor family's **deep Rust engine**, declaring **spec 0.43** (the same contract the
+Beta — the candor family's Rust engine is `candor-scan`, declaring **spec 0.43** (the same contract the
 reference engine, [candor-java](https://github.com/tombaldwin/candor-java), declares; the
-cross-engine conformance suite pins the agreement). The stable scanner is
+cross-engine conformance suite pins the agreement). The scanner is
 [calibrated on 35 real crates](eval/calibration/CALIBRATION.md) (no false positives in library
-code); the deep engine's "never silently pure" contract is held in CI by the adversarial
-[soundness fuzzer](soundness/) plus `strace`/runtime oracles, and both gate surfaces carry pinned
-exit-code contracts (0/1/2) with fail-closed negatives. Pre-1.0: minor versions may change behavior,
+code) and can still miss effects it cannot resolve. The oracle lint's "never silently pure" contract is held in
+CI by the adversarial [soundness fuzzer](soundness/) plus `strace`/runtime oracles, which is how the scanner's misses
+are found; both gate surfaces carry pinned exit-code contracts (0/1/2) with fail-closed negatives. Pre-1.0: minor versions may change behavior,
 always in the soundness-increasing direction (see [CHANGELOG.md](CHANGELOG.md)).
 
-candor also **guards itself**: CI runs candor over candor against `.candor/baseline`. Its effectful
+candor also **guards itself**: CI runs the oracle lint over candor against `.candor/baseline` (Self-guard). Its effectful
 surface — the lint's config / baseline / cross-report reads and report writes, `candor-report`'s report
 I/O, `candor-classify`'s config discovery and debug-env reads (all `Env`/`Fs`), and the build script
 (`Exec`/`Fs`) — can't gain a *new* effect unnoticed. ⟨0.40⟩ that now includes a function ABSENT from the
 baseline (a newly added one, or a formerly pure one the baseline omits): it is compared against nothing,
 so `Env` seeded into a pure `candor-classify` function fails the guard (SOUNDNESS R811, which the old
-"new code is exempt" rule left open). Review with `cargo candor diff .candor/baseline`, then refresh with
-`cargo candor snapshot .candor/baseline` when a new effect is intended.
+"new code is exempt" rule left open). Review with `CANDOR_BACKEND=lint cargo candor diff .candor/baseline`, then splice the one function's entry into
+the affected `.candor/baseline.<crate>.<kind>.json` when a new effect is intended (do not bulk-refresh: those files
+define the engine's permitted effect surface).
 
 ## License
 

@@ -43,22 +43,24 @@ silently scan with it — surface it to the user first:
 If candor is current, or the user declines the upgrade, proceed with what's there. Otherwise pick a
 path in §1 and install normally.
 
-## 1. Get a report — two backends, one JSON shape
+## 1. Get a report — one route
 
-Both write the same report files; everything below reads either. Choose:
+`candor-scan` is the only route: published scanner, stable Rust, one `cargo install`, seconds to run.
+It is **syntactic**: it sees what is written, not what the compiler resolves. It never fabricates an
+effect, and it emits `Unknown` only where it can see a boundary it cannot see through (an invoked
+fn-value/callback, an FFI `extern` call, a trait with no visible implementor, an untrusted chained
+report). What it can still **miss** — and a miss is **silent**, nothing in the report marks it — is an
+effect reached through external-trait dispatch, an uninferrable receiver, desugared operators/`?`/`.await`,
+or cross-crate identity when the dependency is not chained (`--deps`). Right for a fast effect map,
+triage, and stable-only CI; **a clean result is necessary, never sufficient**, so do not present "no effect
+reported" as a certificate.
 
-- **Path A (the floor)** — published scanner, stable Rust, one `cargo install`, seconds to run.
-  Syntactic: it **under-reports** relative to the deep engine (external-trait dispatch, uninferrable
-  receivers, desugared operators, cross-crate identity — those misses are *silent* by design). It
-  emits `Unknown` only where it can see the boundary: an invoked fn-value/callback, an FFI `extern`
-  call, an untrusted chained report. It never fabricates an effect. Right for a fast effect map,
-  triage, and stable-only CI.
-- **Path B (the certificate)** — the deep engine (a rustc-integrated lint on a pinned nightly,
-  a few minutes to build once). Type-system-level resolution with the §4 trust contract: anything
-  it can't resolve is marked `Unknown`, never silently pure. Right when you need to *rely* on
-  "no effect reported" — soundness gates, purity claims, security review.
+(The rustc dylint lint in the candor-rust repo is the family's ORACLE instrument — what the soundness
+fuzzers and censuses measure the scanner against. It is not a route for you or your user: do not build it
+to "get a sounder answer". Its report is not spec-current — SOUNDNESS R456 — and `candor-query gate`
+answers its output with "re-scan with a current engine".)
 
-**Path A — from nothing to a report in two commands:**
+**From nothing to a report in two commands:**
 
 ```sh
 cargo install candor-scan
@@ -69,9 +71,7 @@ candor-scan . --out /tmp/candor-report     # writes /tmp/candor-report.<crate>.s
 
 It can also enforce a policy file as a gate: `candor-scan . --policy .candor/policy` (exit 1 on
 violation) — a **syntactic floor**: a clean run is necessary, never sufficient, because resolution-heavy
-code can under-report silently. (The dylint lint is the family's ORACLE instrument, not a route for users:
-it writes a pre-⟨0.21⟩ report that `candor-query gate` answers with "re-scan with a current engine" —
-SOUNDNESS R456.) The same floor applies to the AS-EFF-005 regression guard: with
+code can under-report silently. The same floor applies to the AS-EFF-005 regression guard: with
 `CANDOR_BASELINE=<saved report path or --out prefix>` (or the `.candor/config` `baseline` key) a
 function that *gained* an effect vs the saved report exits 1 — ⟨0.40⟩ and so does a function ABSENT
 from it that performs a real effect (its prior is ∅; the row's `origin` says `new`/`unknown`, and a
@@ -80,26 +80,17 @@ re-recording); a new pure function passes, a new `Unknown`-only one is named in 
 file → a note, guard inactive; a baseline from a **different scanner build** (or unparseable) → exit 2 without
 evaluating — never a stale compare, never a silent skip.
 
-**Path B — clone + build the deep engine** (first build downloads a pinned nightly — expect a few
-minutes; it's not stuck):
+**Optional — the `cargo candor` wrapper** (instant queries over the report, `watch`, `whatif`, `fix`) comes
+from a clone, and needs **no nightly**:
 
 ```sh
-cargo install cargo-dylint dylint-link 2>/dev/null || true            # the lint runner
 git clone --depth 1 https://github.com/tombaldwin/candor-rust /tmp/candor 2>/dev/null \
   || (cd /tmp/candor && git pull -q)
-( cd /tmp/candor && cargo build && ./install.sh )                     # install.sh puts `cargo candor` on PATH
-cargo candor audit          # first query generates the deep report (.candor/report.<crate>.<type>.json)
+( cd /tmp/candor && ./install.sh )        # builds candor-scan + candor-query on stable; puts `cargo candor` on PATH
+cargo candor audit          # the first query generates the report (.candor/report.<crate>.scan.json)
 ```
 
-Or without `install.sh`, invoke the lint directly:
-
-```sh
-LIB=$(ls /tmp/candor/target/debug/libcandor@*.dylib \
-         /tmp/candor/target/debug/libcandor@*.so 2>/dev/null | head -1)
-CANDOR_JSON=/tmp/candor-report cargo dylint --lib-path "$LIB"
-```
-
-Either way you get one report file per crate: `<prefix>.<crate>.<type>.json`. Rust entries never
+You get one report file per crate: `<prefix>.<crate>.scan.json`. Rust entries never
 carry `unitKind` (every Rust unit is an ordinary function, which is that field's default — the
 field arrived at spec 0.7, informative);
 sibling reports under a merged prefix may carry it (an accessor, a `<clinit>`, a fleet's agents) —
@@ -124,8 +115,8 @@ If they differ, **ask the user before upgrading** — e.g. "candor-scan 0.7.2 is
 the engine version is part of the result's provenance (the report's `version` field), so a bump the
 user didn't sanction quietly changes what the scan means. Upgrade by the path you installed with:
 
-- **Path A** (`cargo install candor-scan`): `cargo install candor-scan --force`.
-- **Path B** (a clone at `/tmp/candor` or `~/.candor`): `cargo candor update` — it runs
+- **`cargo install candor-scan`**: `cargo install candor-scan --force`.
+- **A clone at `/tmp/candor` or `~/.candor`** (the `cargo candor` wrapper): `cargo candor update` — it runs
   `git pull --ff-only`, rebuilds the engine + integration scripts + this AGENTS.md at one commit,
   then **restamps `.candor/baseline` and tells you whether the new engine classifies your own code
   differently** (the thing to actually check after a tool bump — a verdict change is the upgrade's
@@ -157,26 +148,22 @@ it, both backends write `<prefix>.<crate>.<type>.callgraph.json`: **every** func
 ones) mapped to its callees. So:
 
 - in the callgraph sidecar, *absent* from the report → **pure** (as far as the backend can see; on
-  Path A remember it under-reports),
+  remember the scanner can miss effects silently),
 - in the report → effectful and/or `unresolved` (§4),
 - in *neither* → the backend never saw it (wrong crate? `#[cfg]`'d out? tests without
   `--include-tests`?) — do not conclude anything about it.
 
 ## 3. Query it
 
-With the Path B clone installed, `cargo candor <cmd>` answers the common questions **instantly**
+With the clone installed, `cargo candor <cmd>` answers the common questions **instantly**
 (reading the report, not recompiling):
 
 - **What effects does a function have? / blast radius of editing it** → `cargo candor show <fn>`
   (`*` = performed directly).
-- **Why does a function have an effect?** → `cargo candor explain <fn>` traces the call path to the
-  source (`main → middle → leaf`, and `leaf` calls `std::net::TcpStream::connect`). Use it before
-  editing to see what flows through a function, and to act on the trust rule (§4) — it shows you
-  exactly which call is the `Unknown`.
-- **Did I build an effect on untrusted input?** → `cargo candor risk` flags an effect whose argument
-  comes from a function parameter (`fs::read(path_from_param)`, `Command::new(name)`) — the injection
-  class. A *heuristic* nudge (it over- and under-flags): treat a hit as "validate this input or confirm
-  its source is trusted," not as proof of a bug.
+- **Why does a function have an effect?** → `cargo candor path <fn> <Effect>` prints the call chain by which
+  it comes to perform that effect (`main → mid → leaf`, with the leaf's source location). Use it before
+  editing to see what flows through a function, and to act on the trust rule (§4): `cargo candor path <fn> Unknown`
+  shows you exactly which call is the `Unknown`.
 - **Which functions touch the network (or any effect)?** → `cargo candor where Net` (splits the
   direct sources from the functions that inherit it). Faster than grepping the codebase.
 - **Blast radius of editing this function** → `cargo candor impact <fn>` — the `affected` list (every
@@ -187,9 +174,9 @@ With the Path B clone installed, `cargo candor <cmd>` answers the common questio
   effect propagates to, and whether it would violate the policy).
 - **Safe to treat as pure (e.g. unit-test without mocks)?** → use the §2 rule: in the callgraph
   sidecar and absent from the report (or present with `inferred == []` and `unresolved == false`,
-  which the engine normally elides). On Path A, "absent" is only as strong as the syntactic floor.
+  which the engine normally elides). "Absent" is only as strong as the syntactic floor.
 
-The same queries exist as a standalone binary, `candor-query`, built by the Path B clone
+The same queries exist as a standalone binary, `candor-query`, built by the clone
 (`/tmp/candor/target/debug/candor-query`) — useful when `cargo candor` isn't on PATH. Positional
 args; the trailing `0|1` is the want-JSON flag:
 
@@ -231,7 +218,7 @@ verdict would certify a signature that makes no claim about any unit. (`count > 
 
 `<prefix>` is the report path prefix (e.g. `/tmp/candor-report` — the part before
 `.<crate>.<type>.json`). A prefix matching no report files fails loud (exit 2), so a silent `{}` is
-never "wrong path". With **only Path A installed** there is no query binary — read the JSON directly
+never "wrong path". With **only `candor-scan` installed** there is no query binary — read the JSON directly
 (`jq`/`python3` over the report + callgraph sidecar); the shapes above are all derivable from those
 two files.
 
@@ -240,9 +227,9 @@ two files.
 `inferred` is **authoritative for what candor resolved**. When `unresolved` is `true` (or `"Unknown"`
 appears in the set), the effect list **may be incomplete** — read the source for *that* function
 before relying on it. Never conclude a function is pure or effect-free if it is marked `unresolved`.
-candor deliberately discloses what it cannot see; respect that boundary. (Path A emits `Unknown`
+candor deliberately discloses what it cannot see; respect that boundary. (`candor-scan` emits `Unknown`
 only for the boundaries it can see — an invoked fn-value/callback, an FFI `extern` call, an
-untrusted chained report; its **other** misses are silent by design, so treat every Path A absence
+untrusted chained report; its **other** misses are silent, so treat every absence
 as "not seen syntactically", never "proven absent".)
 
 ## 5. After you change code

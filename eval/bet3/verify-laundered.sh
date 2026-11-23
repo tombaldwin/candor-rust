@@ -7,6 +7,9 @@
 # sidecar — which the workspace gate (`cargo candor policy`) produces. Expected: the gate blocks
 # (exit 1) and flags domain::checkout; a pure domain function (subtotal) is not flagged.
 set -uo pipefail
+# ORACLE LANE: these scripts measure the rustc lint through the wrapper on purpose, so they opt in. The wrapper's
+# default is candor-scan; `policy` is a lint-only verb there and would refuse (exit 2) without this.
+export CANDOR_BACKEND=lint
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$ROOT/layering-laundered"
 cd "$WS"

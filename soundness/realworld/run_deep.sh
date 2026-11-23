@@ -2,13 +2,13 @@
 # Real-world DYNAMIC oracle — the DEEP (nightly dylint) engine against kernel ground truth.
 #
 # The SIBLING of run.sh: identical driver crates, identical strace ground truth, identical CASES table
-# and triage logic — but it drives the NIGHTLY dylib (`src/lib.rs`, the SOUND engine) via
+# and triage logic — but it drives the NIGHTLY dylib (`src/lib.rs`, the ORACLE lint — an instrument, not a user route) via
 # `cargo dylint --lib-path <libcandor@*.so>` + CANDOR_JSON, instead of candor-scan. The driver crates are
 # engine-AGNOSTIC (they're just real effectful programs), so the only differences are the build/predict
 # path here. This closes the CI evidence gap: the continuous real-world syscall oracle covered only the
 # STABLE scanner; the deep engine's strace oracle (soundness/oracle.sh) ran only on the SYNTHETIC fuzzer.
-# Now the engine candor calls "the sound gate / continuously oracle-verified" is verified the same way,
-# against the same real crates, on every push.
+# Now the oracle lint is itself checked the same way (a continuously verified instrument, which is what makes it
+# usable as ground truth for the scanner), against the same real crates, on every push.
 #
 # An effect that demonstrably RAN (its marker is in the trace) but which the deep engine predicts NOWHERE
 # and discloses NOWHERE (no Unknown / invisible / incomplete) is a silent under-report — the dangerous lie.
