@@ -783,12 +783,15 @@ fn rewrite_lim(def: &str) -> Option<String> {
     Some(out.into_iter().collect::<TokenStream>().to_string())
 }
 
+/// (root, module path) → every (file, index into its `mods`) defining a module there.
+pub(crate) type ModuleAll = HashMap<(String, Vec<String>), Vec<(String, usize)>>;
+
 /// The module tree of every root, placed (shared by R-ROOT and R-BARE-TC).
 pub(crate) struct Placed {
     /// file → every (root, module path, gated) placing it
     pub placed: HashMap<String, Vec<Placement>>,
     /// (root, module path) → every (file, index into its `mods`) defining a module there, in walk order (cfg twins make several)
-    pub module_all: HashMap<(String, Vec<String>), Vec<(String, usize)>>,
+    pub module_all: ModuleAll,
     /// (root, module path) of a module declared but not placed: a `#[path]` module, or a name matching no file or two
     pub unplaced: HashSet<(String, Vec<String>)>,
 }
@@ -796,7 +799,7 @@ pub(crate) struct Placed {
 /// The module tree, top-down from every root file.
 pub(crate) fn place(summaries: &HashMap<String, FileSummary>) -> Placed {
     let mut placed: HashMap<String, Vec<Placement>> = HashMap::new();
-    let mut module_all: HashMap<(String, Vec<String>), Vec<(String, usize)>> = HashMap::new();
+    let mut module_all: ModuleAll = HashMap::new();
     let mut unplaced: HashSet<(String, Vec<String>)> = HashSet::new();
     let mut roots: Vec<&String> = summaries.keys().filter(|r| is_root_file(r)).collect();
     roots.sort();
