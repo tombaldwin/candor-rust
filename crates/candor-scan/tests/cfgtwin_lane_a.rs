@@ -44,7 +44,12 @@ fn scan(dir: &Path, cache: &Path, extra: &[&str]) -> Rows {
 }
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("candor-cfgtwinA-{tag}-{}", std::process::id()));
+    // Tests run as parallel threads of one process and several read the same cell, so the pid alone collided: one test's
+    // `remove_dir_all` deleted another's `out/` mid-scan (CI, main 97b5cfb0: `read_dir` NotFound). A per-call counter
+    // makes every directory unique.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("candor-cfgtwinA-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
