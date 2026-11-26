@@ -330,6 +330,9 @@ fn i1_step3_same_file_expansions_carry_the_invocation_loc() {
 /// unexpanded program text: it must still count as an unexpanded invocation of `mk3`, so R828's hedge for `mk3`'s impls
 /// stands even though another, bare invocation of `mk3` was expanded in full. Dropped, it made the crate-wide retirement
 /// retire the evidence (bitflags 2.9.4: `__impl_public_bitflags` invoked by `$crate::` path inside `__impl_internal_bitflags`).
+/// Lane rust-macropath-l2: a ROOT path (`crate::mk3!` of the crate's own `#[macro_export]`) now EXPANDS (R-ROOT), so the
+/// unexpanded nested invocation is spelled by a NON-root module path (`crate::m3::mk3!`), which R-ROOT refuses as main does;
+/// the root spelling is the resolution case below.
 #[test]
 fn i1_step2b_a_nested_unexpanded_invocation_keeps_the_hedge() {
     let d = tmpdir("nested");
@@ -338,13 +341,36 @@ fn i1_step2b_a_nested_unexpanded_invocation_keeps_the_hedge() {
         "nested",
         "",
         "pub trait T3 { fn go(&self); }\npub struct Pure; impl T3 for Pure { fn go(&self) {} }\n\
-         #[macro_export]\nmacro_rules! mk3 { ($t:ident) => { impl crate::T3 for $t { fn go(&self) { EFF } } } }\n\
-         macro_rules! outer { ($t:ident) => { pub struct $t; crate::mk3!($t); } }\n\
+         #[macro_use] mod m3 { macro_rules! mk3 { ($t:ident) => { impl crate::T3 for $t { fn go(&self) { EFF } } } }\n\
+         pub(crate) use mk3; }\n\
+         macro_rules! outer { ($t:ident) => { pub struct $t; crate::m3::mk3!($t); } }\n\
          pub struct M3; mk3!(M3);\nouter!(Hid);\npub fn l3(t: &dyn T3) { t.go() }\n",
     );
     let (rows, _) = scan(&d, None, &[]);
     assert!(eff(&rows, "l3").contains(&"Unknown".to_string()), "the R828 hedge must stay: {rows:?}");
     assert!(eff(&rows, "l3").contains(&"Fs".to_string()), "and the expanded M3 impl is charged: {rows:?}");
+}
+
+/// Lane rust-macropath-l2 (R-ROOT) — the step-2b shape with the ROOT spelling: `crate::mk3!` names the crate's one exported
+/// `mk3`, so the nested invocation expands, `Hid`'s impl is a unit, and the dispatch through `&dyn T3` is charged from every
+/// implementor with no hedge left to keep (no hidden impl remains). `CANDOR_R_ROOT_OFF=1` restores the hedge.
+#[test]
+fn rroot_a_nested_root_path_invocation_expands_and_its_impl_is_charged() {
+    let d = tmpdir("nestedroot");
+    write_crate(
+        &d,
+        "nestedroot",
+        "",
+        "pub trait T3 { fn go(&self); }\npub struct Pure; impl T3 for Pure { fn go(&self) {} }\n\
+         #[macro_export]\nmacro_rules! mk3 { ($t:ident) => { impl crate::T3 for $t { fn go(&self) { EFF } } } }\n\
+         macro_rules! outer { ($t:ident) => { pub struct $t; crate::mk3!($t); } }\n\
+         pub struct M3; mk3!(M3);\nouter!(Hid);\npub fn l3(t: &dyn T3) { t.go() }\n",
+    );
+    let (rows, _) = scan(&d, None, &[]);
+    assert_eq!(eff(&rows, "Hid::go"), vec!["Fs".to_string()], "{rows:?}");
+    assert!(eff(&rows, "l3").contains(&"Fs".to_string()), "{rows:?}");
+    let (off, _) = scan(&d, None, &[("CANDOR_R_ROOT_OFF", "1")]);
+    assert!(eff(&off, "l3").contains(&"Unknown".to_string()), "OFF keeps main's hedge: {off:?}");
 }
 
 /// Step 4 — a free fn's generic-return position WITHDRAWN by a same-leaf contributor (`parser::from_str<B: Flags>` beside a

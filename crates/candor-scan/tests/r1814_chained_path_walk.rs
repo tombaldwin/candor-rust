@@ -223,8 +223,10 @@ fn the_gates_flip_over_the_executed_writes() {
 }
 
 /// Fable's R1814 merge review, fx/f2 `gl` and fx/f1 `wrong`: a dependency whose every type is KIND-ONLY (a macro the producer
-/// cannot expand writes its impls: a `#[macro_export]` macro invoked by its `crate::` path. Until I1 stage 3 this was a
-/// macro-defined macro, which R1784 now expands, so the unseen expansion moved to a spelling the producer still cannot read), called from a CHILD module that sees the traits only through `use super::*` from the crate root — the
+/// cannot expand writes its impls: a macro invoked by a NON-root module path, `crate::mac::gen_impls!`. Until I1 stage 3 this was
+/// a macro-defined macro, which R1784 now expands, and until R-ROOT (lane rust-macropath-l2) a `#[macro_export]` macro invoked
+/// by its root `crate::` path, which R-ROOT now expands; each time the unseen expansion moved to a spelling the producer still
+/// cannot read), called from a CHILD module that sees the traits only through `use super::*` from the crate root — the
 /// in-scope-trait reading is per file, so it never sees them there — and a same-leaf rename (`pub use crate::k::Kit as Wrong`
 /// beside a pure `w::Wrong`) whose `type_key` leaf fallback lands on the wrong, closed node (SOUNDNESS R1818).
 fn world_gl(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -236,8 +238,8 @@ fn world_gl(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
         "pub trait Fetch: Sized { fn fetch_all(self, p: &str) { let v = std::env::var(\"R1814_MARK\").unwrap_or_default(); std::fs::write(format!(\"{p}.fetch\"), v).unwrap(); } }\n\
          pub trait Tally: Sized { fn tally_zz(self, p: &str) { let v = std::env::var(\"R1814_MARK\").unwrap_or_default(); std::fs::write(format!(\"{p}.tally\"), v).unwrap(); } }\n\
          pub trait Quiet: Sized { fn hush_zz(self, p: &str) -> usize { p.len() } }\n\
-         #[macro_export] macro_rules! gen_impls { ($t:ty) => { impl crate::Fetch for $t {} impl crate::Tally for $t {} impl crate::Quiet for $t {} impl $t { pub fn inh_zz(&self, p: &str) { std::fs::write(format!(\"{p}.inh\"), \"i\").unwrap(); } } }; }\n\
-         pub mod km { pub struct Kmac(pub String); pub fn kmac(s: &str) -> Kmac { Kmac(s.to_string()) } crate::gen_impls!(Kmac); }\n\
+         mod mac { macro_rules! gen_impls { ($t:ty) => { impl crate::Fetch for $t {} impl crate::Tally for $t {} impl crate::Quiet for $t {} impl $t { pub fn inh_zz(&self, p: &str) { std::fs::write(format!(\"{p}.inh\"), \"i\").unwrap(); } } }; } pub(crate) use gen_impls; }\n\
+         pub mod km { pub struct Kmac(pub String); pub fn kmac(s: &str) -> Kmac { Kmac(s.to_string()) } crate::mac::gen_impls!(Kmac); }\n\
          pub mod k { pub struct Kit(pub String); impl crate::Fetch for Kit {} impl crate::Tally for Kit {} impl crate::Quiet for Kit {} }\n\
          pub mod re2 { pub use crate::k::Kit as CKit; pub fn mk(s: &str) -> CKit { crate::k::Kit(s.to_string()) } }\n\
          pub mod d { pub struct Lone(pub String); pub fn lone(s: &str) -> Lone { Lone(s.to_string()) } impl crate::Tally for Lone {} impl crate::Fetch for Lone {} }\n",

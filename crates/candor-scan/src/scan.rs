@@ -1807,10 +1807,47 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // definition a ROOT-headed macro path (`crate::m!`, `$crate::m!`, `self::`/`super::` reaching the root) binds. Computed
     // only where some file writes `macro_rules` (the table above does not read fn bodies, where an export may sit), stored in
     // the same table so its digest joins every file's cache key. `CANDOR_R_ROOT_OFF=1` computes nothing.
-    let rroot_facts = if crate::rroot::off() {
+    // The file reads stay in this function (its `Fs` is already in `.candor/baseline`); `rroot` itself is pure.
+    let rroot_facts = if crate::rroot::off() || xmacros.is_empty() && !paths.par_iter().any(|(p, _)| {
+        std::fs::read_to_string(p).is_ok_and(|t| t.contains("macro_rules"))
+    }) {
         crate::rroot::RootFacts::default()
     } else {
-        rroot_facts_of(&paths)
+        let sums: HashMap<String, crate::rroot::FileSummary> = paths
+            .par_iter()
+            .filter_map(|(p, rel)| {
+                let text = std::fs::read_to_string(p).ok()?;
+                if !(text.contains("macro_rules") || text.contains("mod ") || crate::rroot::is_root_file(rel)) {
+                    return Some((rel.clone(), crate::rroot::FileSummary::default()));
+                }
+                let (file, _) = crate::lang::parse_file_2015_tolerant(&text)?;
+                Some((rel.clone(), crate::rroot::summarize_file(&file)))
+            })
+            .collect();
+        // Edition 2018+ for the package owning a crate-root file: the nearest manifest with a `[package]` table above it,
+        // or — `edition.workspace = true` — the nearest `[workspace.package]` above that (`rroot::manifest_edition`).
+        let ed2018 = |root_rel: &str| -> bool {
+            let Some((p, _)) = paths.iter().find(|(_, r)| r == root_rel) else { return false };
+            let mut inherit = false;
+            for d in p.ancestors().skip(1) {
+                let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
+                match crate::rroot::manifest_edition(&t, inherit) {
+                    crate::rroot::Edition::Skip => {}
+                    crate::rroot::Edition::Inherit => inherit = true,
+                    crate::rroot::Edition::Is(m) => return m,
+                }
+            }
+            false
+        };
+        let f = crate::rroot::build(&sums, &ed2018);
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            for (r, m) in &f.entries {
+                for n in m.keys() {
+                    eprintln!("RROOTF1\t{r}\t{n}"); // §E1 REACH COUNTER
+                }
+            }
+        }
+        f
     };
     let mut xmacros = xmacros;
     for (k, b) in rroot_facts.table() {
@@ -13716,89 +13753,4 @@ fn splice_gate(text: &str, claims: &crate::mbe::ArmClaims) -> bool {
         return true;
     }
     text.contains('!')
-}
-
-
-/// SOUNDNESS R1910 / R1853 (R-ROOT) — summarise every walked file (`rroot::summarize`) and build the crate-root facts. A file is
-/// parsed only where it can matter: it defines a `macro_rules!`, declares a module, or is a crate root.
-fn rroot_facts_of(paths: &[(std::path::PathBuf, String)]) -> crate::rroot::RootFacts {
-    use rayon::prelude::*;
-    if !paths.par_iter().any(|(p, _)| std::fs::read_to_string(p).is_ok_and(|t| t.contains("macro_rules"))) {
-        return crate::rroot::RootFacts::default();
-    }
-    let sums: HashMap<String, crate::rroot::FileSummary> = paths
-        .par_iter()
-        .filter_map(|(p, rel)| {
-            let text = std::fs::read_to_string(p).ok()?;
-            if !(text.contains("macro_rules") || text.contains("mod ") || crate::rroot::is_root_file(rel)) {
-                return Some((rel.clone(), crate::rroot::FileSummary::default()));
-            }
-            let (file, _) = crate::lang::parse_file_2015_tolerant(&text)?;
-            let spliced = if crate::mbe::defines_a_definer(&file.items) {
-                let mut c = file.items.clone();
-                crate::mbe::splice_local_macros(&mut c, &crate::mbe::CrateMacros::new());
-                Some(c)
-            } else {
-                None
-            };
-            Some((rel.clone(), crate::rroot::summarize(&file.items, &file.attrs, spliced.as_deref())))
-        })
-        .collect();
-    let by_rel: HashMap<&str, &std::path::Path> = paths.iter().map(|(p, r)| (r.as_str(), p.as_path())).collect();
-    let ed = |root: &str| by_rel.get(root).is_some_and(|p| package_edition_2018(p));
-    let f = crate::rroot::build(&sums, &ed);
-    if candor_report::env::trace("CANDOR_I1_INSTR") {
-        for (r, m) in &f.entries {
-            for n in m.keys() {
-                eprintln!("RROOTF1\t{r}\t{n}"); // §E1 REACH COUNTER
-            }
-        }
-    }
-    f
-}
-
-/// Whether the package owning a crate-root file is edition 2018 or later: the nearest `Cargo.toml` above it with a
-/// `[package]` table, its `edition`, or — `edition.workspace = true` — the nearest `[workspace.package]` `edition` above that.
-/// No `edition` key is 2015.
-fn package_edition_2018(file: &std::path::Path) -> bool {
-    fn table_edition(text: &str, table: &str) -> Option<String> {
-        let mut inside = false;
-        for line in text.lines() {
-            let l = line.trim();
-            if l.starts_with('[') {
-                inside = l == table;
-                continue;
-            }
-            if inside {
-                let k = l.split(['=', '.']).next().unwrap_or("").trim();
-                if k == "edition" {
-                    if l.contains("workspace") {
-                        return Some("workspace".to_string());
-                    }
-                    return l.split('"').nth(1).map(str::to_string);
-                }
-            }
-        }
-        None
-    }
-    let modern = |e: &str| matches!(e, "2018" | "2021" | "2024");
-    let mut dirs = file.ancestors().skip(1);
-    for d in dirs.by_ref() {
-        let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
-        if !t.lines().any(|l| l.trim() == "[package]") {
-            continue;
-        }
-        match table_edition(&t, "[package]") {
-            Some(e) if e == "workspace" => break,
-            Some(e) => return modern(&e),
-            None => return false,
-        }
-    }
-    for d in dirs {
-        let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
-        if let Some(e) = table_edition(&t, "[workspace.package]") {
-            return modern(&e);
-        }
-    }
-    false
 }

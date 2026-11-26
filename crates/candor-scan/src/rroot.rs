@@ -229,6 +229,63 @@ pub(crate) fn summarize(items: &[syn::Item], file_attrs: &[syn::Attribute], spli
     s
 }
 
+/// `summarize` over a parsed file, with the spliced copy when some definition in it writes `macro_rules` (emitted exports).
+pub(crate) fn summarize_file(file: &syn::File) -> FileSummary {
+    let spliced = if crate::mbe::defines_a_definer(&file.items) {
+        let mut c = file.items.clone();
+        crate::mbe::splice_local_macros(&mut c, &crate::mbe::CrateMacros::new());
+        Some(c)
+    } else {
+        None
+    };
+    summarize(&file.items, &file.attrs, spliced.as_deref())
+}
+
+/// What one `Cargo.toml` says about the edition (`manifest_edition`).
+pub(crate) enum Edition {
+    /// nothing here (no `[package]`, or — when inheriting — no `[workspace.package]` edition): look further up
+    Skip,
+    /// `edition.workspace = true`: the nearest `[workspace.package]` above decides
+    Inherit,
+    /// decided: 2018 or later?
+    Is(bool),
+}
+
+/// Read a manifest's edition: `[package]`'s, or `[workspace.package]`'s when `inheriting`. A `[package]` with no `edition` is 2015.
+pub(crate) fn manifest_edition(text: &str, inheriting: bool) -> Edition {
+    fn table_edition(text: &str, table: &str) -> (bool, Option<String>) {
+        let (mut inside, mut seen) = (false, false);
+        for line in text.lines() {
+            let l = line.trim();
+            if l.starts_with('[') {
+                inside = l == table;
+                seen |= inside;
+                continue;
+            }
+            if inside && l.split(['=', '.']).next().unwrap_or("").trim() == "edition" {
+                if l.contains("workspace") {
+                    return (true, Some("workspace".to_string()));
+                }
+                return (true, l.split('"').nth(1).map(str::to_string));
+            }
+        }
+        (seen, None)
+    }
+    let modern = |e: &str| matches!(e, "2018" | "2021" | "2024");
+    if inheriting {
+        return match table_edition(text, "[workspace.package]") {
+            (_, Some(e)) if e != "workspace" => Edition::Is(modern(&e)),
+            _ => Edition::Skip,
+        };
+    }
+    match table_edition(text, "[package]") {
+        (false, _) => Edition::Skip,
+        (true, Some(e)) if e == "workspace" => Edition::Inherit,
+        (true, Some(e)) => Edition::Is(modern(&e)),
+        (true, None) => Edition::Is(false),
+    }
+}
+
 /// The module scopes of one item list, depth-first through inline modules.
 fn mods(items: &[syn::Item], inline: Vec<String>, gated_above: bool, out: &mut Vec<ModScope>) {
     let mut m = ModScope { inline: inline.clone(), gated: gated_above, ..Default::default() };
@@ -764,6 +821,16 @@ mod tests {
         assert!(f.scope("src/inner.rs").is_none(), "main.rs's root has no entry");
         assert!(!f.files.contains_key("src/both.rs"), "two roots compile it");
         assert!(f.scope("src/other.rs").is_some());
+    }
+
+    #[test]
+    fn manifest_editions() {
+        assert!(matches!(manifest_edition("[package]\nname = \"a\"\nedition = \"2021\"\n", false), Edition::Is(true)));
+        assert!(matches!(manifest_edition("[package]\nname = \"a\"\n", false), Edition::Is(false)));
+        assert!(matches!(manifest_edition("[package]\nedition.workspace = true\n", false), Edition::Inherit));
+        assert!(matches!(manifest_edition("[workspace]\nmembers = []\n", false), Edition::Skip));
+        assert!(matches!(manifest_edition("[workspace.package]\nedition = \"2018\"\n", true), Edition::Is(true)));
+        assert!(matches!(manifest_edition("[package]\nedition = \"2015\"\n[workspace.package]\n", true), Edition::Skip));
     }
 
     #[test]
