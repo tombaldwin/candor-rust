@@ -1,0 +1,21 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r7samecfg",
+ "lib": false,
+ "note": "R1919 r7 (Fable D1): f_r2samecfg",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "f_r2samecfg_q"
+  },
+  {
+   "kind": "q",
+   "name": "f_r2samecfg_q2"
+  },
+  {
+   "kind": "e",
+   "name": "f_r2samecfg_e"
+  }
+ ]
+}

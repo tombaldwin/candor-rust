@@ -284,6 +284,7 @@ pub(crate) fn scan_items(
                         if crate::mbe::is_gated(&im.attrs) || crate::mbe::is_gated(&m.attrs) || GatedModScope::active() {
                             let tr = im.trait_.as_ref().and_then(|(_, p, _)| p.segments.last()).map(|s| s.ident.to_string());
                             info.i1_cand = Some(format!("{}|{}|{n}", tr.unwrap_or_default(), crate::mbe::ty_key(&im.self_ty)));
+                            info.i1_impl_id = impl_identity(im, modpath, items); // SOUNDNESS R1919
                         }
                         if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
                             info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
@@ -1690,6 +1691,124 @@ fn mod_targets(
 /// `use a::b::{self, …}` (re-exporting the MODULE `b` under its own name) is DELIBERATELY skipped: this
 /// index maps NAMES to function definitions, and a module alias would need the whole path rewritten
 /// rather than one name aliased. Skipping it is the under-report direction.
+/// SOUNDNESS R1919 — the IDENTITY of a trait impl, `Self as Trait`, each path resolved to a crate-absolute spelling (an external
+/// path keeps a leading `::`; generic arguments on a path's last segment are kept, whitespace removed). Two impls with one identity
+/// are two cfg arms of ONE `impl Trait for Self`; two with different identities are different types or traits even when their
+/// leaves agree (`xa::S` / `yb::S`, `W<u8>` / `W<u16>`, `ta::Tr` / `tb::Tr`). Resolved syntactically from the module's own item
+/// list (`items`, at `modpath`): `crate::`/`self::`/`super::` heads, a name the module DECLARES, or a name ONE ungated named `use`
+/// binds. Anything else — a glob, a prelude name, a `#[cfg]`-duplicated `use`, a non-path self type — is `None`: no identity, so
+/// r2 refuses rather than guesses. One item spelled two ways (through a re-export) reads as two identities, which refuses too.
+pub(crate) fn impl_identity(im: &syn::ItemImpl, modpath: &str, items: &[syn::Item]) -> Option<String> {
+    let (_, tp, _) = im.trait_.as_ref()?;
+    let syn::Type::Path(sp) = &*im.self_ty else { return None };
+    if sp.qself.is_some() {
+        return None;
+    }
+    let s = resolve_item_path(&sp.path, modpath, items)?;
+    let t = resolve_item_path(tp, modpath, items)?;
+    Some(format!("{s} as {t}"))
+}
+
+fn resolve_item_path(p: &syn::Path, modpath: &str, items: &[syn::Item]) -> Option<String> {
+    let segs: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
+    let args = match &p.segments.last()?.arguments {
+        syn::PathArguments::None => String::new(),
+        a => quote::ToTokens::to_token_stream(a).to_string().replace(' ', ""),
+    };
+    if p.leading_colon.is_some() {
+        return Some(format!("::{}{args}", segs.join("::")));
+    }
+    let base = absolute_head(&segs, modpath, items, 0)?;
+    Some(format!("{base}{args}"))
+}
+
+/// The crate-absolute spelling of `segs` written in `modpath` (see `impl_identity`), or `None`.
+fn absolute_head(segs: &[String], modpath: &str, items: &[syn::Item], depth: usize) -> Option<String> {
+    let head = segs.first()?;
+    let mut mp: Vec<&str> = if modpath.is_empty() { Vec::new() } else { modpath.split("::").collect() };
+    match head.as_str() {
+        "crate" => return Some(segs[1..].join("::")).filter(|x| !x.is_empty()),
+        "self" | "super" => {
+            let mut i = 0;
+            while i < segs.len() && (segs[i] == "self" || segs[i] == "super") {
+                if segs[i] == "super" {
+                    mp.pop()?;
+                }
+                i += 1;
+            }
+            let mut v: Vec<String> = mp.iter().map(|x| x.to_string()).collect();
+            v.extend(segs[i..].iter().cloned());
+            return Some(v.join("::")).filter(|x| !x.is_empty());
+        }
+        _ => {}
+    }
+    let declared = items.iter().any(|it| {
+        let id = match it {
+            syn::Item::Struct(x) => &x.ident,
+            syn::Item::Enum(x) => &x.ident,
+            syn::Item::Union(x) => &x.ident,
+            syn::Item::Trait(x) => &x.ident,
+            syn::Item::Type(x) => &x.ident,
+            syn::Item::Mod(x) => &x.ident,
+            syn::Item::TraitAlias(x) => &x.ident,
+            _ => return false,
+        };
+        id == head
+    });
+    let mut bound: Vec<(Vec<String>, String)> = Vec::new();
+    let mut glob = false;
+    for it in items {
+        let syn::Item::Use(u) = it else { continue };
+        let mut leaves = Vec::new();
+        use_leaves(&u.tree, Vec::new(), &mut leaves);
+        for (pre, name, alias) in leaves {
+            if name == "*" {
+                glob = true;
+            } else if alias == *head {
+                if crate::lang::has_cfg(&u.attrs) {
+                    return None; // a `#[cfg]`-dependent binding: the name denotes different items per configuration
+                }
+                let mut full = pre;
+                full.push(name);
+                let lead = u.leading_colon.is_some();
+                bound.push((full, if lead { "::".into() } else { String::new() }));
+            }
+        }
+    }
+    if declared {
+        if !bound.is_empty() {
+            return None; // a declaration and an import of one name: E0255 in one namespace, or two namespaces; refuse
+        }
+        let mut v: Vec<String> = mp.iter().map(|x| x.to_string()).collect();
+        v.extend(segs.iter().cloned());
+        return Some(v.join("::"));
+    }
+    if bound.len() != 1 || depth > 4 {
+        return None; // unbound (a glob, the prelude, an extern crate) or bound twice: no identity
+    }
+    let (target, lead) = bound.pop()?;
+    let mut full = target;
+    full.extend(segs[1..].iter().cloned());
+    if !lead.is_empty() {
+        return Some(format!("::{}", full.join("::")));
+    }
+    let th = full.first()?.clone();
+    if matches!(th.as_str(), "crate" | "self" | "super") {
+        return absolute_head(&full, modpath, items, depth + 1);
+    }
+    // a uniform-path head: a module this list declares, else an external crate
+    let local_mod = items.iter().any(|it| matches!(it, syn::Item::Mod(m) if m.ident == th));
+    if local_mod {
+        let mut v: Vec<String> = mp.iter().map(|x| x.to_string()).collect();
+        v.extend(full);
+        return Some(v.join("::"));
+    }
+    if glob {
+        return None;
+    }
+    Some(format!("::{}", full.join("::")))
+}
+
 fn use_leaves(tree: &syn::UseTree, prefix: Vec<String>, out: &mut Vec<(Vec<String>, String, String)>) {
     match tree {
         syn::UseTree::Path(p) => {
@@ -5224,6 +5343,7 @@ pub(crate) fn fninfo(
         ret_proto,
         refusals: c.refusals.into_iter().chain(c.late_refusals.into_inner()).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
         i1_cand: None,
+        i1_impl_id: None,
         dispatch: c.dispatch_sites.into_iter().collect(),
         dispatch_named: c.dispatch_named.into_iter().collect(),
         foreign_dispatch: c.foreign_dispatch_sites.into_iter().collect(),

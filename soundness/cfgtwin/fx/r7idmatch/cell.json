@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r7idmatch",
+ "lib": false,
+ "note": "R1919 r7: one impl spelled three ways across modules; the identity matches, the inheriting edge stays",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "r7idmatch_e"
+  },
+  {
+   "kind": "e",
+   "name": "r7idmatch_sup_e"
+  }
+ ]
+}

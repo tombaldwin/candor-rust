@@ -1608,7 +1608,8 @@ impl Ctx<'_> {
         // bare spellings `wuse!`/`wov!`/`wt!` read silent there on main (lane residue-C's unnumbered findings 1-3, the
         // cfg-twin design queue), and binding the path would carry that silence to it (soundness/cfgtwin d*v5, d*v7, d12*,
         // e1/e4/e9/e13/e15 measured 1->0). Refused, the path keeps main's hidden-text hold.
-        // SOUNDNESS R1919 — LIFTED. Those silences were not the cover's: the same arms written by hand read silent too, and the
+        // SOUNDNESS R1919 — LIFTED for a cfg-gated CONTAINER and for nested expansions that write `cfg` (the `mentions_cfg` checks);
+        // a first-level expansion whose own tokens write `cfg` is still refused in `expand_tokens`. Those silences were not the cover's: the same arms written by hand read silent too, and the
         // resolvers that read two VISIBLE arms now union them (root-fn alias arms, a gated override's inherited default,
         // module-gated `macro_rules!` twins, same-leaf defaults, a produced arm's bindings beside an out-of-line stand-in).
         // soundness/cfgtwin reads 0 WRITES lower and 0 pure charged with the path expanded. `CANDOR_R1919_OFF=1` refuses again.
@@ -1669,7 +1670,9 @@ impl Ctx<'_> {
         let arms = self.arms_of(&name)?;
         SEP2_USED.with(|c| c.set(false));
         let ts = expand(&arms, &mac.tokens)?;
-        // R-ROOT — an expansion that writes a `cfg` of its own is a produced cfg arm too (see `root_path_name`): refused.
+        // R-ROOT — an expansion that writes a `cfg` of its own is a produced cfg arm too (see `root_path_name`): refused. KEPT by
+        // R1919 (which lifted the cfg-CONTAINER refusal and the post-splice `mentions_cfg` refusals, not this one): a first-level
+        // expansion whose own tokens write `cfg` still reads main's hidden-text hold (Fable's merge review `f_rrcfg`).
         if name.starts_with(crate::rroot::F1_PREFIX) && ts.to_string().contains("cfg") {
             if candor_report::env::trace("CANDOR_I1_INSTR") {
                 eprintln!("RROOTCFGREFUSE\texpansion"); // §E1 REACH COUNTER
@@ -4112,8 +4115,8 @@ const XKEYS_MARK: &str = "__candor_i1_xkeys";
 /// I1 stage 2c — the crate-wide twin facts of one file: every module's exported hidden keys (`XKEYS_MARK`), the `use … as`
 /// renames it writes (`Alias=Orig`, last segments), and every cfg-gated trait impl block (`S as Tr|m1,m2`, the members it
 /// writes). Read into `cache::FileDecls`, unioned at the merge, consulted at pass B.
-pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<String>) {
-    fn walk(items: &[syn::Item], x: &mut Vec<String>, r: &mut Vec<String>, g: &mut Vec<String>, gated_mod: bool) {
+pub(crate) fn twin_facts(items: &[syn::Item], modpath: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    fn walk(items: &[syn::Item], modpath: &str, x: &mut Vec<String>, r: &mut Vec<String>, g: &mut Vec<String>, gated_mod: bool) {
         for it in items {
             match it {
                 syn::Item::Verbatim(ts) => {
@@ -4151,11 +4154,16 @@ pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<
                             })
                             .collect();
                         g.push(format!("{} as {t}|{}", ty_key(&im.self_ty), ms.join(",")));
+                        // SOUNDNESS R1919 — the same block under its IDENTITY (`decls::impl_identity`), which r2 keys on.
+                        if let Some(id) = crate::decls::impl_identity(im, modpath, items).filter(|_| !crate::lang::r1919_off()) {
+                            g.push(format!("{GATED_IMPL_ID_MARK}{id}|{}", ms.join(",")));
+                        }
                     }
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, inner)) = &m.content {
-                        walk(inner, x, r, g, gated_mod || is_gated(&m.attrs));
+                        let sub = if modpath.is_empty() { m.ident.to_string() } else { format!("{modpath}::{}", m.ident) };
+                        walk(inner, &sub, x, r, g, gated_mod || is_gated(&m.attrs));
                     }
                 }
                 _ => {}
@@ -4163,13 +4171,17 @@ pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<
         }
     }
     let (mut x, mut r, mut g) = (Vec::new(), Vec::new(), Vec::new());
-    walk(items, &mut x, &mut r, &mut g, false);
+    walk(items, modpath, &mut x, &mut r, &mut g, false);
     for v in [&mut x, &mut r, &mut g] {
         v.sort();
         v.dedup();
     }
     (x, r, g)
 }
+
+/// SOUNDNESS R1919 — the prefix of a `FileDecls::i1_gated_impls` entry keyed by impl IDENTITY (`{mark}{Self} as {Trait}|members`)
+/// rather than by leaves; read only by r2 (`scan.rs`), skipped by every leaf-keyed reader.
+pub(crate) const GATED_IMPL_ID_MARK: char = '\u{2}';
 
 /// The `Alias=Orig` pairs (last segments) a `use` tree's renames write.
 fn use_renames(t: &syn::UseTree, out: &mut Vec<String>) {

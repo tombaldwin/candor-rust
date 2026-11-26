@@ -836,6 +836,42 @@ pub mod user_{id} { use crate::tw_{id}::g; pub fn run() { g() } }
      note='R1919 r6: residual — the body-local `use` spelling of a def/alias twin reads one arm (pre-existing)')
 pred('r6', 'r6_body_e', 'record', 'record', 'record'); pred('r6', 'r6_mod_e', 'record', 'record', 'E'); pred('r6', 'r6_path_e', 'record', 'record', 'E')
 
+# r7: Fable's merge-review collision cells (D1). r2's inheriting arm must be the SAME impl (type AND trait) as the override, by an
+# identity that separates same-leaf declarations: two types of one leaf (leaf, leafcfg under different predicates), two instantiations
+# (gen), two traits of one leaf (trleaf); memcol is the silence direction, refused while the two impls' members share one unit qual
+# (a named residual, silent on main too); samecfg is the distinct-leaf control.
+cell('r7leaf', {'main.rs': 'pub fn eff_f_r2leaf() { EFF }\npub trait Tr_f_r2leaf { fn m(&self) { eff_f_r2leaf() } }\npub mod xa_f_r2leaf { pub struct S; }\npub mod yb_f_r2leaf { pub struct S; }\n#[cfg(unix)] impl Tr_f_r2leaf for xa_f_r2leaf::S { fn m(&self) {} }\n#[cfg(unix)] impl Tr_f_r2leaf for yb_f_r2leaf::S {}\n\npub fn f_r2leaf_q() { xa_f_r2leaf::S.m(); }\npub fn f_r2leaf_e() { yb_f_r2leaf::S.m(); }\n'}, [('f_r2leaf_q', 'q', None), ('f_r2leaf_e', 'e', None)], note='R1919 r7 (Fable D1): f_r2leaf')
+pred('r7leaf', 'f_r2leaf_q', 'record', 'record', '-')
+pred('r7leaf', 'f_r2leaf_e', 'record', 'record', 'E')
+cell('r7gen', {'main.rs': 'pub fn eff_f_r2gen() { EFF }\npub trait Tr_f_r2gen { fn m(&self) { eff_f_r2gen() } }\npub struct W_f_r2gen<T>(pub T);\n#[cfg(unix)] impl Tr_f_r2gen for W_f_r2gen<u8> { fn m(&self) {} }\n#[cfg(unix)] impl Tr_f_r2gen for W_f_r2gen<u16> {}\n\npub fn f_r2gen_q() { W_f_r2gen(1u8).m(); }\npub fn f_r2gen_e() { W_f_r2gen(1u16).m(); }\n'}, [('f_r2gen_q', 'q', None), ('f_r2gen_e', 'e', None)], note='R1919 r7 (Fable D1): f_r2gen')
+pred('r7gen', 'f_r2gen_q', 'record', 'record', '-')
+pred('r7gen', 'f_r2gen_e', 'record', 'record', 'record')
+cell('r7leafcfg', {'main.rs': 'pub fn eff_f_r2leafcfg() { EFF }\npub trait Tr_f_r2leafcfg { fn m(&self) { eff_f_r2leafcfg() } }\npub mod xa_f_r2leafcfg { pub struct S; }\npub mod yb_f_r2leafcfg { pub struct S; }\n#[cfg(unix)] impl Tr_f_r2leafcfg for xa_f_r2leafcfg::S { fn m(&self) {} }\n#[cfg(target_os = "macos")] impl Tr_f_r2leafcfg for yb_f_r2leafcfg::S {}\n\npub fn f_r2leafcfg_q() { xa_f_r2leafcfg::S.m(); }\npub fn f_r2leafcfg_e() { yb_f_r2leafcfg::S.m(); }\n'}, [('f_r2leafcfg_q', 'q', None), ('f_r2leafcfg_e', 'e', None)], note='R1919 r7 (Fable D1): f_r2leafcfg')
+pred('r7leafcfg', 'f_r2leafcfg_q', 'record', 'record', '-')
+pred('r7leafcfg', 'f_r2leafcfg_e', 'record', 'record', 'E')
+cell('r7trleaf', {'main.rs': 'pub fn eff_f_r2trleaf() { EFF }\npub mod ta_f_r2trleaf { pub trait Tr { fn m(&self) { crate::eff_f_r2trleaf() } } }\npub mod tb_f_r2trleaf { pub trait Tr { fn m(&self) {} } }\npub struct S_f_r2trleaf;\n#[cfg(unix)] impl ta_f_r2trleaf::Tr for S_f_r2trleaf { fn m(&self) {} }\n#[cfg(unix)] impl tb_f_r2trleaf::Tr for S_f_r2trleaf {}\n\npub fn f_r2trleaf_q() { <S_f_r2trleaf as ta_f_r2trleaf::Tr>::m(&S_f_r2trleaf); }\npub fn f_r2trleaf_q2() { <S_f_r2trleaf as tb_f_r2trleaf::Tr>::m(&S_f_r2trleaf); }\n'}, [('f_r2trleaf_q', 'q', None), ('f_r2trleaf_q2', 'q', None)], note='R1919 r7 (Fable D1): f_r2trleaf')
+pred('r7trleaf', 'f_r2trleaf_q', 'record', 'record', 'record')
+pred('r7trleaf', 'f_r2trleaf_q2', 'record', 'record', '-')
+cell('r7memcol', {'main.rs': 'pub fn eff_f_r2memcol() { EFF }\npub trait Tr_f_r2memcol { fn m(&self) { eff_f_r2memcol() } }\npub mod xa_f_r2memcol { pub struct S; }\npub mod yb_f_r2memcol { pub struct S; }\nimpl Tr_f_r2memcol for xa_f_r2memcol::S { #[cfg(not(unix))] fn m(&self) {} }\n#[cfg(unix)] impl Tr_f_r2memcol for yb_f_r2memcol::S { fn m(&self) {} }\n\npub fn f_r2memcol_e() { xa_f_r2memcol::S.m(); }\npub fn f_r2memcol_q() { yb_f_r2memcol::S.m(); }\n'}, [('f_r2memcol_e', 'e', None), ('f_r2memcol_q', 'q', None)], note='R1919 r7 (Fable D1): f_r2memcol')
+pred('r7memcol', 'f_r2memcol_e', 'record', 'record', 'record')
+pred('r7memcol', 'f_r2memcol_q', 'record', 'record', '-')
+cell('r7samecfg', {'main.rs': 'pub fn eff_f_r2samecfg() { EFF }\npub trait Tr_f_r2samecfg { fn m(&self) { eff_f_r2samecfg() } fn n(&self) { eff_f_r2samecfg() } }\npub struct S_f_r2samecfg;\n#[cfg(unix)] impl Tr_f_r2samecfg for S_f_r2samecfg { fn m(&self) {} }\npub struct U_f_r2samecfg;\n#[cfg(unix)] impl Tr_f_r2samecfg for U_f_r2samecfg { fn n(&self) {} }\n\npub fn f_r2samecfg_q() { S_f_r2samecfg.m(); }\npub fn f_r2samecfg_q2() { U_f_r2samecfg.n(); }\npub fn f_r2samecfg_e() { S_f_r2samecfg.n(); }\n'}, [('f_r2samecfg_q', 'q', None), ('f_r2samecfg_q2', 'q', None), ('f_r2samecfg_e', 'e', None)], note='R1919 r7 (Fable D1): f_r2samecfg')
+pred('r7samecfg', 'f_r2samecfg_q', 'record', 'record', '-')
+pred('r7samecfg', 'f_r2samecfg_q2', 'record', 'record', '-')
+pred('r7samecfg', 'f_r2samecfg_e', 'record', 'record', 'E')
+# r7idmatch: the POSITIVE identity control: one impl written three ways (an imported name, `crate::` paths, `super::` paths), the
+# override in one arm and the inheriting arm in another module; the identity must match and the edge stay.
+cell('r7idmatch', {'main.rs': sub('''pub mod k_{id} { pub struct S; pub trait T { fn t(&self) { crate::eff_{id}() } } }
+pub fn eff_{id}() { EFF }
+pub mod one_{id} { use crate::k_{id}::{S, T}; #[cfg(not(unix))] impl T for S { fn t(&self) {} } }
+pub mod two_{id} { #[cfg(unix)] impl crate::k_{id}::T for crate::k_{id}::S {} }
+pub struct V_{id}; pub trait TV_{id} { fn tv(&self) { eff_{id}() } }
+pub mod three_{id} { #[cfg(not(unix))] impl super::TV_{id} for super::V_{id} { fn tv(&self) {} } }
+#[cfg(unix)] impl TV_{id} for V_{id} {}
+''', id='r7idmatch')}, [('r7idmatch_e', 'e', 'use k_r7idmatch::T; k_r7idmatch::S.t()'), ('r7idmatch_sup_e', 'e', 'V_r7idmatch.tv()')],
+     note='R1919 r7: one impl spelled three ways across modules; the identity matches, the inheriting edge stays')
+pred('r7idmatch', 'r7idmatch_e', 'record', 'record', 'E'); pred('r7idmatch', 'r7idmatch_sup_e', 'record', 'record', 'E')
+
 
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):

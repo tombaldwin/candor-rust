@@ -19,12 +19,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   `crate::f`; a root fn now keys a NAMED re-export in the re-export index (`use m::g; g()`, a root `pub use m::g as gg;`), and a
   second arm's re-export joins the first arm's alias unit instead of being dropped; (2) a gated override beside an impl block of the
   same `S as Tr` that does not write the member (or a member gated inside an ungated block) is edged to the trait's default: the
-  inheriting arm runs it. Disclosures: (3) a `macro_rules!` inside a `#[cfg]`-gated inline module is an R208 twin (it was only when
+  inheriting arm runs it. The inheriting arm is found by the impl's IDENTITY (`Self as Trait`, both paths resolved to crate-absolute
+  spellings, generic arguments kept), never by leaves: two same-leaf types (`xa::S`/`yb::S`), two instantiations (`W<u8>`/`W<u16>`) or
+  two same-leaf traits are different impls; the edge goes to the trait's own default unit by its resolved path; an impl whose
+  identity cannot be resolved, or whose member unit shares its qual with another impl's, is not edged. Disclosures: (3) a `macro_rules!` inside a `#[cfg]`-gated inline module is an R208 twin (it was only when
   the definition carried the `#[cfg]` itself); (4) two or more default bodies of one trait leaf (nested or `#[path]` twins of the
   trait) go to VEIN A's contest instead of being skipped silently: `Unknown` (`ambiguous:same-name local defs`) where a claimant
   carries an effect the caller lacks, nothing where all are pure. (5) A produced arm covered ONLY by an out-of-line sibling's
   stand-in keeps its `use`/`type` bindings (as a hand-written arm does); its units are still marked. With those, R-ROOT's refusal
-  of a root path inside a cfg-gated container (or whose expansion writes `cfg`) is LIFTED: soundness/cfgtwin reads 0 WRITES lower
+  of a root path inside a cfg-gated container, and of one whose NESTED (spliced) expansions write `cfg`, is LIFTED; a first-level
+  expansion whose own tokens write `cfg` is still refused (`expand_tokens`, deliberately, unmeasured here): soundness/cfgtwin reads 0 WRITES lower
   and 0 pure charged against main (it was 16 probes 1→0 when L2 first tried it). Non-additive (the lift removes hedges on pure
   probes; (5) keeps bindings the cover deleted): `CANDOR_R1919_OFF=1` restores main. Cache rev 228.
   Acceptance: `soundness/cfgtwin` section R (cells r1–r6, 50 executed probes). Residual (recorded, r6): a def/alias twin read through

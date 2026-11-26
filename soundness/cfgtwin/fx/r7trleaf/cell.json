@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r7trleaf",
+ "lib": false,
+ "note": "R1919 r7 (Fable D1): f_r2trleaf",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "f_r2trleaf_q"
+  },
+  {
+   "kind": "q",
+   "name": "f_r2trleaf_q2"
+  }
+ ]
+}

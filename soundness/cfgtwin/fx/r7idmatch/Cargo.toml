@@ -1,0 +1,8 @@
+[package]
+name = "cf_r7idmatch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[workspace]

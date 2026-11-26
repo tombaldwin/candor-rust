@@ -293,6 +293,11 @@ pub(crate) struct FnInfo {
     /// `||m` a gated free fn): pass B checks the crate's exported hidden keys for its twin (`mbe::twin_cand_keys`).
     #[serde(rename = "ic", default, skip_serializing_if = "Option::is_none")]
     pub(crate) i1_cand: Option<String>,
+    /// SOUNDNESS R1919 — for a member of a cfg-gated TRAIT impl (`i1_cand` set), the impl's identity `Self as Trait` with both
+    /// paths resolved to crate-absolute spellings by `decls::impl_identity` (generic arguments kept); `None` where either path
+    /// cannot be resolved. r2's inheriting-arm lookup keys on it, never on the leaves `i1_cand` carries.
+    #[serde(rename = "iid", default, skip_serializing_if = "Option::is_none")]
+    pub(crate) i1_impl_id: Option<String>,
     /// ⟨peek-scope-attribution⟩ `(trait_leaf, method_leaf)` pairs this fn dispatches on through a local
     /// bounded-CHA-eligible receiver — see `CallCollector::dispatch_sites` for the full rationale. NOT
     /// part of `candor_report::ReportEntry` (the public wire schema): an ordinary scan's published report

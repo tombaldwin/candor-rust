@@ -46,7 +46,8 @@ thread_local! {
 pub(crate) fn cache_schema(include_tests: bool) -> String {
     // rev228 (rustagent-r1919, lane rust-r1919): SOUNDNESS R1919 — a `macro_rules!` inside a `#[cfg]`-gated inline module is an R208
     // twin (`FileDecls::macro_twins`), R-ROOT expands inside cfg arms, and a produced arm covered only by an out-of-line stand-in keeps
-    // its `use`/`type` bindings: a rev227 entry holds the narrower twin set and the deleted bindings.
+    // its `use`/`type` bindings; `FnInfo` gained `i1_impl_id` and `i1_gated_impls` identity-keyed entries (r2): a rev227 entry holds
+    // the narrower twin set, the deleted bindings and no impl identity.
     // rev227 (rustagent-l3, lane rust-macropath-l3): SOUNDNESS R1908 / R1914 — R-BARE-TC: which bare toolchain macro names an item-position
     // invocation may not bind to the toolchain, by crate kind and per MODULE (`baretc`); a glob no longer holds in a crate that has
     // std's macro prelude, and holds where it may supply a name in a `no_std` crate. A rev226 entry holds the old, file-wide reading.
@@ -1275,7 +1276,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         items, include_tests, modpath, &uses, &mut nested_local, &mut nested_foreign, &mut nonnominal, &mut i1_tagged);
     // I1 stage 1 — the retirement input: which macros this file expanded in full, and which it still invokes unexpanded.
     let (i1_expanded, i1_unexpanded) = crate::mbe::expansion_facts(items);
-    let (i1_xkeys, i1_renames, i1_gated_impls) = crate::mbe::twin_facts(items); // I1 stage 2c
+    let (i1_xkeys, i1_renames, i1_gated_impls) = crate::mbe::twin_facts(items, modpath); // I1 stage 2c
     let (minted_free, minted_members, l1b_mods) = crate::mbe::minted_facts(items, modpath, include_tests); // R1853
     let i1_arms = crate::mbe::arm_records(items, modpath, &dir, include_tests); // cfg-twin lane A
     let i1_hidden_impls = crate::mbe::has_hidden_impl_surface(items); // I1 (the R1804 exposure)

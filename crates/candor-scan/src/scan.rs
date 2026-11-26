@@ -4628,7 +4628,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
         }
-        for g in &merged.i1_gated_impls {
+        for g in merged.i1_gated_impls.iter().filter(|g| !g.starts_with(crate::mbe::GATED_IMPL_ID_MARK)) {
             let Some((ik, ms)) = g.split_once('|') else { continue };
             let Some((s, t)) = ik.split_once(" as ") else { continue };
             let have: HashSet<&str> = ms.split(',').filter(|m| !m.is_empty()).collect();
@@ -4673,7 +4673,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let q3_default_leg: Vec<String> = if q3_gated.is_empty() {
         Vec::new()
     } else {
-        let gated_ik: HashSet<&str> = merged.i1_gated_impls.iter().filter_map(|g| g.split_once('|').map(|(ik, _)| ik)).collect();
+        let gated_ik: HashSet<&str> = merged
+            .i1_gated_impls
+            .iter()
+            .filter(|g| !g.starts_with(crate::mbe::GATED_IMPL_ID_MARK))
+            .filter_map(|g| g.split_once('|').map(|(ik, _)| ik))
+            .collect();
         let quals: HashSet<&str> = fns.iter().map(|f| f.qual.as_str()).collect();
         merged
             .i1_xkeys
@@ -4697,15 +4702,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // (cfgtwin `e15`/`e1` in their bare spelling, and the hand-written pair with no macro at all). The unit is one arm's body;
     // its cfg union is that body AND the default, so the unit is edged to the default, exactly as two gated overrides of one
     // member merge into one unit's union. The arm set is `mbe::twin_facts`'s record of every gated impl block (own `#[cfg]` or a
-    // gated inline module), keyed `S as Tr` by last segment: a block of `S as Tr` that does not write `m` is the inheriting arm.
-    // One local default unit is edged; two or more (two traits of one leaf, or cfg twins of the trait) are DISCLOSED, never
-    // picked between.
+    // gated inline module), keyed by the impl's IDENTITY (`decls::impl_identity`: both paths resolved, generics kept), never by
+    // leaves: a block of the same impl that does not write `m` is the inheriting arm. The edge goes to the trait's own default
+    // unit by its resolved path; where identity, the default unit or the unit's own qual cannot be established, nothing is edged.
     let r1919_gated: HashMap<String, Vec<HashSet<String>>> = if crate::lang::r1919_off() {
         HashMap::new()
     } else {
         let mut m: HashMap<String, Vec<HashSet<String>>> = HashMap::new();
         for g in &merged.i1_gated_impls {
-            let Some((ik, ms)) = g.split_once('|') else { continue };
+            let Some(g) = g.strip_prefix(crate::mbe::GATED_IMPL_ID_MARK) else { continue };
+            let Some((ik, ms)) = g.rsplit_once('|') else { continue };
             m.entry(ik.to_string()).or_default().push(ms.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect());
         }
         m
@@ -4715,11 +4721,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     } else {
         fns.iter().map(|f| (f.qual.as_str(), f.impl_kind)).collect()
     };
-    // how many gated trait-impl member units share each qual (two = two arms of one member, neither inheriting)
-    let r1919_same: HashMap<&str, usize> = {
-        let mut m: HashMap<&str, usize> = HashMap::new();
+    // how many gated trait-impl member units of one impl IDENTITY write each member (two = two arms of one member, neither
+    // inheriting), and which identities every trait-impl member qual carries (`None` counts: an unidentified impl)
+    let r1919_same: HashMap<(&str, &str), usize> = {
+        let mut m: HashMap<(&str, &str), usize> = HashMap::new();
         for f in fns.iter().filter(|f| f.impl_kind == 2 && f.i1_cand.is_some()) {
-            *m.entry(f.qual.as_str()).or_default() += 1;
+            if let Some(id) = f.i1_impl_id.as_deref() {
+                *m.entry((id, f.leaf.as_str())).or_default() += 1;
+            }
+        }
+        m
+    };
+    let r1919_qual_ids: HashMap<&str, HashSet<Option<&str>>> = {
+        let mut m: HashMap<&str, HashSet<Option<&str>>> = HashMap::new();
+        for f in fns.iter().filter(|f| f.impl_kind == 2) {
+            m.entry(f.qual.as_str()).or_default().insert(if f.i1_cand.is_some() { f.i1_impl_id.as_deref() } else { Some("\u{3}ungated") });
         }
         m
     };
@@ -4757,42 +4773,35 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
-        if let Some((tr, rest)) = f.i1_cand.as_deref().filter(|_| f.impl_kind == 2 && !r1919_kind.is_empty()).and_then(|c| c.split_once('|')) {
-            let (s_ty, m) = rest.split_once('|').unwrap_or((rest, ""));
-            // Two ways a configuration inherits: (1) a recorded gated block of `S as Tr` does not write `m`; (2) no recorded
-            // gated block writes `m` at all, so this unit's own gate is on the MEMBER (`impl Tr for S { #[cfg(x)] fn m() {} }`),
-            // and unless a second gated member of the name sits beside it (one unit per arm, same qual) the other
-            // configuration has no `m` in the block and runs the default.
-            let arms = r1919_gated.get(&format!("{s_ty} as {tr}"));
+        if let (Some(id), Some(m)) = (
+            f.i1_impl_id.as_deref().filter(|_| f.impl_kind == 2 && !r1919_kind.is_empty()),
+            f.i1_cand.as_deref().and_then(|c| c.rsplit('|').next()).filter(|m| !m.is_empty()),
+        ) {
+            // Two ways a configuration inherits: (1) a recorded gated block of THIS impl (same identity) does not write `m`;
+            // (2) no recorded gated block of it writes `m`, so this unit's own gate is on the MEMBER (`impl Tr for S { #[cfg(x)]
+            // fn m() {} }`), and unless a second gated member of the name sits beside it the other configuration runs the
+            // default. The identity separates same-leaf types and traits (Fable merge review D1: `xa::S` / `yb::S`, `W<u8>` /
+            // `W<u16>`, `ta::Tr` / `tb::Tr`); a unit without one (`decls::impl_identity` refused) is never edged.
+            let arms = r1919_gated.get(id);
             let block_arm = arms.is_some_and(|a| a.iter().any(|ms| !ms.contains(m)));
             let member_arm = !arms.is_some_and(|a| a.iter().any(|ms| ms.contains(m)))
-                && r1919_same.get(f.qual.as_str()).copied().unwrap_or(0) == 1;
-            let inherits = !tr.is_empty()
-                && !m.is_empty()
-                && (block_arm || member_arm)
-                && trait_decls.get(tr).is_some_and(|lt| lt.methods.contains(m));
-            if inherits {
-                let dflts: Vec<&String> = by_tail2
-                    .get(&format!("{tr}::{m}"))
-                    .into_iter()
-                    .flatten()
-                    .filter(|q| **q != f.qual && r1919_kind.get(q.as_str()) == Some(&0))
-                    .collect();
+                && r1919_same.get(&(id, m)).copied().unwrap_or(0) == 1;
+            if block_arm || member_arm {
+                // The default is the trait's OWN unit, by its resolved path (generic arguments dropped): exact, never a leaf
+                // match. An external trait has no local default unit; a trait whose default this scan does not hold as a
+                // unit (a required member, a macro-made trait) is refused.
+                let tr_path = id.split_once(" as ").map(|(_, t)| t.split('<').next().unwrap_or(t)).unwrap_or("");
+                let dflt = format!("{tr_path}::{m}");
+                let found = !tr_path.is_empty() && !tr_path.starts_with("::") && r1919_kind.get(dflt.as_str()) == Some(&0);
+                // The unit's qual must be THIS impl's alone: two impls of different identities whose members share a qual
+                // (`impl Tr for xa::S` and `impl Tr for yb::S`, both written at the root, are both `S::m`) are one unit in
+                // the report, and an edge from it would charge the other type's callers. Refused (a named residual).
+                let shared = r1919_qual_ids.get(f.qual.as_str()).is_some_and(|ids| ids.len() > 1);
                 if candor_report::env::trace("CANDOR_R1919_INSTR") {
-                    eprintln!("R1919OVERRIDE\t{}\t{}", f.qual, dflts.iter().map(|d| d.as_str()).collect::<Vec<_>>().join("|")); // §E1 REACH COUNTER
+                    eprintln!("R1919OVERRIDE\t{}\t{id}\t{}", f.qual, if !found { "-".to_string() } else if shared { format!("SHARED:{dflt}") } else { dflt.clone() }); // §E1 REACH COUNTER
                 }
-                match dflts.as_slice() {
-                    [] => {}
-                    [d] => {
-                        calls.entry(f.qual.clone()).or_default().insert((*d).clone());
-                    }
-                    _ => {
-                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
-                        unknown_why
-                            .entry(f.qual.clone())
-                            .or_default()
-                            .insert(format!("ambiguous:cfg arm inherits {tr}::{m}, a default {} traits of that name declare", dflts.len()));
-                    }
+                if found && !shared && dflt != f.qual {
+                    calls.entry(f.qual.clone()).or_default().insert(dflt);
                 }
             }
         }

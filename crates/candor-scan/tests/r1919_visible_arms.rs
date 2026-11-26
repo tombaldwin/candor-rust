@@ -166,3 +166,27 @@ fn r1919_r_root_expands_inside_a_cfg_arm_and_reads_no_lower() {
     let off = scan_with("d1v5", "d1v5off", OFF);
     assert!(unknown(&off, "d1v5_e") && !fs(&off, "d1v5_e"), "OFF is main's hold: {:?}", effects(&off, "d1v5_e"));
 }
+
+#[test]
+fn r1919_the_inheriting_arm_is_the_same_impl_by_identity_not_by_leaf() {
+    // Fable's merge review D1: a pure gated override was edged to the default because a DIFFERENT impl with the same leaves
+    // inherited it. Each `_q` executes pure; each must read pure.
+    for (cell, p) in [
+        ("r7leaf", "f_r2leaf_q"), ("r7gen", "f_r2gen_q"), ("r7leafcfg", "f_r2leafcfg_q"), ("r7trleaf", "f_r2trleaf_q2"),
+        ("r7memcol", "f_r2memcol_q"), ("r7samecfg", "f_r2samecfg_q"), ("r7samecfg", "f_r2samecfg_q2"),
+    ] {
+        let r = scan_with(cell, cell, &[]);
+        assert!(pure(&r, p), "{cell}/{p}: executed pure, must not be charged or hedged: {:?}", effects(&r, p));
+    }
+    for (cell, p) in [("r7leaf", "f_r2leaf_e"), ("r7leafcfg", "f_r2leafcfg_e"), ("r7samecfg", "f_r2samecfg_e")] {
+        let r = scan_with(cell, cell, &[]);
+        assert!(fs(&r, p), "{cell}/{p}: {:?}", effects(&r, p));
+    }
+    // the positive control: one impl spelled three ways (imported name, `crate::`, `super::`) keeps its inheriting edge
+    let r = scan_with("r7idmatch", "r7idmatch", &[]);
+    for p in ["r7idmatch_e", "r7idmatch_sup_e"] {
+        assert!(fs(&r, p), "{p}: one identity across spellings must keep the edge: {:?}", effects(&r, p));
+    }
+    let off = scan_with("r7idmatch", "r7idmatchoff", OFF);
+    assert!(!fs(&off, "r7idmatch_e"), "falsified on the switch: {:?}", effects(&off, "r7idmatch_e"));
+}

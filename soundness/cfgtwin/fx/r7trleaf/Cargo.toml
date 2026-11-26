@@ -1,0 +1,8 @@
+[package]
+name = "cf_r7trleaf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[workspace]
