@@ -1,0 +1,22 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fr1814",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): the moved world_gl device at its ORIGINAL root spelling (`crate::gen_impls!(Kmac)` in `pub mod km`): fr1814_e was SILENT on pub and main (the trait-default caller of an emitted impl); a resolution, pinned.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fr1814_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr1814_inh_e"
+  },
+  {
+   "kind": "q",
+   "name": "fr1814_q"
+  }
+ ]
+}

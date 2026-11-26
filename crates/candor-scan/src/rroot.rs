@@ -134,11 +134,15 @@ pub(crate) fn summarize(items: &[syn::Item], file_attrs: &[syn::Attribute], spli
     }
     impl<'ast> syn::visit::Visit<'ast> for V<'_> {
         fn visit_item(&mut self, i: &'ast syn::Item) {
-            // A fn body that mentions `cfg` anywhere (an attribute on a block, a statement, an arm) gates everything in it: the
-            // attribute positions inside a body are many, and over-gating only refuses.
+            // Design revision 1 (Fable's L2 merge review D1) — an export reached through anything but a module's item list
+            // (a fn body, a const / static / associated-const initializer, a closure, an array length, a discriminant, an impl
+            // or trait member) is gated unless the ENCLOSING item's whole token stream is free of `cfg`: the attribute positions
+            // inside an expression are many (a `#[cfg]` on a `let` in a `const _: () = {..}` read as ungated and fabricated,
+            // fconst / fimplc / fstatic), and over-gating only refuses. Modules carry their own gating (`mods`), and a
+            // `macro_rules!` item is the definition itself.
             let body_cfg = match i {
-                syn::Item::Fn(f) => quote::ToTokens::to_token_stream(&f.block).to_string().contains("cfg"),
-                _ => false,
+                syn::Item::Mod(_) | syn::Item::Macro(_) => false,
+                other => quote::ToTokens::to_token_stream(other).to_string().contains("cfg"),
             };
             let g = self.enter(crate::lang::item_attrs(i), body_cfg);
             if let syn::Item::Macro(m) = i {
@@ -574,7 +578,24 @@ fn rewrite_lim(def: &str) -> Option<String> {
     fn rw(ts: TokenStream) -> TokenStream {
         let v: Vec<TokenTree> = ts.into_iter().collect();
         let mut out: Vec<TokenTree> = Vec::with_capacity(v.len());
+        // Design revision 1 (D2, flimnest) — a NESTED `macro_rules! name { .. }` the transcriber writes is copied untouched:
+        // rustc applies `local_inner_macros` to the outermost expansion only, so the nested body's bare invocations resolve at
+        // the nested macro's own call site.
+        let mut skip_to = 0usize;
         for i in 0..v.len() {
+            if i < skip_to {
+                out.push(v[i].clone());
+                continue;
+            }
+            if matches!(&v[i], TokenTree::Ident(id) if id == "macro_rules")
+                && matches!(v.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
+                && matches!(v.get(i + 2), Some(TokenTree::Ident(_)))
+                && matches!(v.get(i + 3), Some(TokenTree::Group(_)))
+            {
+                out.push(v[i].clone());
+                skip_to = i + 4;
+                continue;
+            }
             if let TokenTree::Ident(id) = &v[i] {
                 let bang = matches!(v.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!');
                 let after_path = i > 0 && matches!(&v[i - 1], TokenTree::Punct(p) if p.as_char() == ':' || p.as_char() == '$');
@@ -772,11 +793,16 @@ mod tests {
             ("mod other;", &*format!("{w} mod z {{ {w} }}")),
             ("mod other;", &*format!("pub fn setup() {{ #[cfg(unix)] let _ = 1; {w} }}")),
             ("mod other;", "#[cfg_attr(unix, macro_export)] macro_rules! mk { () => {} }"),
+            ("mod other;", &*format!("pub const _: () = {{ #[cfg(windows)] let _w: () = {{ {w} }}; }};")),
+            ("mod other;", &*format!("pub static S: () = {{ #[cfg(windows)] let _w: () = {{ {w} }}; }};")),
+            ("mod other;", &*format!("pub struct S; impl S {{ pub const C: () = {{ #[cfg(windows)] let _w: () = {{ {w} }}; }}; }}")),
         ] {
             let f = facts(&[("src/lib.rs", lib), ("src/other.rs", other)], true);
             assert!(!f.entries.get("src/lib.rs").is_some_and(|m| m.contains_key("mk")), "{lib} / {other}");
         }
-        // inside an ungated fn body it binds (fb)
+        // an ungated const block binds (fconstw), as an ungated fn body does (fb)
+        let f = facts(&[("src/lib.rs", "mod other;"), ("src/other.rs", &format!("pub const _: () = {{ {w} }};"))], true);
+        assert!(f.entries["src/lib.rs"].contains_key("mk"));
         let f = facts(&[("src/lib.rs", "mod other;"), ("src/other.rs", &format!("pub fn setup() {{ {w} }}"))], true);
         assert!(f.entries["src/lib.rs"].contains_key("mk"));
     }
@@ -851,11 +877,12 @@ mod tests {
 
     #[test]
     fn local_inner_macros_rewrites_bare_invocations_in_transcribers_only() {
-        let f = facts(&[("src/lib.rs", "#[macro_export(local_inner_macros)] macro_rules! wrap { (a!) => { mk!(); x::y!(); $m!(); macro_rules! q {} } }")], true);
+        let f = facts(&[("src/lib.rs", "#[macro_export(local_inner_macros)] macro_rules! wrap { (a!) => { mk!(); x::y!(); $m!(); macro_rules! q { () => { nested!() } } } }")], true);
         let b = &f.entries["src/lib.rs"]["wrap"];
         assert!(b.contains("$ crate :: mk !"), "{b}");
         assert!(b.contains("(a !)"), "the matcher is untouched: {b}");
         assert!(b.contains("x :: y !") && !b.contains("$ crate :: y"), "{b}");
         assert!(!b.contains("$ crate :: macro_rules"), "{b}");
+        assert!(b.contains("nested !") && !b.contains("$ crate :: nested"), "a nested definition's body is not rewritten: {b}");
     }
 }

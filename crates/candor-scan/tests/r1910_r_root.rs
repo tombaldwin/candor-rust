@@ -176,3 +176,23 @@ fn r1910_the_gate_flips_and_the_kill_switch_restores_main() {
     let (r, _) = scan_with("d1", "gate", &[("CANDOR_R_ROOT_OFF", "1")], None);
     assert!(unknown(&r, "d1_e") && !fs(&r, "d1_e"), "{:?}", row(&r, "d1_e"));
 }
+
+#[test]
+fn rroot_revision1_expression_containers_and_nested_lim_definitions_refuse() {
+    // Design revision 1 (Fable's L2 merge review). D1: an export under a statement `#[cfg]` in a const / associated-const / static
+    // initializer is gated, so `crate::mk!` keeps the glob's (pure) dependency reading and its `invisible` (fconst, fimplc,
+    // fstatic: executed pure; fconstr: executed WRITES through the dependency, must keep `invisible`). D2: a nested
+    // `macro_rules!` written by a `local_inner_macros` transcriber is not rewritten (flimnest: executed pure).
+    for cell in ["fconst", "fimplc", "fstatic", "flimnest", "fshadowr"] {
+        let r = scan(cell, "rev1");
+        assert!(!fs(&r, &format!("{cell}_e")), "{cell}: pure in rustc: {:?}", row(&r, &format!("{cell}_e")));
+    }
+    let r = scan("fconstr", "rev1");
+    assert!(row(&r, "fconstr_e").is_some_and(|v| !v.1.is_empty()), "the dependency disclosure stays: {:?}", row(&r, "fconstr_e"));
+    // the positives: an UNGATED const-block export still binds; the moved devices' root spellings resolve; the export beats a
+    // later textual same-name definition
+    for (cell, p) in [("fconstw", "fconstw_e"), ("fr1675", "fr1675_e"), ("fr1814", "fr1814_e"), ("fr1814", "fr1814_inh_e"), ("fshadow", "fshadow_e")] {
+        let r = scan(cell, "rev1");
+        assert!(fs(&r, p), "{cell}: {p}: {:?}", row(&r, p));
+    }
+}

@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepflimnestr",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepflimnestr"
+ ],
+ "id": "flimnestr",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): D2 mirror: root export PURE, the imported dependency mk WRITES. A PRE-EXISTING silence (ABSENT on pub, main and cand): recorded, NOT acceptance.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "flimnestr_e"
+  },
+  {
+   "kind": "q",
+   "name": "flimnestr_q"
+  }
+ ]
+}

@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepfshadowr",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepfshadowr"
+ ],
+ "id": "fshadowr",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): fshadow with the bodies swapped (export PURE, textual WRITES): pure in rustc. pub and main FABRICATE; R-ROOT fixes it.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fshadowr_e"
+  },
+  {
+   "kind": "q",
+   "name": "fshadowr_q"
+  }
+ ]
+}

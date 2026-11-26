@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepfconst",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepfconst"
+ ],
+ "id": "fconst",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): D1: the W export sits under a statement `#[cfg(windows)]` in a CONST initializer; the root glob's dependency mk is PURE: crate::mk is the dependency's (executed pure). Must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fconst_e"
+  },
+  {
+   "kind": "q",
+   "name": "fconst_q"
+  }
+ ]
+}

@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepfconstw",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepfconstw"
+ ],
+ "id": "fconstw",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): positive: an UNGATED const-block export, no glob: rustc exports it, R-ROOT must still bind (WRITES).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fconstw_e"
+  },
+  {
+   "kind": "q",
+   "name": "fconstw_q"
+  }
+ ]
+}

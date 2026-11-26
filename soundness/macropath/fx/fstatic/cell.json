@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepfstatic",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepfstatic"
+ ],
+ "id": "fstatic",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): D1: as fconst, inside a STATIC initializer.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fstatic_e"
+  },
+  {
+   "kind": "q",
+   "name": "fstatic_q"
+  }
+ ]
+}

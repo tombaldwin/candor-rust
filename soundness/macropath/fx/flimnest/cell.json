@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepflimnest",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepflimnest"
+ ],
+ "id": "flimnest",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): D2: a local_inner_macros transcriber DEFINES `q`, whose bare mk! resolves at q!'s call site (inner imports the dependency's PURE mk); the root export WRITES: must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "flimnest_e"
+  },
+  {
+   "kind": "q",
+   "name": "flimnest_q"
+  }
+ ]
+}

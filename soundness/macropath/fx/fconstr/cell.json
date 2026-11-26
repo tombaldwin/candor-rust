@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepfconstr",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepfconstr"
+ ],
+ "id": "fconstr",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): D1 mirror: the gated const-block export is PURE, the dependency mk WRITES: the `invisible` must stay.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fconstr_e"
+  },
+  {
+   "kind": "q",
+   "name": "fconstr_q"
+  }
+ ]
+}

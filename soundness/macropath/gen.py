@@ -513,6 +513,50 @@ ccell('n10', ND + 'body: `self::mk!()` inside a module declared in a FN BODY (th
 ccell('n9', ND +'positive: the root re-export RENAMES (`pub(crate) use other::{mk as mkr, mknop as mkrnop}`), R1 glob, `crate::mkr!()`.',
       imp=R1 + '\npub(crate) use other::{mk as mkr, mknop as mkrnop};', defs=NX, head='crate::mkr!()', headq='crate::mkrnop!()')
 
+# ---------------------------------------------------------------------------------------------------- C (revision 1): Fable's L2 merge review
+# Design revision 1 (~/candor-handoff/rust-macropath-design/DESIGN.md), from Fable's merge review of lane rust-macropath-l2 (D1, D2 and
+# the attacks that held, ~/candor-handoff/rust-macropath-L2/FABLE-MERGE-REVIEW.md), rendered from its executed fixtures.
+FD1 = 'C (rev 1): '
+GATED_CONST = 'pub const _: () = {\n    #[cfg(windows)]\n    let _w: () = { #[macro_export] macro_rules! mk { () => { %s } } };\n};\n' + EXP_NOP
+ccell('fconst', FD1 + 'D1: the W export sits under a statement `#[cfg(windows)]` in a CONST initializer; the root glob\'s dependency mk is '
+      'PURE: crate::mk is the dependency\'s (executed pure). Must not charge.', imp=R1, defs=GATED_CONST % '@W@', dep=DEP_BASE + DEP_MK_P)
+ccell('fconstr', FD1 + 'D1 mirror: the gated const-block export is PURE, the dependency mk WRITES: the `invisible` must stay.', imp=R1,
+      defs=GATED_CONST % '()', dep=DEP_BASE + DEP_MK_W)
+ccell('fconstw', FD1 + 'positive: an UNGATED const-block export, no glob: rustc exports it, R-ROOT must still bind (WRITES).',
+      defs='pub const _: () = { ' + EXP_W.strip() + ' };\n' + EXP_NOP)
+ccell('fimplc', FD1 + 'D1: as fconst, inside an impl\'s ASSOCIATED const initializer.', imp=R1,
+      defs='pub struct S;\nimpl S { pub const C: () = { #[cfg(windows)] let _w: () = { ' + EXP_W.strip() + ' }; }; }\n' + EXP_NOP,
+      dep=DEP_BASE + DEP_MK_P)
+ccell('fstatic', FD1 + 'D1: as fconst, inside a STATIC initializer.', imp=R1,
+      defs='pub static S: () = { #[cfg(windows)] let _w: () = { ' + EXP_W.strip() + ' }; };\n' + EXP_NOP, dep=DEP_BASE + DEP_MK_P)
+LIMNEST = ('#[macro_export(local_inner_macros)]\n'
+           'macro_rules! wrap { () => { macro_rules! q { () => { mk!() } } macro_rules! qn { () => { mknop!() } } } }\n')
+ccell('flimnest', FD1 + 'D2: a local_inner_macros transcriber DEFINES `q`, whose bare mk! resolves at q!\'s call site (inner imports the '
+      'dependency\'s PURE mk); the root export WRITES: must not charge.', mods='mod defs;\nmod other;\nmod inner;',
+      files={'defs.rs': LIMNEST}, inner_pre='use fxdep@ID@::{mk, nop as mknop};\ncrate::wrap!();\n', head='q!()', headq='qn!()',
+      dep=DEP_BASE + DEP_MK_P + DEP_MKNOP)
+ccell('flimnestr', FD1 + 'D2 mirror: root export PURE, the imported dependency mk WRITES. A PRE-EXISTING silence (ABSENT on pub, main and '
+      'cand): recorded, NOT acceptance.', mods='mod defs;\nmod other;\nmod inner;', defs=EXP_P + EXP_NOP,
+      files={'defs.rs': LIMNEST}, inner_pre='use fxdep@ID@::{mk, nop as mknop};\ncrate::wrap!();\n', head='q!()', headq='qn!()',
+      dep=DEP_BASE + DEP_MK_W + DEP_MKNOP)
+gcell('fr1675', '#[macro_export]\nmacro_rules! select { () => { mod kq; use kq as sys; } }\ncrate::select!();\n'
+      'pub struct Poller { poller: sys::Poller }\nimpl Poller {\n    pub fn new() -> Poller { Poller { poller: sys::Poller } }\n'
+      '    pub fn wait(&self) -> u8 { self.poller.wait() }\n}\n',
+      {'kq.rs': 'pub struct Poller;\nimpl Poller { pub fn wait(&self) -> u8 { @W@; 1 } }\n'},
+      [('fr1675_e', 'e', 'let _ = Poller::new().wait()'), ('fr1675_q', 'q', 'let _ = Poller::new()')],
+      FD1 + 'the moved r1675 test device at its ORIGINAL root spelling (`crate::select!()` of the crate\'s export): a resolution, pinned.')
+gcell('fr1814', 'pub trait Fetch: Sized { fn fetch_all(self, p: &str) { @W@ } }\npub trait Quiet: Sized { fn hush_zz(self, p: &str) -> usize { p.len() } }\n'
+      '#[macro_export] macro_rules! gen_impls { ($t:ty) => { impl crate::Fetch for $t {} impl crate::Quiet for $t {} impl $t { pub fn inh_zz(&self, p: &str) { @W@ } } }; }\n'
+      'pub mod km { pub struct Kmac(pub String); pub fn kmac(s: &str) -> Kmac { Kmac(s.to_string()) } crate::gen_impls!(Kmac); }\n', {},
+      [('fr1814_e', 'e', 'km::kmac("x").fetch_all("p")'), ('fr1814_inh_e', 'e', 'km::kmac("x").inh_zz("p")'),
+       ('fr1814_q', 'q', 'let _ = km::kmac("x").hush_zz("p")')],
+      FD1 + 'the moved world_gl device at its ORIGINAL root spelling (`crate::gen_impls!(Kmac)` in `pub mod km`): fr1814_e was SILENT on pub and '
+            'main (the trait-default caller of an emitted impl); a resolution, pinned.')
+ccell('fshadow', FD1 + 'root-namespace export mk WRITES, then a later TEXTUAL `macro_rules! mk {()}` in the same file: crate::mk is the export.',
+      defs=EXP_W + 'macro_rules! mk { () => { () } }\n' + EXP_NOP)
+ccell('fshadowr', FD1 + 'fshadow with the bodies swapped (export PURE, textual WRITES): pure in rustc. pub and main FABRICATE; R-ROOT fixes it.',
+      defs=EXP_P + 'macro_rules! mk { () => { @W@ } }\n' + EXP_NOP)
+
 # ---------------------------------------------------------------------------------------------------- F: cells that should NOT compile
 FD = 'F: '
 gcell('f1', 'use fxdepf1::mk;\nmod other;\nmod inner;\n', {'other.rs': EXP_P, 'inner.rs': 'pub fn go_f1() { crate::mk!() }\n'},

@@ -1,0 +1,18 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fr1675",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): the moved r1675 test device at its ORIGINAL root spelling (`crate::select!()` of the crate's export): a resolution, pinned.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fr1675_e"
+  },
+  {
+   "kind": "q",
+   "name": "fr1675_q"
+  }
+ ]
+}

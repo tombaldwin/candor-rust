@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepfimplc",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepfimplc"
+ ],
+ "id": "fimplc",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): D1: as fconst, inside an impl's ASSOCIATED const initializer.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fimplc_e"
+  },
+  {
+   "kind": "q",
+   "name": "fimplc_q"
+  }
+ ]
+}

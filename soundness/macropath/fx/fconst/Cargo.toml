@@ -1,0 +1,9 @@
+[package]
+name = "cf_fconst"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdepfconst = { path = "fxdepfconst" }
+
+[workspace]

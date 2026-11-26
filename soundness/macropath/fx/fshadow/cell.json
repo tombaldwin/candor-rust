@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepfshadow",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepfshadow"
+ ],
+ "id": "fshadow",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C (rev 1): root-namespace export mk WRITES, then a later TEXTUAL `macro_rules! mk {()}` in the same file: crate::mk is the export.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fshadow_e"
+  },
+  {
+   "kind": "q",
+   "name": "fshadow_q"
+  }
+ ]
+}
