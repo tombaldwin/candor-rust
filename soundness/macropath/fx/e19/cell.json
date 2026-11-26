@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe19",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe19"
+ ],
+ "id": "e19",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: K1 x explicit `use dep::thread_local;` inside an inline `mod x {}` of the invoking FILE (imports do not leak out of x): std's binds, pure.",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "e19_q"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e19"
+  }
+ ]
+}

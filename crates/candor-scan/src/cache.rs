@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev227 (rustagent-l3, lane rust-macropath-l3): SOUNDNESS R1908 / R1914 — R-BARE-TC: which bare toolchain macro names an item-position
+    // invocation may not bind to the toolchain, by crate kind and per MODULE (`baretc`); a glob no longer holds in a crate that has
+    // std's macro prelude, and holds where it may supply a name in a `no_std` crate. A rev226 entry holds the old, file-wide reading.
     // rev226 (rustagent-l2, lane rust-macropath-l2): SOUNDNESS R1910 / R1853 — R-ROOT: a ROOT-headed macro path binds the crate
     // root's one macro of the name (`rroot`), at item position (the expansion is spliced) and at body position (the root glob is
     // no longer followed). A rev225 entry holds neither.
@@ -788,7 +791,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev226/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev227/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

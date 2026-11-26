@@ -53,6 +53,7 @@ mod std_bounds;
 mod std_bounds_gen;
 mod mbe;
 mod rroot;
+mod baretc;
 mod deps;
 mod depsig;
 mod collector;

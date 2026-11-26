@@ -1,6 +1,5 @@
 # soundness/cfgtwin/expect.tsv — recorded by run.py (--record / --exec --record). Empty = not recorded (cand is filled by the fix lanes).
 cell	probe	exec	pub	main	cand	gate_pub	gate_main	gate_cand
-cell	probe	exec	pub	main	cand	gate_pub	gate_main	gate_cand
 d10v1	d10v1_e	Fs	-	-	U	U0F0	U0F0	U1F0
 d10v1	d10v1_q	none	-	-	-	U0F0	U0F0	U0F0
 d10v2	d10v2_e	Fs	-	-	U	U0F0	U0F0	U1F0
@@ -331,9 +330,9 @@ n1c	n1c_e	Fs	-	U	U	U0F0	U1F0	U1F0
 n1c	n1c_q	none	-	U	U	U0F0	U1F0	U1F0
 n2	n2_e	Fs	U	U	U	U1F0	U1F0	U1F0
 n2c	n2c_e	Fs	U	U	U	U1F0	U1F0	U1F0
-n3	n3_e	Fs	E	E+U	E+U	U0F1	U1F1	U1F1
+n3	n3_e	Fs	E	E+U	E	U0F1	U1F1	U0F1
 n3	n3_tl	Fs	E	E	E	U0F1	U0F1	U0F1
-n3d	n3d_e	Fs	E	E+U	E+U	U0F1	U1F1	U1F1
+n3d	n3d_e	Fs	E	E+U	E	U0F1	U1F1	U0F1
 n3d	n3d_tl	Fs	E	E	E	U0F1	U0F1	U0F1
 p3d3	p3d3_e	Fs	-	-	U	U0F0	U0F0	U1F0
 p3d3	p3d3_q	none	U	U	U	U1F0	U1F0	U1F0

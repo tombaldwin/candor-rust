@@ -465,6 +465,13 @@ ecell('e16', 'K2 x G7: a LOCAL thread_local macro defined above the invocation (
       dep=DEP_EMIT, inner='macro_rules! thread_local { (static $n:ident : $t:ty = $e:expr ;) => { pub fn tl_touch() { fxdep@ID@::emit() } } }\n')
 ecell('e17', 'K1 x G1 of a crate that RE-EXPORTS std\'s own thread_local: same definition, no ambiguity, std\'s binds (pure).', kind='bin', inner=E1,
       dep=DEP_EMIT + 'pub use std::thread_local;\n', pgo='std')
+# Lane rust-macropath-l3: the second fixtures of R-BARE-TC (written BEFORE the change). e18: R1899's glob hold was right here by accident
+# (the root's `#[macro_use] extern crate` outranks std's `thread_local`, so the dependency's binds); the change must keep it. e19: arm 2 is
+# per MODULE (an import inside `mod x` does not reach an invocation outside it): std's binds, pure.
+ecell('e18', 'K1 x G5 + a LOCAL glob in the invoking module: the root macro_use dependency\'s thread_local binds, so the hold stays (R1899 was right by accident).',
+      kind='bin', inner='mod helpers { pub fn h_@ID@() {} }\nuse helpers::*;\n', root='#[macro_use] extern crate fxdep@ID@;')
+ecell('e19', 'K1 x explicit `use dep::thread_local;` inside an inline `mod x {}` of the invoking FILE (imports do not leak out of x): std\'s binds, pure.', kind='bin',
+      inner='mod x { use fxdep@ID@::thread_local; }\n', pgo='std')
 
 # ---------------------------------------------------------------------------------------------------- N: L2's second fixtures
 # Lane rust-macropath-l2 (R-ROOT), written BEFORE the binding: the NON-export and non-root shapes R-ROOT must REFUSE, each with a

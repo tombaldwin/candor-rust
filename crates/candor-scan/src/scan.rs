@@ -1808,16 +1808,24 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // only where some file writes `macro_rules` (the table above does not read fn bodies, where an export may sit), stored in
     // the same table so its digest joins every file's cache key. `CANDOR_R_ROOT_OFF=1` computes nothing.
     // The file reads stay in this function (its `Fs` is already in `.candor/baseline`); `rroot` itself is pure.
-    let rroot_facts = if crate::rroot::off() || xmacros.is_empty() && !paths.par_iter().any(|(p, _)| {
+    let rroot_on = !(crate::rroot::off() || xmacros.is_empty() && !paths.par_iter().any(|(p, _)| {
         std::fs::read_to_string(p).is_ok_and(|t| t.contains("macro_rules"))
-    }) {
-        crate::rroot::RootFacts::default()
+    }));
+    // SOUNDNESS R1908 / R1914 (lane rust-macropath-l3, R-BARE-TC) — per-file glob and crate-kind facts for the toolchain names an
+    // ITEM-position invocation can bind (`baretc`). Computed only where some file names one (`thread_local`, `compile_error`,
+    // `global_asm`): elsewhere the question is never asked. `CANDOR_R_BARE_TC_OFF=1` computes none.
+    let tc_on = !crate::baretc::off()
+        && paths.par_iter().any(|(p, _)| {
+            std::fs::read_to_string(p).is_ok_and(|t| t.contains("thread_local") || t.contains("compile_error") || t.contains("global_asm"))
+        });
+    let (rroot_facts, tc_facts) = if !(rroot_on || tc_on) {
+        (crate::rroot::RootFacts::default(), crate::baretc::TcFacts::default())
     } else {
         let sums: HashMap<String, crate::rroot::FileSummary> = paths
             .par_iter()
             .filter_map(|(p, rel)| {
                 let text = std::fs::read_to_string(p).ok()?;
-                if !(text.contains("macro_rules") || text.contains("mod ") || crate::rroot::is_root_file(rel)) {
+                if !(tc_on || text.contains("macro_rules") || text.contains("mod ") || crate::rroot::is_root_file(rel)) {
                     return Some((rel.clone(), crate::rroot::FileSummary::default()));
                 }
                 let (file, _) = crate::lang::parse_file_2015_tolerant(&text)?;
@@ -1839,7 +1847,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
             false
         };
-        let f = crate::rroot::build(&sums, &ed2018);
+        let f = if rroot_on { crate::rroot::build(&sums, &ed2018) } else { crate::rroot::RootFacts::default() };
         if candor_report::env::trace("CANDOR_I1_INSTR") {
             for (r, m) in &f.entries {
                 for n in m.keys() {
@@ -1847,10 +1855,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
         }
-        f
+        let t = if tc_on { crate::baretc::build(&sums, &ed2018) } else { crate::baretc::TcFacts::default() };
+        (f, t)
     };
     let mut xmacros = xmacros;
     for (k, b) in rroot_facts.table() {
+        xmacros.insert(k, Some(b));
+    }
+    for (k, b) in tc_facts.table() {
         xmacros.insert(k, Some(b));
     }
     let xmacros_key = (!xmacros.is_empty()).then(|| crate::mbe::crate_macros_digest(&xmacros));
@@ -1918,7 +1930,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             crate::lang::splice_pin_project(&mut file.items); // R988, R960
         }
         if splice_gate(&text, claims) {
-            crate::mbe::splice_local_macros_scoped(&mut file.items, &xmacros, claims, rroot_facts.scope(rel)); // R1004, R-ROOT
+            crate::mbe::splice_local_macros_scoped(&mut file.items, &xmacros, claims, rroot_facts.scope(rel), tc_facts.file(rel)); // R1004, R-ROOT, R-BARE-TC
         }
         crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
         if text.contains("DeriveEntity") {
@@ -3128,7 +3140,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     }
                     let claims = claims_of(rel); // cfg-twin lane A — the claims its cached decls were derived under
                     if splice_gate(&t, claims) {
-                        crate::mbe::splice_local_macros_scoped(&mut f.items, &xmacros, claims, rroot_facts.scope(rel)); // R1004 — the round-2 twin
+                        crate::mbe::splice_local_macros_scoped(&mut f.items, &xmacros, claims, rroot_facts.scope(rel), tc_facts.file(rel)); // R1004 — the round-2 twin
                     }
                     crate::mbe::splice_derived_comparisons(&mut f.items); // R1146 — the round-2 twin
                     if t.contains("DeriveEntity") {

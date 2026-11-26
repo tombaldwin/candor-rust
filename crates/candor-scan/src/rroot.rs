@@ -103,6 +103,17 @@ pub(crate) struct ModScope {
     pub self_reexports: Vec<(String, String)>,
     /// every `use` leaf of this item list that is not a glob: (bound name, module segments, leaf, gated, absolute)
     pub uses: Vec<(String, Vec<String>, String, bool, bool)>,
+    /// R-BARE-TC (rust-macropath L3) — every GLOB `use` of this item list: (path segments before the `*`, leading `::`)
+    pub globs: Vec<(Vec<String>, bool)>,
+    /// R-BARE-TC — a `use` of this list binds a name of `TOOLCHAIN_BANG_MACROS` through a path that is not the toolchain's
+    /// (`use dep::thread_local;`, `pub use crate::other::vec as vec;`): a glob of THIS module supplies it
+    pub tc_names: bool,
+    /// R-BARE-TC — an item-position invocation this summary cannot read as emitting no `use`: any macro that is not the
+    /// toolchain's, other than a macro_rules! of this FILE whose every body writes neither a `use` nor a nested invocation
+    pub unread: bool,
+    /// R-BARE-TC — the names of the enums, structs, unions, traits and type aliases this list declares (`use Kind::*;` is a
+    /// glob of an ENUM, which supplies no macro)
+    pub types: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -112,6 +123,14 @@ pub(crate) struct FileSummary {
     pub exports: Vec<Export>,
     /// every `macro_rules!` name anywhere in the file (fn bodies and emitted definitions included), with multiplicity
     pub rules_names: Vec<String>,
+    /// R-BARE-TC — an inner attribute of this file names `no_std` or `no_core` (directly or under `cfg_attr`)
+    pub root_no_std: bool,
+    /// R-BARE-TC — an UNGATED `#[macro_use] extern crate std;` among this file's top-level items
+    pub root_macro_use_std: bool,
+    /// R-BARE-TC — `no_implicit_prelude` appears on this file or on any module of it
+    pub no_implicit_prelude: bool,
+    /// R-BARE-TC — a top-level `#[macro_use] extern crate dep;` (any cfg) of something other than the toolchain
+    pub root_macro_use_dep: bool,
 }
 
 /// Summarise one file (its source items; `spliced` is the copy `mbe::splice_local_macros` produced when some definition here
@@ -229,8 +248,65 @@ pub(crate) fn summarize(items: &[syn::Item], file_attrs: &[syn::Attribute], spli
             }
         }
     }
-    mods(items, Vec::new(), false, &mut s.mods);
+    s.root_no_std = file_attrs.iter().any(|a| {
+        let t = quote::ToTokens::to_token_stream(a).to_string();
+        t.contains("no_std") || t.contains("no_core")
+    });
+    s.root_macro_use_std = items.iter().any(|it| {
+        matches!(it, syn::Item::ExternCrate(e) if e.ident == "std"
+            && e.attrs.iter().any(|a| a.path().is_ident("macro_use"))
+            && !e.attrs.iter().any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr")))
+    });
+    s.root_macro_use_dep = items.iter().any(|it| {
+        matches!(it, syn::Item::ExternCrate(e) if !matches!(e.ident.to_string().as_str(), "std" | "core" | "alloc")
+            && e.attrs.iter().any(|a| a.path().is_ident("macro_use")))
+    });
+    s.no_implicit_prelude = file_attrs.iter().any(|a| a.path().is_ident("no_implicit_prelude")) || has_no_implicit_prelude(items);
+    let mut clean: HashMap<String, bool> = HashMap::new();
+    clean_rules(items, &mut clean);
+    mods(items, Vec::new(), false, &clean, &mut s.mods);
     s
+}
+
+/// R-BARE-TC — `#[no_implicit_prelude]` on any module below `items`.
+fn has_no_implicit_prelude(items: &[syn::Item]) -> bool {
+    items.iter().any(|it| match it {
+        syn::Item::Mod(m) => {
+            m.attrs.iter().any(|a| a.path().is_ident("no_implicit_prelude")) || m.content.as_ref().is_some_and(|(_, i)| has_no_implicit_prelude(i))
+        }
+        _ => false,
+    })
+}
+
+/// R-BARE-TC — per `macro_rules!` name of the file (every body, cfg twins included): does EVERY body write neither a `use` nor a
+/// nested invocation? Such a macro cannot emit an import, so an invocation of it leaves a module's globs as written.
+fn clean_rules(items: &[syn::Item], out: &mut HashMap<String, bool>) {
+    fn clean(ts: proc_macro2::TokenStream) -> bool {
+        use proc_macro2::TokenTree;
+        ts.into_iter().all(|t| match t {
+            TokenTree::Ident(i) => i != "use",
+            TokenTree::Punct(p) => p.as_char() != '!',
+            TokenTree::Group(g) => clean(g.stream()),
+            TokenTree::Literal(_) => true,
+        })
+    }
+    for it in items {
+        match it {
+            syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => {
+                if let Some(id) = &m.ident {
+                    let c = clean(m.mac.tokens.clone());
+                    let e = out.entry(id.to_string()).or_insert(true);
+                    *e &= c;
+                }
+            }
+            syn::Item::Mod(md) => {
+                if let Some((_, inner)) = &md.content {
+                    clean_rules(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// `summarize` over a parsed file, with the spliced copy when some definition in it writes `macro_rules` (emitted exports).
@@ -291,7 +367,7 @@ pub(crate) fn manifest_edition(text: &str, inheriting: bool) -> Edition {
 }
 
 /// The module scopes of one item list, depth-first through inline modules.
-fn mods(items: &[syn::Item], inline: Vec<String>, gated_above: bool, out: &mut Vec<ModScope>) {
+fn mods(items: &[syn::Item], inline: Vec<String>, gated_above: bool, clean: &HashMap<String, bool>, out: &mut Vec<ModScope>) {
     let mut m = ModScope { inline: inline.clone(), gated: gated_above, ..Default::default() };
     let mut has_glob = false;
     let mut defs: Vec<(usize, String, String, bool)> = Vec::new(); // (index, name, body, gated)
@@ -309,6 +385,7 @@ fn mods(items: &[syn::Item], inline: Vec<String>, gated_above: bool, out: &mut V
             }
             syn::Item::Use(u) => {
                 let g = gated(&u.attrs);
+                tc_use(&u.tree, &mut Vec::new(), u.leading_colon.is_some(), &mut m);
                 let mut flat = Vec::new();
                 flatten(&u.tree, Vec::new(), &mut flat, &mut has_glob);
                 for (bound, mut segs, leaf) in flat {
@@ -319,6 +396,24 @@ fn mods(items: &[syn::Item], inline: Vec<String>, gated_above: bool, out: &mut V
                     leaves.push((ix, bound, segs, leaf, g, absolute));
                 }
             }
+            // R-BARE-TC — what a GLOB of this module can supply, and what a macro may have written into it
+            syn::Item::Macro(mm) if mm.ident.is_none() => {
+                let leaf = mm.mac.path.segments.last().map(|x| x.ident.to_string()).unwrap_or_default();
+                let head = mm.mac.path.segments.first().map(|x| x.ident.to_string()).unwrap_or_default();
+                let toolchain = (mm.mac.path.segments.len() == 1 && mm.mac.path.leading_colon.is_none()
+                    || matches!(head.as_str(), "std" | "core" | "alloc"))
+                    && crate::mbe::TOOLCHAIN_BANG_MACROS.contains(&leaf.as_str())
+                    && leaf != "include";
+                let local_clean = mm.mac.path.segments.len() == 1 && mm.mac.path.leading_colon.is_none() && clean.get(&leaf) == Some(&true);
+                if !toolchain && !local_clean {
+                    m.unread = true;
+                }
+            }
+            syn::Item::Enum(x) => m.types.push(x.ident.to_string()),
+            syn::Item::Struct(x) => m.types.push(x.ident.to_string()),
+            syn::Item::Union(x) => m.types.push(x.ident.to_string()),
+            syn::Item::Trait(x) => m.types.push(x.ident.to_string()),
+            syn::Item::Type(x) => m.types.push(x.ident.to_string()),
             _ => {}
         }
     }
@@ -349,9 +444,38 @@ fn mods(items: &[syn::Item], inline: Vec<String>, gated_above: bool, out: &mut V
             if let Some((_, inner)) = &md.content {
                 let mut p = inline.clone();
                 p.push(md.ident.to_string());
-                mods(inner, p, gated_above || gated(&md.attrs), out);
+                mods(inner, p, gated_above || gated(&md.attrs), clean, out);
             }
         }
+    }
+}
+
+/// R-BARE-TC — record a `use` tree's globs (`m.globs`) and whether it binds a toolchain macro NAME through a non-toolchain path
+/// (`m.tc_names`). `pre` is the path so far.
+fn tc_use(t: &syn::UseTree, pre: &mut Vec<String>, abs: bool, m: &mut ModScope) {
+    let non_toolchain = |pre: &[String], leaf: &str| {
+        !matches!(pre.first().map(String::as_str).unwrap_or(leaf), "std" | "core" | "alloc")
+    };
+    match t {
+        syn::UseTree::Path(p) => {
+            pre.push(p.ident.to_string());
+            tc_use(&p.tree, pre, abs, m);
+            pre.pop();
+        }
+        syn::UseTree::Glob(_) => m.globs.push((pre.clone(), abs)),
+        syn::UseTree::Name(n) => {
+            let l = n.ident.to_string();
+            if l != "self" && crate::mbe::TOOLCHAIN_BANG_MACROS.contains(&l.as_str()) && non_toolchain(pre, &l) {
+                m.tc_names = true;
+            }
+        }
+        syn::UseTree::Rename(r) => {
+            let l = r.ident.to_string();
+            if l != "self" && crate::mbe::TOOLCHAIN_BANG_MACROS.contains(&r.rename.to_string().as_str()) && non_toolchain(pre, &l) {
+                m.tc_names = true;
+            }
+        }
+        syn::UseTree::Group(g) => g.items.iter().for_each(|x| tc_use(x, pre, abs, m)),
     }
 }
 
@@ -640,17 +764,21 @@ fn rewrite_lim(def: &str) -> Option<String> {
     Some(out.into_iter().collect::<TokenStream>().to_string())
 }
 
-/// Build the facts from every walked file's summary. `edition2018(root)` says whether that root's package is edition 2018 or
-/// later (the `use` form needs it).
-pub(crate) fn build(summaries: &HashMap<String, FileSummary>, edition2018: &dyn Fn(&str) -> bool) -> RootFacts {
-    let mut facts = RootFacts::default();
-    if off() || !summaries.values().any(|s| !s.rules_names.is_empty()) {
-        return facts;
-    }
-    // The module tree, top-down from every root file: file → every (root, module path, gated) placing it.
+/// The module tree of every root, placed (shared by R-ROOT and R-BARE-TC).
+pub(crate) struct Placed {
+    /// file → every (root, module path, gated) placing it
+    pub placed: HashMap<String, Vec<Placement>>,
+    /// (root, module path) → every (file, index into its `mods`) defining a module there, in walk order (cfg twins make several)
+    pub module_all: HashMap<(String, Vec<String>), Vec<(String, usize)>>,
+    /// (root, module path) of a module declared but not placed: a `#[path]` module, or a name matching no file or two
+    pub unplaced: HashSet<(String, Vec<String>)>,
+}
+
+/// The module tree, top-down from every root file.
+pub(crate) fn place(summaries: &HashMap<String, FileSummary>) -> Placed {
     let mut placed: HashMap<String, Vec<Placement>> = HashMap::new();
-    // (root, module path) → (file, index into its `mods`)
-    let mut module_at: HashMap<(String, Vec<String>), (String, usize)> = HashMap::new();
+    let mut module_all: HashMap<(String, Vec<String>), Vec<(String, usize)>> = HashMap::new();
+    let mut unplaced: HashSet<(String, Vec<String>)> = HashSet::new();
     let mut roots: Vec<&String> = summaries.keys().filter(|r| is_root_file(r)).collect();
     roots.sort();
     for root in roots {
@@ -667,10 +795,13 @@ pub(crate) fn build(summaries: &HashMap<String, FileSummary>, edition2018: &dyn 
             for (ix, m) in s.mods.iter().enumerate() {
                 let mut mmp = mp.clone();
                 mmp.extend(m.inline.iter().cloned());
-                module_at.entry((root.clone(), mmp.clone())).or_insert((file.clone(), ix));
+                module_all.entry((root.clone(), mmp.clone())).or_default().push((file.clone(), ix));
                 let dir = m.inline.iter().fold(cdir.clone(), |d, x| join(&d, x));
                 for (name, dg, path_attr) in &m.decls {
+                    let mut cmp = mmp.clone();
+                    cmp.push(name.clone());
                     if *path_attr {
+                        unplaced.insert((root.clone(), cmp));
                         continue; // a `#[path]` module is not placed: its definitions bind nothing here
                     }
                     let a = join(&dir, &format!("{name}.rs"));
@@ -678,15 +809,30 @@ pub(crate) fn build(summaries: &HashMap<String, FileSummary>, edition2018: &dyn 
                     let child = match (summaries.contains_key(&a), summaries.contains_key(&b)) {
                         (true, false) => a,
                         (false, true) => b,
-                        _ => continue,
+                        _ => {
+                            unplaced.insert((root.clone(), cmp));
+                            continue;
+                        }
                     };
-                    let mut cmp = mmp.clone();
-                    cmp.push(name.clone());
                     stack.push((child, cmp, g || m.gated || *dg));
                 }
             }
         }
     }
+    Placed { placed, module_all, unplaced }
+}
+
+/// Build the facts from every walked file's summary. `edition2018(root)` says whether that root's package is edition 2018 or
+/// later (the `use` form needs it).
+pub(crate) fn build(summaries: &HashMap<String, FileSummary>, edition2018: &dyn Fn(&str) -> bool) -> RootFacts {
+    let mut facts = RootFacts::default();
+    if off() || !summaries.values().any(|s| !s.rules_names.is_empty()) {
+        return facts;
+    }
+    let Placed { placed, module_all, .. } = place(summaries);
+    // (root, module path) → (file, index into its `mods`): the first module the walk met under that path
+    let module_at: HashMap<(String, Vec<String>), (String, usize)> =
+        module_all.iter().filter_map(|(k, v)| v.first().map(|f| (k.clone(), f.clone()))).collect();
     // Scan-wide multiplicity of every `macro_rules!` name (the `use` form needs the target to be the only one).
     let mut rules: HashMap<&str, usize> = HashMap::new();
     for s in summaries.values() {

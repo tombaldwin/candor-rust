@@ -11,6 +11,23 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Lane rust-macropath-l3: R-BARE-TC — which bare toolchain macro names an item-position invocation may not bind to the toolchain,
+  by crate kind and per module (SOUNDNESS R1908, R1914, R1899's rebinding rule; it REMOVES false-reason holds and ADDS true ones).**
+  R1899 treated a bare `thread_local!` as hidden text whenever its FILE held any glob `use dep::*;` or `#[macro_use] extern crate`.
+  A glob never rebinds a name of the std macro prelude in a crate that has it (E0659, executed for every name of
+  `TOOLCHAIN_BANG_MACROS`: `baretc::GLOB_IMMUNE_STD`), so in such a crate every glob-caused hold had a false reason (`Unknown`
+  `macro:another cfg arm of this fn is hidden by an unexpanded macro` on a cfg pair beside `thread_local!`; `deny Unknown` 0→1).
+  A crate has the prelude in every configuration unless its root says `no_std` / `no_core` in any form (`#![cfg_attr(.., no_std)]`
+  included) without an ungated `#[macro_use] extern crate std;`, and no module says `no_implicit_prelude`. In a crate that does not,
+  the question is asked per MODULE: does a glob OF THIS MODULE supply a name a dependency may export (a foreign glob, a glob the
+  module tree cannot place, a glob of a local module that holds one transitively or imports a toolchain-named macro or holds item
+  macro text the summary cannot read as writing no `use`; `use Kind::*;` over an enum supplies nothing)? Core-prelude names
+  (`write!`, `panic!`, `assert!`) are never rebound by a glob either (`GLOB_IMMUNE_CORE`). That ADDS the holds the file-wide reading
+  missed (`use crate::prelude::*;` over a root prelude module, a glob a local macro emits). Explicit `use dep::thread_local;` is read
+  per module. A crate whose root holds a non-toolchain `#[macro_use] extern crate dep;` keeps R1899's reading (the dependency's macro
+  outranks std's there, so the old hold was right by accident). Acceptance: `soundness/macropath` group E (cells e1..e19, e18/e19 new).
+  `CANDOR_R_BARE_TC_OFF=1` restores R1899's reading. Cache rev 227.
+
 - ⚠ **Lane rust-macropath-l2: R-ROOT — a macro path whose module is the crate ROOT binds the crate's one root macro of that name
   (SOUNDNESS R1910, R1853's root cases; a resolution: it removes `invisible` and `Unknown` and adds concrete effects).**
   `crate::m!`, `$crate::m!` (as a local macro transcribes it), `self::m!` at the root and `super::…::m!` reaching it bind the

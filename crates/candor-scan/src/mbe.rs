@@ -785,7 +785,20 @@ struct Ctx<'x> {
     /// file: a non-crate-rooted `use` imports the name (or a glob / `#[macro_use] extern crate` may), or a local or crate-wide
     /// `macro_rules!` defines it. `is_hidden_text` and `read_hidden`'s toolchain arm read the path alone; for these names a
     /// bare invocation is another macro's text, read as any other.
-    tc_shadow: std::collections::HashSet<String>,
+    ///
+    /// R-BARE-TC (rust-macropath L3) — read PER MODULE: `splice` swaps in the set of the list it is splicing (`tc_names_for`) and
+    /// puts the enclosing list's back, and the module-arm readers (`holds_arm_text`, `read_arm_hidden`), which reach nested
+    /// modules, read `tc_file`, the file-wide union. With no facts for the file (`tc` is `None`) it is `tc_file` throughout, as
+    /// R1899 left it.
+    tc_shadow: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// R-BARE-TC — the file-wide reading: R1899's, but for a glob (see `tc_names_for`).
+    tc_file: std::collections::HashSet<String>,
+    /// R-BARE-TC — this file's facts (`baretc`): `None` = R1899's reading.
+    tc: Option<crate::baretc::TcFile>,
+    /// R-BARE-TC — the file holds a non-toolchain `#[macro_use] extern crate` (every toolchain name may be rebound)
+    tc_mu: bool,
+    /// R-BARE-TC — the toolchain names this crate or file defines itself (`macro_rules!`, emitted or not)
+    tc_locals: std::collections::HashSet<String>,
     /// SOUNDNESS R1862 / R1824 (cfg-twin lane A) — the cross-file claims this file's splice consumes (`ArmClaims`).
     claims: DecodedClaims,
     /// the inline module path of the list being spliced, within this file (`a::b`), for `claims` lookups.
@@ -801,7 +814,10 @@ struct Ctx<'x> {
 /// SOUNDNESS R1899 (cfg-twin lane A) — every name a `use` of this file binds through a path rooted at neither the crate
 /// (`crate`/`self`/`super`) nor the toolchain (`std`/`core`/`alloc`, and a leading `::` before one): `use std::thread_local;`
 /// (proc-macro2's fallback.rs) binds the toolchain's macro, `use dep::thread_local;` does not.
-fn non_toolchain_imports(items: &[syn::Item]) -> std::collections::HashSet<String> {
+///
+/// `deep` false reads this item list alone: an import does not reach an inline module's list, and an inline module's does not
+/// reach this one (R-BARE-TC, arm 2 per MODULE).
+fn non_toolchain_imports_in(items: &[syn::Item], deep: bool) -> std::collections::HashSet<String> {
     fn walk(t: &syn::UseTree, root: Option<&str>, out: &mut std::collections::HashSet<String>) {
         let skip = |r: Option<&str>| matches!(r, Some("crate" | "self" | "super" | "std" | "core" | "alloc"));
         match t {
@@ -819,13 +835,13 @@ fn non_toolchain_imports(items: &[syn::Item]) -> std::collections::HashSet<Strin
             _ => {}
         }
     }
-    fn items_walk(items: &[syn::Item], out: &mut std::collections::HashSet<String>) {
+    fn items_walk(items: &[syn::Item], deep: bool, out: &mut std::collections::HashSet<String>) {
         for it in items {
             match it {
                 syn::Item::Use(u) => walk(&u.tree, None, out),
-                syn::Item::Mod(m) => {
+                syn::Item::Mod(m) if deep => {
                     if let Some((_, inner)) = &m.content {
-                        items_walk(inner, out);
+                        items_walk(inner, deep, out);
                     }
                 }
                 _ => {}
@@ -833,8 +849,20 @@ fn non_toolchain_imports(items: &[syn::Item]) -> std::collections::HashSet<Strin
         }
     }
     let mut out = std::collections::HashSet::new();
-    items_walk(items, &mut out);
+    items_walk(items, deep, &mut out);
     out
+}
+
+/// R-BARE-TC — does this file hold a `#[macro_use] extern crate` of something other than the toolchain? (`imported_names` records
+/// it as the wildcard `*`, together with every non-toolchain glob; this is that half alone.)
+fn has_macro_use_extern(items: &[syn::Item]) -> bool {
+    items.iter().any(|it| match it {
+        syn::Item::ExternCrate(e) => {
+            e.attrs.iter().any(|a| a.path().is_ident("macro_use")) && !matches!(e.ident.to_string().as_str(), "std" | "core" | "alloc")
+        }
+        syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| has_macro_use_extern(inner)),
+        _ => false,
+    })
 }
 
 /// I1 step 1 — every name a `use` item of this file binds through a path that is NOT rooted at `crate`/`self`/`super`
@@ -929,7 +957,7 @@ impl Ctx<'_> {
         // shadowing the name is read below.
         let root_tc = mac.path.segments.len() == 1
             || matches!(mac.path.segments.first().map(|s| s.ident.to_string()).as_deref(), Some("std" | "core" | "alloc"));
-        let bare_shadowed = mac.path.segments.len() == 1 && mac.path.leading_colon.is_none() && self.tc_shadow.contains(&name);
+        let bare_shadowed = mac.path.segments.len() == 1 && mac.path.leading_colon.is_none() && self.tc_shadow.borrow().contains(&name);
         if root_tc && !bare_shadowed && TOOLCHAIN_BANG_MACROS.contains(&name.as_str()) && table.get(&name).is_none() {
             declared_names(&mac.tokens, &mut h.loose);
             return;
@@ -1275,7 +1303,23 @@ impl Ctx<'_> {
     /// Does this arm hold text `read_arm_hidden` reads: `holds_hidden`'s, or a body-position path invocation of a local macro
     /// that writes an `impl` (see `read_arm_hidden`).
     fn holds_arm_text(&self, items: &[syn::Item]) -> bool {
-        if holds_hidden(items, &self.partial, &self.tc_shadow) {
+        self.with_file_tc(|| self.holds_arm_text_inner(items))
+    }
+
+    /// R-BARE-TC — run `f` reading the FILE-WIDE toolchain-name set: the module-arm readers reach nested modules, each of which
+    /// would need its own set, and the union is the sound one. A no-op without facts (the set is the file's throughout).
+    fn with_file_tc<R>(&self, f: impl FnOnce() -> R) -> R {
+        if self.tc.is_none() {
+            return f();
+        }
+        let saved = self.tc_shadow.replace(self.tc_file.clone());
+        let r = f();
+        self.tc_shadow.replace(saved);
+        r
+    }
+
+    fn holds_arm_text_inner(&self, items: &[syn::Item]) -> bool {
+        if holds_hidden(items, &self.partial, &self.tc_shadow.borrow()) {
             return true;
         }
         if !self.bodies.values().any(|bs| bs.iter().any(writes_impl)) && !self.xdefs.values().flatten().any(|t| t.contains("impl")) {
@@ -1287,6 +1331,10 @@ impl Ctx<'_> {
     }
 
     fn read_arm_hidden(&self, items: &[syn::Item], h: &mut Hidden) {
+        self.with_file_tc(|| self.read_arm_hidden_inner(items, h));
+    }
+
+    fn read_arm_hidden_inner(&self, items: &[syn::Item], h: &mut Hidden) {
         // cfg-twin lane A — a BODY-position invocation by PATH (`crate::m! {}` inside `fn host`) of a local macro whose body
         // writes an `impl`: the body hoist (R1813) binds bare names only, so the impl it emits stays unexpanded text of this arm
         // (`p6`), and the twin impl in a sibling arm read alone. Read with the one reader, as item text.
@@ -1313,7 +1361,7 @@ impl Ctx<'_> {
         for it in items {
             match it {
                 syn::Item::Fn(f) => body_paths(&f.block, h),
-                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) => self.read_hidden(&m.mac, None, items, h, 0),
+                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow.borrow()) => self.read_hidden(&m.mac, None, items, h, 0),
                 syn::Item::Impl(im) => {
                     let owner = ty_key(&im.self_ty);
                     for ii in &im.items {
@@ -1334,7 +1382,7 @@ impl Ctx<'_> {
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, inner)) = &m.content {
-                        self.read_arm_hidden(inner, h);
+                        self.read_arm_hidden_inner(inner, h);
                     }
                 }
                 _ => {}
@@ -1850,7 +1898,36 @@ impl Ctx<'_> {
         *items = out;
     }
 
+    /// R-BARE-TC (rust-macropath L3) — the `TOOLCHAIN_BANG_MACROS` names whose BARE spelling may not bind the toolchain's macro in
+    /// THIS module's item list (`items`, the module at inline path `modkey` of this file; `None` reads the whole file). A name is
+    /// rebound by: a definition of it in this crate (`tc_locals`); a non-toolchain `use` of it in this list; a `#[macro_use]
+    /// extern crate dep;` of this file (`tc_mu`); or a glob of this module that may supply a name the crate's prelude does not
+    /// make immune to it (`baretc::TcFile::glob_rebinds`: no glob rebinds a std-prelude name where the crate has std's prelude,
+    /// and none a core-prelude name anywhere). Without facts for the file, R1899's reading (any glob of the file, any name).
+    fn tc_names_for(&self, items: &[syn::Item], modkey: Option<&str>) -> std::collections::HashSet<String> {
+        let imports = non_toolchain_imports_in(items, modkey.is_none());
+        TOOLCHAIN_BANG_MACROS
+            .iter()
+            .filter(|n| {
+                self.tc_locals.contains(**n)
+                    || imports.contains(**n)
+                    || self.tc_mu
+                    || match (&self.tc, modkey) {
+                        (Some(t), Some(k)) => t.glob_rebinds(n, k),
+                        (Some(t), None) => t.glob_rebinds_anywhere(n),
+                        (None, _) => self.imported.contains("*"),
+                    }
+            })
+            .map(|n| n.to_string())
+            .collect()
+    }
+
     fn splice(&mut self, items: &mut Vec<syn::Item>, depth: usize) {
+        // R-BARE-TC — this list's toolchain-name set, for the whole of its splice; the enclosing list's is put back at the end
+        let tc_saved = self.tc.is_some().then(|| {
+            let k = self.modpath.join("::");
+            self.tc_shadow.replace(self.tc_names_for(items, Some(&k)))
+        });
         let mut out: Vec<syn::Item> = Vec::with_capacity(items.len());
         // I1 stage 2 — which items of `out` the splice PRODUCED (`mark_hidden_twins`), index for index.
         let mut spliced: Vec<bool> = Vec::with_capacity(items.len());
@@ -2096,12 +2173,18 @@ impl Ctx<'_> {
                 out.extend(hoisted);
             }
         }
+        // R-BARE-TC — read again from the SPLICED list: a `use` an expansion emitted is an import of this module too
+        if tc_saved.is_some() {
+            let k = self.modpath.join("::");
+            let now = self.tc_names_for(&out, Some(&k));
+            self.tc_shadow.replace(now);
+        }
         if !candor_report::env::switch("CANDOR_I1S2_TWIN_OFF") {
             spliced.resize(out.len(), false);
             let (mut item, mut member) = (Hidden::default(), Hidden::default());
             for it in out.iter() {
                 match it {
-                    syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) => {
+                    syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow.borrow()) => {
                         let mut h = Hidden::default();
                         self.read_hidden(&m.mac, None, &out, &mut h, 0);
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
@@ -2135,7 +2218,7 @@ impl Ctx<'_> {
                 }
             }
             // I1 stage 2b — does this module still hold unexpanded ITEM text at all (whatever its reading came to)?
-            let has_hidden = out.iter().any(|it| matches!(it, syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow)));
+            let has_hidden = out.iter().any(|it| matches!(it, syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow.borrow())));
             mark_hidden_twins(&mut out, &spliced, &item, &member, has_hidden);
             // SOUNDNESS R1857 — cfg-twin MODULES: one arm's hidden text, at any depth of it, may define what the other arm
             // shows (`mark_module_twins`).
@@ -2163,6 +2246,9 @@ impl Ctx<'_> {
         // text declares, exported for the CALLER-side hedge (`minted_facts`, `scan.rs`). Additive: a marker nothing else reads.
         if let Some(mk) = self.minted_marker(&out) {
             out.push(mk);
+        }
+        if let Some(saved) = tc_saved {
+            self.tc_shadow.replace(saved);
         }
         *items = out;
     }
@@ -2244,10 +2330,10 @@ impl Ctx<'_> {
         let (mut l1b_local, mut l1b_opaque) = (false, false);
         for it in out {
             match it {
-                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) && !local(&m.mac) => {
+                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow.borrow()) && !local(&m.mac) => {
                     l1b_opaque = true;
                 }
-                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) && local(&m.mac) => {
+                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow.borrow()) && local(&m.mac) => {
                     let mut h = Hidden::default();
                     self.read_hidden(&m.mac, None, out, &mut h, 0);
                     if h.opaque {
@@ -5167,7 +5253,7 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
 
 /// `splice_local_macros`, with the cross-file cfg-twin claims this file consumes (`ArmClaims`, cfg-twin lane A).
 pub(crate) fn splice_local_macros_with(items: &mut Vec<syn::Item>, xdefs: &CrateMacros, claims: &ArmClaims) {
-    splice_local_macros_scoped(items, xdefs, claims, None);
+    splice_local_macros_scoped(items, xdefs, claims, None, None);
 }
 
 /// `splice_local_macros_with`, with the file's R-ROOT scope (`rroot::Scope`): a root-headed macro path binds there.
@@ -5176,6 +5262,7 @@ pub(crate) fn splice_local_macros_scoped(
     xdefs: &CrateMacros,
     claims: &ArmClaims,
     f1: Option<crate::rroot::Scope>,
+    tc: Option<crate::baretc::TcFile>,
 ) {
     let mut imported = std::collections::HashSet::new();
     if !candor_report::env::switch("CANDOR_I1_BIND_OFF") {
@@ -5208,18 +5295,12 @@ pub(crate) fn splice_local_macros_scoped(
     }
     all_bodies(items, &mut bodies);
     // SOUNDNESS R1899 — which toolchain macro names a BARE invocation in this file may not bind to the toolchain.
-    let tc_imports = non_toolchain_imports(items);
-    let tc_shadow: std::collections::HashSet<String> = TOOLCHAIN_BANG_MACROS
+    let tc_locals: std::collections::HashSet<String> = TOOLCHAIN_BANG_MACROS
         .iter()
-        .filter(|n| {
-            tc_imports.contains(**n)
-                || imported.contains("*")
-                || bodies.contains_key(**n)
-                || xdefs.get(**n).is_some()
-                || xdefs.get(&emitted_key(n)).is_some()
-        })
+        .filter(|n| bodies.contains_key(**n) || xdefs.get(**n).is_some() || xdefs.get(&emitted_key(n)).is_some())
         .map(|n| n.to_string())
         .collect();
+    let tc_mu = tc.is_some() && has_macro_use_extern(items);
     let mut cx = Ctx {
         arms: HashMap::new(),
         defs,
@@ -5231,12 +5312,19 @@ pub(crate) fn splice_local_macros_scoped(
         bodies,
         scope_bodies: HashMap::new(),
         emitted: Default::default(),
-        tc_shadow,
+        tc_shadow: Default::default(),
+        tc_file: Default::default(),
+        tc,
+        tc_mu,
+        tc_locals,
         claims: claims.decode(),
         modpath: Vec::new(),
         f1,
         f1_gated: 0,
     };
+    // SOUNDNESS R1899 / R-BARE-TC — the file-wide reading (the module-arm readers' and the splice's starting point)
+    cx.tc_file = cx.tc_names_for(items, None);
+    cx.tc_shadow.replace(cx.tc_file.clone());
     cx.splice(items, 0);
     // SOUNDNESS R1862 / R1824 (cfg-twin lane A) — THIS FILE AS AN OUT-OF-LINE MODULE ARM. Its own hidden text, read whole
     // (the same `read_arm_hidden` an inline arm is read with), is exported for the sibling arms in other files
