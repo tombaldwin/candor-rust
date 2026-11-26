@@ -3,7 +3,7 @@
  "deps": [],
  "id": "n3",
  "lib": false,
- "note": "R1908: local-module glob; gated_n3 (both arms visible) must read E with no U",
+ "note": "R1908: local-module glob; main over-holds gated_n3 (E+U). Recorded for the toolchain-shadowing design, no acceptance",
  "probes": [
   {
    "kind": "e",

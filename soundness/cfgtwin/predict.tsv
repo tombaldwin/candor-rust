@@ -357,7 +357,7 @@ n1c	n1c_e	-	U	U
 n1c	n1c_q	-	U	record
 n2	n2_e	U	U	U
 n2c	n2c_e	U	U	U
-n3	n3_e	E	E+U	E
+n3	n3_e	E	E+U	record
 n3	n3_tl	E	E	E
 n3d	n3d_e	E	E+U	record
 n3d	n3d_tl	E	E	E

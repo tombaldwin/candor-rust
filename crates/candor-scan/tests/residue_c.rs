@@ -1,15 +1,13 @@
-//! rust lane residue-C — six small-reach rows from the `Self`/std binding, path-macro and cfg-twin areas. Every `p_*` probe below
+//! rust lane residue-C — small-reach rows from the `Self`/std binding and cfg-twin areas. Every `p_*` probe below
 //! performs the effect it is asserted to carry when the fixture is compiled and run (executed by the lane against the same bytes,
 //! `rustagent-resC/fx`), and every `q_*` probe is pure. On v0.43.0 (`5b001dbf`) and main (`ed33afa7`) each `p_*` here read ABSENT or
 //! lacked the asserted effect, and each `q_*` read a fabricated `Fs`.
 //!
 //! - R1846: `Self::m` in a trait DEFAULT body naming a SUPERTRAIT member (local provided, local required, two levels, a std
 //!   supertrait with a local implementor).
-//! - R1853: a PATH invocation of a crate macro (`crate::m!`, `self::m!`, `super::m!`, `$crate::m!`) at item, impl-item and body
-//!   position; at trait-item position it stays hidden text (named residual).
 //! - R1850: `Self` in an impl whose self type is a dependency module path reached only through globs.
 //! - R1859 / R1860 / R1902: `Self::m` in an impl of a local trait for `std::fs::File`.
-//! - R1906 / R1908: the cfg-twin matrix's section N cells (`soundness/cfgtwin/fx/n*`).
+//! - R1906: the cfg-twin matrix's section N cells (`soundness/cfgtwin/fx/n1`, `n2`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,7 +52,7 @@ fn scan_env(dir: &Path, env: &[(&str, &str)]) -> Rows {
     let out = work.join("out");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_candor-scan"));
     cmd.arg(dir.to_string_lossy().as_ref()).arg("--out").arg(out.join("r"));
-    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1853_OFF", "CANDOR_R1902_OFF", "CANDOR_R1908_OFF"] {
+    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1902_OFF"] {
         cmd.env_remove(k);
     }
     for (k, v) in env {
@@ -145,43 +143,6 @@ fn r1846_self_member_of_a_supertrait_in_a_default_body() {
     assert!(r.get("Cl::cl_mk").is_some_and(|(_, w)| w.iter().any(|x| x == "dispatch:Cl.try_from")), "{:?}", r.get("Cl::cl_mk"));
     assert!(!has(&r, "q_qa_pure", "Fs") && !has(&r, "q_qa_pure", "Unknown"), "pure supertrait member: {:?}", r.get("q_qa_pure"));
     // (additive: no kill switch; v0.43.0 and main read p_qa_path and p_create_path ABSENT on these bytes)
-}
-
-const R1853: &str = r#"#![allow(unused)]
-#[macro_export] macro_rules! mkfn { ($n:ident) => { pub fn $n() { ::std::fs::write(::std::env::var("MARK").unwrap(), b"x").unwrap(); } } }
-#[macro_export] macro_rules! mkm { ($n:ident) => { pub fn $n(&self) { ::std::fs::write(::std::env::var("MARK").unwrap(), b"x").unwrap(); } } }
-#[macro_export] macro_rules! wrapfn { ($n:ident) => { $crate::mkfn! { $n } } }
-#[macro_export] macro_rules! mkimpl { ($t:ident, $n:ident) => { impl $t { pub fn $n(&self) { ::std::fs::write(::std::env::var("MARK").unwrap(), b"x").unwrap(); } } } }
-#[macro_export] macro_rules! mkpure { ($n:ident) => { pub fn $n() {} } }
-pub struct S; pub struct B;
-crate::mkfn! { i_crate }
-self::mkfn! { i_self }
-wrapfn! { i_dollar }
-pub mod sub { super::mkfn! { i_super } }
-crate::mkpure! { i_pure }
-impl S { crate::mkm! { m_crate } }
-pub fn host_path() { crate::mkimpl!(B, go_path); }
-pub fn p_i_crate() { i_crate() }
-pub fn p_i_self() { i_self() }
-pub fn p_i_dollar() { i_dollar() }
-pub fn p_i_super() { sub::i_super() }
-pub fn p_m_crate() { S.m_crate() }
-pub fn p_body_path() { B.go_path() }
-pub fn q_pure() { i_pure() }
-fn main() {}
-"#;
-
-/// R1853 — a path-spelled invocation of the crate's own macro is expanded at item, impl-item and body position, so the fns it
-/// writes are units and their callers read the write; `crate::mkpure!` mints a pure fn and its caller stays pure.
-#[test]
-fn r1853_path_invoked_crate_macro_is_expanded() {
-    let r = scan(&crate_with("r1853", &[], &[("src/main.rs", R1853)]));
-    for p in ["p_i_crate", "p_i_self", "p_i_dollar", "p_i_super", "p_m_crate", "p_body_path"] {
-        assert!(has(&r, p, "Fs"), "{p} must read Fs over its executed write: {:?}", r.get(p));
-    }
-    assert!(pure(&r, "q_pure"), "{:?}", r.get("q_pure"));
-    let off = scan_env(&crate_with("r1853-off", &[], &[("src/main.rs", R1853)]), &[("CANDOR_R1853_OFF", "1")]);
-    assert!(!has(&off, "p_i_crate", "Fs") && !has(&off, "p_body_path", "Fs"), "{:?} {:?}", off.get("p_i_crate"), off.get("p_body_path"));
 }
 
 const R1850: &str = r#"#![allow(dead_code, unused)]
@@ -303,72 +264,4 @@ fn r1906_arm_cover_runs_without_a_local_macro() {
     let r = scan(&cfgtwin("n2"));
     assert!(has(&r, "pure_n2::go_n2", "Unknown") || r.iter().any(|(k, v)| k.ends_with("go_n2") && v.0.iter().any(|e| e == "Unknown")), "{r:?}");
     // (additive: no kill switch; n1_e reads `-` on v0.43.0 and main, recorded in soundness/cfgtwin/expect.tsv)
-}
-
-/// R1908 — a glob of a module this file declares cannot rebind `thread_local!`, so the hand-written gated pair beside it is not
-/// held (`n3`: E, no U); a dependency glob still may (`n3d`: the hold stays).
-#[test]
-fn r1908_local_glob_does_not_rebind_a_toolchain_macro() {
-    let r = scan(&cfgtwin("n3"));
-    assert!(has(&r, "n3_e", "Fs") && !has(&r, "n3_e", "Unknown"), "{:?}", r.get("n3_e"));
-    let r = scan(&cfgtwin("n3d"));
-    assert!(has(&r, "n3d_e", "Fs") && has(&r, "n3d_e", "Unknown"), "{:?}", r.get("n3d_e"));
-    // a crate-wide re-export of the name through a local module keeps the hold (the disclosure the narrowing might delete)
-    let d = crate_with("r1908-reexp", &[("ldep", "#[macro_export] macro_rules! thread_local { ($($t:tt)*) => {}; }\n")], &[
-        ("src/main.rs", "#![allow(unused)]\nmacro_rules! unrelated { () => {} }\nmod helpers;\nuse helpers::*;\nuse std::cell::Cell;\n\
-            thread_local! { static X: Cell<u8> = Cell::new(0); }\n\
-            #[cfg(unix)] pub fn gated() { std::fs::write(\"x\", b\"x\").unwrap(); }\n#[cfg(not(unix))] pub fn gated() {}\n\
-            pub fn p_gated() { gated() }\nfn main() {}\n"),
-        ("src/helpers.rs", "pub use ldep::thread_local;\npub fn h() {}\n"),
-    ]);
-    let r = scan(&d);
-    assert!(has(&r, "p_gated", "Unknown"), "re-exported through the globbed module: {:?}", r.get("p_gated"));
-}
-
-const MK_EFF: &str = "pub fn emit() { ::std::fs::write(::std::env::var(\"MARK\").unwrap(), b\"x\").unwrap(); }\n\
-    #[macro_export] macro_rules! mk { ($n:ident) => { pub fn $n() { $crate::emit() } } }\n";
-const MK_PURE: &str = "#[macro_export] macro_rules! mk { ($n:ident) => { pub fn $n() {} } }\n";
-
-/// R1853, Fable's merge review D1 — `crate::mk!` reaches what the crate ROOT's namespace holds: here a `use dep::mk;`, not the
-/// crate's textual-scope-only `macro_rules! mk` in another file. f3c2 (the dependency's `mk` writes; executed): main read
-/// `Unknown[macro:module items hidden …]`, the first cut read ABSENT. f3crev2 (bodies swapped; executed pure): the first cut
-/// charged `Env,Fs`. The path now binds only a `#[macro_export]` definition no `use` in the crate names.
-#[test]
-fn r1853_a_path_binds_only_what_rustc_reaches_through_it() {
-    let f = |dep: &str, local: &str, tag: &str| {
-        crate_with(tag, &[("fxdepmk", dep)], &[
-            ("src/main.rs", "#![allow(unused)]\nuse fxdepmk::mk;\nmod other;\nmod inner;\npub fn p_go() { inner::go() }\nfn main() {}\n"),
-            ("src/other.rs", &format!("macro_rules! mk {{ ($n:ident) => {{ pub fn $n() {{ {local} }} }} }}\nmk!{{ x_other }}\npub fn p_other() {{ x_other() }}\n")),
-            ("src/inner.rs", "crate::mk!{ go }\npub fn p_inner() { go() }\n"),
-        ])
-    };
-    let r = scan(&f(MK_EFF, "", "f3c2"));
-    assert!(has(&r, "p_go", "Unknown"), "f3c2 keeps main's hold over the dependency's write: {:?}", r.get("p_go"));
-    let r = scan(&f(MK_PURE, "::std::fs::write(\"m\", b\"x\").unwrap();", "f3crev2"));
-    assert!(!has(&r, "p_go", "Fs") && !has(&r, "inner::go", "Fs"), "f3crev2 must not charge the local body: {:?}", r.get("p_go"));
-}
-
-/// R1908, Fable's merge review D2 — a local glob of an OUT-OF-LINE module whose body is `pub use dep::*;` may bring the dependency's
-/// `thread_local!` (`#![no_std]`): the hand-written gated pair keeps main's hold (f4d). Controls: the inline module (f4c), and
-/// the `crate::`-rooted glob (f4e, never held before; held now by the same crate-wide record).
-#[test]
-fn r1908_a_dependency_glob_reexported_by_a_local_module_still_rebinds() {
-    let dep = "pub fn emit() { ::std::fs::write(::std::env::var(\"MARK\").unwrap(), b\"x\").unwrap(); }\n\
-        #[macro_export] macro_rules! thread_local { (static $n:ident : $t:ty = $e:expr ;) => { pub fn tl_touch() { $crate::emit() } } }\n";
-    let body = |decl: &str, glob: &str| format!("#![no_std]\n#![allow(unused)]\nmacro_rules! unrelated {{ () => {{}} }}\n{decl}\n{glob}\n\
-        thread_local! {{ static X: u8 = 0; }}\npub fn p_tl() {{ tl_touch() }}\n\
-        #[cfg(unix)] pub fn gated() {{ fxdepf4::emit() }}\n#[cfg(not(unix))] pub fn gated() {{}}\npub fn p_gated() {{ gated() }}\n");
-    for (tag, decl, glob, prelude) in [
-        ("f4d", "pub mod prelude;", "use prelude::*;", Some("pub use fxdepf4::*;\n")),
-        ("f4c", "pub mod prelude { pub use fxdepf4::*; }", "use prelude::*;", None),
-        ("f4e", "pub mod prelude;", "use crate::prelude::*;", Some("pub use fxdepf4::*;\n")),
-    ] {
-        let lib = body(decl, glob);
-        let mut files: Vec<(&str, &str)> = vec![("src/lib.rs", lib.as_str())];
-        if let Some(p) = prelude {
-            files.push(("src/prelude.rs", p));
-        }
-        let r = scan(&crate_with(tag, &[("fxdepf4", dep)], &files));
-        assert!(has(&r, "gated", "Unknown"), "{tag}: the cfg-arm hold stays: {:?}", r.get("gated"));
-    }
 }

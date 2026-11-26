@@ -1264,8 +1264,6 @@ pub(crate) struct ModSiteCache {
     verdict: HashMap<std::path::PathBuf, (Option<bool>, &'static str)>,
     /// SOUNDNESS R977 — the memo for `file_module_cfg_off`, beside the test verdict's.
     cfg_off: HashMap<std::path::PathBuf, bool>,
-    /// SOUNDNESS R1853 — the memo for `file_module_may_be_arm`.
-    arm: HashMap<std::path::PathBuf, bool>,
 }
 
 /// R457 — IS A FILE WHOSE NAME LOOKS LIKE A TEST MODULE ACTUALLY ONE? Look for the EVIDENCE.
@@ -1516,78 +1514,6 @@ fn compute_file_module_cfg_off(root: &Path, rel: &Path, cache: &mut ModSiteCache
         let Some(f) = parse_module_file(root, prel, cache) else { continue };
         if let Some(off) = declaring_mod_matches(&f.items, &name, crate::lang::is_cfg_inactive) {
             return off || file_module_cfg_off_inner(root, prel, cache, depth + 1);
-        }
-    }
-    false
-}
-
-/// SOUNDNESS R1853 — may this FILE be one arm of a `#[cfg]` module twin? True when its own `#![cfg]`, its declaring `mod`'s (or
-/// an enclosing inline `mod`'s) `#[cfg]`/`#[cfg_attr]`, or an ancestor file's, says so; and, where no `mod` item declares it (a
-/// declaration a macro writes: `cfg_x! { #[cfg(unix)] #[path = "live.rs"] mod m; }`), when a candidate parent file NAMES it in
-/// text (`"live.rs"`, or `mod live` beside a `cfg`). Over-inclusion only withholds the path-invocation expansion (`mbe`), which
-/// is the v0.43.0 reading; the walk asks it once per file, with the same evidence route as `file_module_cfg_off`.
-pub(crate) fn file_module_may_be_arm(root: &Path, rel: &Path, cache: &mut ModSiteCache) -> bool {
-    file_module_may_be_arm_inner(root, rel, cache, 0)
-}
-
-fn file_module_may_be_arm_inner(root: &Path, rel: &Path, cache: &mut ModSiteCache, depth: usize) -> bool {
-    if let Some(hit) = cache.arm.get(rel) {
-        return *hit;
-    }
-    if depth > 16 {
-        return false;
-    }
-    let out = compute_file_module_may_be_arm(root, rel, cache, depth);
-    cache.arm.insert(rel.to_path_buf(), out);
-    out
-}
-
-fn compute_file_module_may_be_arm(root: &Path, rel: &Path, cache: &mut ModSiteCache, depth: usize) -> bool {
-    let gated = |a: &[syn::Attribute]| a.iter().any(|x| x.path().is_ident("cfg") || x.path().is_ident("cfg_attr"));
-    if let Ok(txt) = std::fs::read_to_string(root.join(rel)) {
-        if has_inner_attr_marker(&txt) {
-            if let Ok(f) = syn::parse_file(&txt) {
-                if gated(&f.attrs) {
-                    return true;
-                }
-            }
-        }
-    }
-    let Some((name, dir)) = module_site(rel) else { return false };
-    let parents = [
-        dir.join("mod.rs"),
-        if dir.as_os_str().is_empty() { std::path::PathBuf::new() } else { dir.with_extension("rs") },
-        dir.join("lib.rs"),
-        dir.join("main.rs"),
-    ];
-    for prel in parents.iter() {
-        if prel.as_os_str().is_empty() || prel == rel {
-            continue;
-        }
-        let Some(f) = parse_module_file(root, prel, cache) else { continue };
-        if let Some(g) = declaring_mod_matches(&f.items, &name, |a| a.iter().any(|x| x.path().is_ident("cfg") || x.path().is_ident("cfg_attr"))) {
-            return g || file_module_may_be_arm_inner(root, prel, cache, depth + 1);
-        }
-    }
-    // No `mod` item declares it: a macro-written declaration, or a `#[path]` from elsewhere. Read the candidate parents' TEXT.
-    let fname = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let quoted = format!("\"{fname}\"");
-    let mod_decl = format!("mod {name}");
-    let mut dirs = vec![dir.clone()];
-    if let Some(p) = dir.parent() {
-        dirs.push(p.to_path_buf());
-    }
-    for d in dirs {
-        let Ok(rd) = std::fs::read_dir(root.join(&d)) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("rs") || p == root.join(rel) {
-                continue;
-            }
-            let Ok(t) = std::fs::read_to_string(&p) else { continue };
-            if (!fname.is_empty() && t.contains(&quoted)) || (t.contains(&mod_decl) && t.contains("cfg")) {
-                return true;
-            }
         }
     }
     false

@@ -635,7 +635,7 @@ pred('g5', 'g5_e@rescan', '-', '-', 'U')
 pred('g5', 'g5_e@rescan-incr', '-', '-', 'U')
 
 
-# ----------------------------------------------------------------------------------------------- N. no local macro (R1906, R1908)
+# ----------------------------------------------------------------------------------------------- N. no local macro (R1906; R1908 recorded)
 # Every cell above carries HDR's `macro_rules!`, which is what made the arm cover run at all: in a crate that defines NO macro the
 # cover never ran (SOUNDNESS R1906, Fable's cfg-twin lane A merge review, fixtures `nolocal*`). The hidden text here is a
 # DEPENDENCY's macro. `_ctl` is the one-variable calibration twin: the same crate plus one unrelated local `macro_rules!`, which
@@ -667,8 +667,8 @@ _N3 = ('#![allow(unused)]\nmacro_rules! unrelated_{id} { () => {} }\npub mod hel
        '#[cfg(unix)] pub fn gated_{id}() { EFF }\n#[cfg(not(unix))] pub fn gated_{id}() {}\n')
 cell('n3', {'main.rs': sub(_N3.replace('{G}', 'helpers_{id}'), id='n3')},
      [('n3_e', 'e', 'gated_n3()'), ('n3_tl', 'e', 'X_n3.with(|c| c.get())')], hdr=False,
-     note='R1908: local-module glob; gated_n3 (both arms visible) must read E with no U')
-pred('n3', 'n3_e', 'E', 'E+U', 'E'); pred('n3', 'n3_tl', 'E', 'E', 'E')
+     note='R1908: local-module glob; main over-holds gated_n3 (E+U). Recorded for the toolchain-shadowing design, no acceptance')
+pred('n3', 'n3_e', 'E', 'E+U', 'record'); pred('n3', 'n3_tl', 'E', 'E', 'E')
 cell('n3d', {'main.rs': sub(_N3.replace('{G}', 'fxdep_{id}'), id='n3d')},
      [('n3d_e', 'e', 'gated_n3d()'), ('n3d_tl', 'e', 'X_n3d.with(|c| c.get())')],
      deps={'fxdep_n3d': '{ path = "fxdep_n3d" }'}, extra={'@dep/fxdep_n3d/src/lib.rs': 'pub fn hd() {}\n'}, hdr=False,
