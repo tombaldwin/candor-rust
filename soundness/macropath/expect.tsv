@@ -49,6 +49,18 @@ l1ufcs	l1ufcs_e	Fs	-	-	U	U0F0	U0F0	U1F0
 l1ufcs	l1ufcs_q	none	-	-	U	U0F0	U0F0	U1F0
 l1use	l1use_e	Fs	-	-	U	U0F0	U0F0	U1F0
 l1use	l1use_q	none	-	-	U	U0F0	U0F0	U1F0
+s1fn	s1fn_e	Fs	I	I	I	U0F0	U0F0	U0F0
+s1fn	s1fn_e@chained	Fs	-	-	I	U0F0	U0F0	U0F0
+s1fn	s1fn_q	none	I	I	I	U0F0	U0F0	U0F0
+s1fn	s1fn_q@chained		-	-	-	U0F0	U0F0	U0F0
+s1path	s1path_e	Fs	I	I	I	U0F0	U0F0	U0F0
+s1path	s1path_e@chained	Fs	-	-	I	U0F0	U0F0	U0F0
+s1path	s1path_q	none	I	I	I	U0F0	U0F0	U0F0
+s1path	s1path_q@chained		-	-	I	U0F0	U0F0	U0F0
+s1use	s1use_e	Fs	I	I	I	U0F0	U0F0	U0F0
+s1use	s1use_e@chained	Fs	-	-	I	U0F0	U0F0	U0F0
+s1use	s1use_q	none	I	I	I	U0F0	U0F0	U0F0
+s1use	s1use_q@chained		-	-	I	U0F0	U0F0	U0F0
 tlpath	tlpath_e	Fs	I	I	I	U0F0	U0F0	U0F0
 tlpath	tlpath_e@chained	Fs	-	-	-	U0F0	U0F0	U0F0
 tlpath	tlpath_q	none	I	I	I	U0F0	U0F0	U0F0

@@ -185,6 +185,37 @@ cell('l1other', 'mod inner; mod defs; mod plain;\n', {'defs.rs': mk('l1other', D
      [('l1other_e', 'e', 'plain::call_l1other()')],
      note='X8: a VISIBLE fn named like a hidden one in ANOTHER module; the caller there is CHARGED, not hedged.')
 
+# ---- R1911 (rust-l1b-r1911): a dependency EXPRESSION macro whose expansion calls the dependency's effectful fn. A macro is not a
+# unit of the dependency's report, so chaining that report must not delete the standalone `invisible:[D]` disclosure. Every cell is
+# CHAINED (`@chained` rows); the writer `_e` and the pure twin `_q` carry the SAME bytes on every arm (the engine cannot tell them
+# apart), so the reading is a disclosure, never a verdict: both read `I` (`[]` + `invisible`) standalone AND chained.
+DEP_EXPR = (DEP_LIB + 'pub fn pure_{id}() -> u8 { 7 }\n'
+            '#[macro_export] macro_rules! mk { () => { $crate::emit() } }\n'
+            '#[macro_export] macro_rules! nop { () => { () } }\n')
+# S1 `D::mk!()` by path
+cell('s1path', 'mod inner;\n',
+     {'@dep/fxdeps1path/src/lib.rs': DEP_EXPR.replace('{id}', 's1path'),
+      'inner.rs': 'pub fn go_s1path() { fxdeps1path::mk!() }\npub fn qgo_s1path() { fxdeps1path::nop!() }\n'
+                  'pub fn via_s1path() { go_s1path() }\npub fn qvia_s1path() { qgo_s1path() }\n'},
+     [('s1path_e', 'e', 'inner::via_s1path()'), ('s1path_q', 'q', 'inner::qvia_s1path()')],
+     deps={'fxdeps1path': '{ path = "fxdeps1path" }'}, chain=dict(kind='dep', dep_dir='fxdeps1path'),
+     note='S1 (R1911): `D::mk!()` in expression position, one caller hop away. Chained, the disclosure must survive.')
+# S2 `use D::mk; mk!()`
+cell('s1use', 'mod inner;\n',
+     {'@dep/fxdeps1use/src/lib.rs': DEP_EXPR.replace('{id}', 's1use'),
+      'inner.rs': 'use fxdeps1use::{mk, nop};\npub fn go_s1use() { mk!() }\npub fn qgo_s1use() { nop!() }\n'},
+     [('s1use_e', 'e', 'inner::go_s1use()'), ('s1use_q', 'q', 'inner::qgo_s1use()')],
+     deps={'fxdeps1use': '{ path = "fxdeps1use" }'}, chain=dict(kind='dep', dep_dir='fxdeps1use'),
+     note='S2 (R1911): `use D::mk; mk!()`.')
+# S3 control: an ORDINARY pure fn of the same chained dependency is answered by the join and stays ABSENT (no over-disclosure),
+# beside a macro caller in the same crate that is disclosed.
+cell('s1fn', 'mod inner;\n',
+     {'@dep/fxdeps1fn/src/lib.rs': DEP_EXPR.replace('{id}', 's1fn'),
+      'inner.rs': 'pub fn go_s1fn() { fxdeps1fn::mk!() }\npub fn fnonly_s1fn() -> u8 { fxdeps1fn::pure_s1fn() }\n'},
+     [('s1fn_e', 'e', 'inner::go_s1fn()'), ('s1fn_q', 'q', '{ inner::fnonly_s1fn(); }')],
+     deps={'fxdeps1fn': '{ path = "fxdeps1fn" }'}, chain=dict(kind='dep', dep_dir='fxdeps1fn'),
+     note='S3 (R1911 control): a pure dependency FN call is answered by the chained report and reads ABSENT; only the macro caller is disclosed.')
+
 
 def cargo_toml(name, deps, is_dep=False):
     s = '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n' % name

@@ -1,0 +1,22 @@
+{
+ "chain": {
+  "dep_dir": "fxdeps1path",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdeps1path"
+ ],
+ "id": "s1path",
+ "lib": false,
+ "note": "S1 (R1911): `D::mk!()` in expression position, one caller hop away. Chained, the disclosure must survive.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "s1path_e"
+  },
+  {
+   "kind": "q",
+   "name": "s1path_q"
+  }
+ ]
+}

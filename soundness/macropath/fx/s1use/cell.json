@@ -1,0 +1,22 @@
+{
+ "chain": {
+  "dep_dir": "fxdeps1use",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdeps1use"
+ ],
+ "id": "s1use",
+ "lib": false,
+ "note": "S2 (R1911): `use D::mk; mk!()`.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "s1use_e"
+  },
+  {
+   "kind": "q",
+   "name": "s1use_q"
+  }
+ ]
+}

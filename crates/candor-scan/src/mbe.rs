@@ -2150,11 +2150,25 @@ impl Ctx<'_> {
                 }
             }
         };
+        // R1853 L1(b) COUNTER FACTS (rust-l1b-r1911) — which modules hold item-position hidden text the reader can read in full
+        // (`local`) and which hold text it cannot (`opaque`: a dependency macro, a `$m!`, a token-paster, an unreadable `include!`,
+        // or a past-the-bound read). Collected ALWAYS and read ONLY by the `CANDOR_L1B_INSTR` counter's stderr lines (`scan.rs`):
+        // no verdict reads them, and they are not part of `decl_index_digest`. Never gated on the environment, so the trace read
+        // stays a diagnostic one and the default output cannot depend on it.
+        let (mut l1b_local, mut l1b_opaque) = (false, false);
         for it in out {
             match it {
+                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) && !local(&m.mac) => {
+                    l1b_opaque = true;
+                }
                 syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) && local(&m.mac) => {
                     let mut h = Hidden::default();
                     self.read_hidden(&m.mac, None, out, &mut h, 0);
+                    if h.opaque {
+                        l1b_opaque = true;
+                    } else {
+                        l1b_local = true;
+                    }
                     absorb(&h, None);
                 }
                 syn::Item::Impl(im) if im.trait_.is_none() => {
@@ -2184,6 +2198,12 @@ impl Ctx<'_> {
                 _ => {}
             }
         }
+        if l1b_opaque {
+            ents.insert("O\u{1}opaque".to_string());
+        }
+        if l1b_local {
+            ents.insert("O\u{1}local".to_string());
+        }
         if ents.is_empty() {
             return None;
         }
@@ -2206,8 +2226,8 @@ const MINTED_MARK: &str = "__candor_macro_minted";
 /// `free` = `"<module qual>\u{1}<name>"` and `members` = `"<Owner>\u{1}<name>"`. Walked over the SPLICED items, so a marker an
 /// expansion wrote into a module it emitted is read at that module's qual. A `#[cfg(test)]` module is skipped as every other
 /// collector skips it.
-pub(crate) fn minted_facts(items: &[syn::Item], modpath: &str, include_tests: bool) -> (Vec<String>, Vec<String>) {
-    fn walk(items: &[syn::Item], modpath: &str, include_tests: bool, free: &mut Vec<String>, mem: &mut Vec<String>) {
+pub(crate) fn minted_facts(items: &[syn::Item], modpath: &str, include_tests: bool) -> (Vec<String>, Vec<String>, Vec<String>) {
+    fn walk(items: &[syn::Item], modpath: &str, include_tests: bool, free: &mut Vec<String>, mem: &mut Vec<String>, kinds: &mut Vec<String>) {
         for it in items {
             match it {
                 syn::Item::Verbatim(ts) => {
@@ -2230,6 +2250,8 @@ pub(crate) fn minted_facts(items: &[syn::Item], modpath: &str, include_tests: bo
                                 free.push(format!("{q}\u{1}{name}"));
                             } else if let Some(rest) = v.strip_prefix("M\u{1}") {
                                 mem.push(rest.to_string());
+                            } else if let Some(kind) = v.strip_prefix("O\u{1}") {
+                                kinds.push(format!("{modpath}\u{1}{kind}")); // the L1(b) counter's module facts
                             }
                         }
                     }
@@ -2237,20 +2259,20 @@ pub(crate) fn minted_facts(items: &[syn::Item], modpath: &str, include_tests: bo
                 syn::Item::Mod(m) if include_tests || !crate::lang::is_cfg_test(&m.attrs) => {
                     if let Some((_, inner)) = &m.content {
                         let sub = if modpath.is_empty() { m.ident.to_string() } else { format!("{modpath}::{}", m.ident) };
-                        walk(inner, &sub, include_tests, free, mem);
+                        walk(inner, &sub, include_tests, free, mem, kinds);
                     }
                 }
                 _ => {}
             }
         }
     }
-    let (mut f, mut m) = (Vec::new(), Vec::new());
-    walk(items, modpath, include_tests, &mut f, &mut m);
-    for v in [&mut f, &mut m] {
+    let (mut f, mut m, mut k) = (Vec::new(), Vec::new(), Vec::new());
+    walk(items, modpath, include_tests, &mut f, &mut m, &mut k);
+    for v in [&mut f, &mut m, &mut k] {
         v.sort();
         v.dedup();
     }
-    (f, m)
+    (f, m, k)
 }
 
 /// I1 stage 3 (R1813) — one body-position invocation's expansion, read: the impls it emits (at any block depth of the

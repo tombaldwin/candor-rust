@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev225 (rustagent-l1b, lane rust-l1b-r1911): SOUNDNESS R1911 — a dependency macro call into a CHAINED crate keeps its `invisible`
+    // disclosure (`scan.rs`, `MACRO_BLIND_PREFIX`); `FileDecls::macro_l1b_mods` (the L1(b) counter's module facts). A rev224 entry
+    // holds neither.
     // rev224 (rustagent-l1a, lane rust-macropath-l1a): SOUNDNESS R1853 — the names an unexpanded LOCAL item / impl-item / trait-item
     // invocation declares are exported (`FileDecls::macro_minted_free` / `macro_minted_members`), and a call that nothing resolved
     // and that names one is disclosed at the caller; a rev223 entry holds neither.
@@ -782,7 +785,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev224/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev225/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1001,6 +1004,10 @@ pub(crate) struct FileDecls {
     /// declares, `"<Owner>\u{1}<name>"`.
     #[serde(default)]
     pub(crate) macro_minted_members: Vec<String>,
+    /// rust-l1b-r1911 — the L1(b) COUNTER's module facts, `"<module qual>\u{1}opaque|local"`: the module holds item-position unexpanded
+    /// text this reader cannot read in full (`opaque`) / can (`local`). Read only by the `CANDOR_L1B_INSTR` stderr lines; in no digest.
+    #[serde(default)]
+    pub(crate) macro_l1b_mods: Vec<String>,
     /// ⟨0.39⟩ SPEC §4 obligation 2 — `"<owning crate>#<trait qual>::<method>" -> the LOCAL impl method
     /// quals implementing it`, for abstractions this file implements that it does NOT own. See
     /// `lang::collect_foreign_trait_impls`. A cache entry written before this field deserializes EMPTY,
@@ -1260,7 +1267,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // I1 stage 1 — the retirement input: which macros this file expanded in full, and which it still invokes unexpanded.
     let (i1_expanded, i1_unexpanded) = crate::mbe::expansion_facts(items);
     let (i1_xkeys, i1_renames, i1_gated_impls) = crate::mbe::twin_facts(items); // I1 stage 2c
-    let (minted_free, minted_members) = crate::mbe::minted_facts(items, modpath, include_tests); // R1853
+    let (minted_free, minted_members, l1b_mods) = crate::mbe::minted_facts(items, modpath, include_tests); // R1853
     let i1_arms = crate::mbe::arm_records(items, modpath, &dir, include_tests); // cfg-twin lane A
     let i1_hidden_impls = crate::mbe::has_hidden_impl_surface(items); // I1 (the R1804 exposure)
     let mut i1_foreign_macros = crate::mbe::foreign_bang_macros(items); // I1 (RC2: a bang macro in a body)
@@ -1390,6 +1397,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         i1_gated_impls,
         macro_minted_free: minted_free,
         macro_minted_members: minted_members,
+        macro_l1b_mods: l1b_mods,
         i1_arms,
         i1_claims: String::new(),
         nested_impl_members: nested_local.into_iter().collect(),
@@ -1487,6 +1495,8 @@ pub(crate) struct MergedDecls {
     /// R1853 — every file's `macro_minted_free` / `macro_minted_members`, unioned.
     pub(crate) macro_minted_free: std::collections::HashSet<String>,
     pub(crate) macro_minted_members: std::collections::HashSet<String>,
+    /// rust-l1b-r1911 — every file's `macro_l1b_mods`, unioned (counter only).
+    pub(crate) macro_l1b_mods: std::collections::HashSet<String>,
     /// ⟨0.39⟩ every file's FOREIGN-abstraction impls, unioned. See `FileDecls::foreign_impls`. Two files
     /// implementing the same foreign member for DIFFERENT types both contribute — the union over them is
     /// what the entry publishes, which is §4's bounded-CHA over-approximation, not a choice between them.
@@ -2558,6 +2568,9 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for n in &fd.macro_minted_members {
         acc.macro_minted_members.insert(n.clone()); // set union — order-independent (R1853)
     }
+    for n in &fd.macro_l1b_mods {
+        acc.macro_l1b_mods.insert(n.clone()); // set union — the counter's facts, in no digest
+    }
     for n in &fd.nonnominal_impls {
         acc.nonnominal_impls.insert(n.clone()); // set union — order-independent (R828)
     }
@@ -2961,7 +2974,11 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
     s.push('\n');
     // macro_minted_free / macro_minted_members — R1853, the caller-side hedge's evidence: read at the call resolver, so a file that
     // gains or loses an unexpanded local item invocation changes which callers hedge, in EVERY file.
-    for (name, set) in [("macro_minted_free", &m.macro_minted_free), ("macro_minted_members", &m.macro_minted_members)] {
+    for (name, set) in [
+        ("macro_minted_free", &m.macro_minted_free),
+        ("macro_minted_members", &m.macro_minted_members),
+        ("macro_l1b_mods", &m.macro_l1b_mods), // rust-l1b-r1911: the counter's facts (no verdict reads them; folded so the guard stays total)
+    ] {
         s.push_str(name);
         let mut v: Vec<&String> = set.iter().collect();
         v.sort();

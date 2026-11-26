@@ -16837,6 +16837,7 @@ trait G {
             // resolver, so a file gaining or losing one changes which callers hedge in EVERY other file.
             macro_minted_free => |m| { m.macro_minted_free.insert("inner\u{1}go".into()); },
             macro_minted_members => |m| { m.macro_minted_members.insert("S\u{1}go".into()); },
+            macro_l1b_mods => |m| { m.macro_l1b_mods.insert("inner\u{1}opaque".into()); },
             // ⟨0.39⟩: the abstractions this crate implements but does NOT own. Read at BOTH ends of the
             // rung — the published foreign interface-union entry, and the consumer-side edge to this
             // crate's own implementors — so a file gaining or losing such an impl changes what every
@@ -18542,7 +18543,7 @@ pub fn rebound() { let (r, _): (Runner, u32) = make(); let (r, _): (u32, u32) = 
             // `aborted` key at all, under the older schema token.
             let p = d.join(".candor/cache/scan-cache.json");
             let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-            let old = c["schema"].as_str().unwrap().replace("/rev224/", &format!("/{stale}/"));
+            let old = c["schema"].as_str().unwrap().replace("/rev225/", &format!("/{stale}/"));
             assert!(old.contains(stale), "the schema rev token moved — update this test: {c}");
             c["schema"] = serde_json::Value::String(old);
             for (_, e) in c["files"].as_object_mut().unwrap() {

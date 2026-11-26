@@ -1056,6 +1056,9 @@ const R1605_TRAITS: &[(&str, &str)] = &[("sea_orm", "EntityTrait")];
 /// SOUNDNESS R1591 — the calibration-list identifiers that are an EXTERN ALIAS, not a package name, with the package
 /// each stands for. The κ exemption is asked of the real package; an alias entry exempts only a rename to its package.
 const R1591_CALIBRATED_ALIASES: &[(&str, &str)] = &[("native_tls_crate", "native_tls")];
+/// SOUNDNESS R1911 (rust-l1b-r1911) — the `blind_direct` entry a dependency-macro call into a CHAINED crate files (`macro:<crate>`;
+/// a crate name holds no `:`). Read only by `blind_vis` and `has_blind`, and stripped before anything is written.
+const MACRO_BLIND_PREFIX: &str = "macro:";
 
 /// SOUNDNESS R1578 — TYPE AN UNCHAINED DEPENDENCY'S VALUE FROM ITS SOURCE. The collector records where an untyped
 /// receiver's value came from (`<cr>::<untyped>::<callee>::<method>`, and since round 3 the full provenance in
@@ -3319,6 +3322,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // dep crate root -> count of FLOORED call sites into it. Floored only: the tally has to mean the
     // same thing as the crate name beside it — calls whose effects this scan could not see.
     let mut dep_seen: HashMap<String, usize> = HashMap::new();
+    // SOUNDNESS R1911 — the dependency macro calls a chained report cannot answer, counted per crate (see the κ-ledger insertion).
+    let mut macro_dep_seen: HashMap<String, usize> = HashMap::new();
     // fn -> the dep crates it DIRECTLY calls into where the classifier floored the call. Post-filtered to
     // the genuinely-blind crates (not calibrated, no sibling report) + propagated transitively → the
     // per-fn `invisible` honesty disclosure (the κ ledger, but attributed per function).
@@ -4377,7 +4382,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // The κ ledger's coverage question, ONE authority: does a call into `cr` that no rule matched DISCLOSE (`invisible`) —
     // `true` — or is the crate covered (chained, calibrated within its ceiling, reviewed pure) so its silence is read as an
     // answer? Asked by the ledger filter below and by SOUNDNESS R1578's floor at the untyped-receiver marker.
-    let kappa_blind = |cr: &String| -> bool {
+    // `chained` = whether a sibling report may count as coverage. `kappa_blind_at(cr, false)` is the question R1911 asks: would a
+    // STANDALONE scan (no report for `cr`) have disclosed a call into it?
+    let kappa_blind_at = |cr: &String, chained: bool| -> bool {
         let real = dep_renames.get(cr.as_str()).map(String::as_str).unwrap_or(cr.as_str());
         // COVERED = a report exists for this crate AND the staleness gate did not refuse it AND the
         // report did not declare itself incomplete AND it judged at least one unit. The second,
@@ -4387,6 +4394,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             && !deps_idx.untrusted.contains(real)
             && !deps_idx.incomplete_pkgs.contains(real)
             && !deps_idx.judged_nothing_pkgs.contains(real);
+        // R1911: asked "as if nothing were chained" (`chained == false`), a sibling report covers nothing.
+        let covered = covered && chained;
         // A name Cargo.lock confirms is NOT the real registry crate loses every one of the three
         // CALIBRATED_* exemptions below outright — it is a different artifact wearing a reviewed
         // name, not the thing that was reviewed. Checked on `real` (Cargo.lock records the actual
@@ -4458,6 +4467,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // pure verdict is about the real crate too.
             && !(candor_classify::REVIEWED_PURE_CRATES.contains(&real) && !impostor)
     };
+    let kappa_blind = |cr: &String| -> bool { kappa_blind_at(cr, true) };
     // SOUNDNESS R1605 — a re-exported name for an `R1605_TRAITS` implementor (`pub use post::Entity as Post`) -> its leaf.
     let r1605_aliases: HashMap<String, String> = merged
         .reexports
@@ -6140,6 +6150,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     //      adversarial-review response. STATED, not silently absorbed: needs its own design
                     //      pass and a BACKLOG entry.
                     blind_direct.entry(f.qual.clone()).or_default().insert(cr.to_string());
+                }
+                // SOUNDNESS R1911 (rust-l1b-r1911) — A DEPENDENCY MACRO'S EXPANSION IS NOT A UNIT, SO A CHAINED REPORT CANNOT ANSWER IT.
+                // `D::mk!()` / `use D::mk; mk!()` whose `macro_rules!` expansion calls D's effectful fn read `[] invisible:[D]` scanned
+                // alone and were ABSENT with "nothing hidden" once D's report was chained: the κ ledger above counts the call, and the
+                // filter below drops a crate a sibling report COVERS, on the reading that the report's silence about a key is an
+                // answer. A macro is not a report key (`mk` is no unit of D), so the report was never asked and its silence answers
+                // nothing; chaining deleted a disclosure the unchained scan made (SPEC §4 ⟨0.39⟩: "a mechanism that makes reports
+                // better must not make silence cheaper"). Same bytes for the writer and its pure twin on every arm, so this is the
+                // SAME disclosure the standalone scan makes and no more: `invisible:[D]`, never a charge and never `Unknown`.
+                // EXACTLY the crates the chain flipped (blind unchained, covered chained), so a classifier-covered macro head
+                // (`classified`, e.g. `log::info!`), a calibrated or reviewed-pure crate and an unchained one are untouched.
+                if c.is_macro && classified.is_none() && !kappa_blind(&cr.to_string()) && kappa_blind_at(&cr.to_string(), false) {
+                    blind_direct.entry(f.qual.clone()).or_default().insert(format!("{MACRO_BLIND_PREFIX}{cr}"));
+                    *macro_dep_seen.entry(cr.to_string()).or_insert(0) += 1;
+                    if candor_report::env::trace("CANDOR_R1911_INSTR") {
+                        eprintln!("R1911MACRO\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                    }
                 }
             }
             // (The CANDOR_DEPS cross-crate JOIN moved BELOW — it must run AFTER `resolved_local`/
@@ -9142,6 +9169,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !matches!(c.leaf.as_str(), "Some" | "Ok" | "Err" | "drop" | "size_of" | "size_of_val" | "align_of" | "align_of_val")
                 && minted_scope_names(&f.qual, &c.path, &c.leaf, &local_types, trait_decls, &minted_scope)
             {
+                if candor_report::env::trace("CANDOR_L1B_INSTR") {
+                    eprintln!("L1BSITE\tb1-hedged\t{}\t{}", f.qual, c.path); // L1(b) counter: what L1(a) hedges
+                }
                 if candor_report::env::trace("CANDOR_R1853L1_INSTR") {
                     eprintln!("R1853FREE\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
                 }
@@ -9156,6 +9186,67 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if owner_is_type { "macro:impl members hidden by an unexpanded macro" } else { "macro:module items hidden by an unexpanded macro" }
                         .to_string(),
                 );
+            }
+            // L1(b) COUNTER (rust-l1b-r1911, Fable's review §2) — MEASUREMENT ONLY, behind `CANDOR_L1B_INSTR`, no behaviour. An
+            // UNRESOLVED BARE call (single segment: a `use`-imported name carries its module and R128 owns it) that nothing above
+            // hedged, partitioned by what the caller's module's unexpanded item text is: `b2` = it holds OPAQUE text (a dependency
+            // item macro, `$m!`, a token-paster, a past-the-bound read) and no glob import; `glob` = the module has a glob import (or
+            // is in an opaque module's glob closure), counted apart; `b0-local-undeclared` = every hidden invocation in the module is
+            // locally readable and the name is NOT one it declares (silent by evidence, the reason L1(a) does not flood);
+            // `r145` = already hedged by the unreadable-include arm. The name must bind no unit in the module, no `use`, no local
+            // type, and not be a std-prelude function; a closure-local or let-bound callee is not a collector call at all.
+            if candor_report::env::trace("CANDOR_L1B_INSTR")
+                && !r128_fired
+                && !c.is_macro
+                && !c.method
+                && !c.typed
+                && !already_handled
+                && !c.path.contains("::")
+                && !c.path.starts_with('<')
+                && !local_types.contains(&c.leaf)
+                && !matches!(c.leaf.as_str(), "Some" | "Ok" | "Err" | "drop" | "size_of" | "size_of_val" | "align_of" | "align_of_val")
+                && !(!minted_scope.is_empty() && minted_scope_names(&f.qual, &c.path, &c.leaf, &local_types, trait_decls, &minted_scope))
+            {
+                let segs: Vec<&str> = f.qual.split("::").collect();
+                let n = segs.len();
+                let module = if n >= 2 && (local_types.contains(segs[n - 2]) || trait_decls.contains_key(segs[n - 2])) {
+                    segs[..n - 2].join("::")
+                } else {
+                    segs[..n.saturating_sub(1)].join("::")
+                };
+                let sent = |s: &str| merged.macro_l1b_mods.contains(&format!("{module}\u{1}{s}"));
+                let own_opaque = sent("opaque");
+                let own_local = sent("local");
+                // an OPAQUE module's names reach every module that glob-imports it (R145's closure, as `minted_scope`)
+                let opaque_free: std::collections::HashSet<String> = merged
+                    .macro_l1b_mods
+                    .iter()
+                    .filter_map(|e| e.strip_suffix("\u{1}opaque").map(|m| format!("{m}\u{1}opaque")))
+                    .collect();
+                let clos_opaque = crate::lang::minted_scope(&opaque_free, &merged.local_globs)
+                    .get(&module)
+                    .is_some_and(|n| n.contains("opaque"));
+                let bound_here = by_leaf.get(&c.leaf).is_some_and(|v| v.iter().any(|q| *q == crate::decls::qualify(&module, &c.leaf)))
+                    || merged.use_bound.contains(&crate::decls::qualify(&module, &c.leaf));
+                let has_glob = merged.use_bound.contains(&crate::decls::qualify(&module, "*"));
+                let bucket = if bound_here {
+                    None
+                } else if opaque_scope_names(&f.qual, &c.path, &local_types, trait_decls, &opaque_scope) {
+                    Some("r145")
+                } else if own_opaque && !has_glob {
+                    Some("b2")
+                } else if own_opaque || clos_opaque {
+                    Some("glob")
+                } else if own_local {
+                    Some("b0-local-undeclared")
+                } else {
+                    None
+                };
+                if let Some(b) = bucket {
+                    let upper = c.leaf.chars().next().is_some_and(|ch| ch.is_ascii_uppercase());
+                    let named = merged.macro_hidden_fns.contains(&c.leaf); // R452's evidence: some unexpanded text in the crate writes `fn <name>`
+                    eprintln!("L1BSITE\t{b}\t{}\t{}\tmodule={module}\tupper={upper}\tnamed={named}", f.qual, c.path);
+                }
             }
         }
         sc_step!();
@@ -10413,6 +10504,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // so it never appears in `dep_seen` — keep it so the consumer's `invisible` survives the filter ([8]).
     let global_blind: std::collections::HashSet<String> =
         global_blind.into_iter().chain(dep_invisible).collect();
+    // SOUNDNESS R1911 — a unit's DISCLOSED blind crates: the crate-level filter above, PLUS the dependency-macro marks
+    // (`macro:<crate>`, filed per UNIT at the κ-ledger insertion) which that filter would drop for a chained crate. The mark
+    // is per unit, never per crate, so a unit calling a chained crate's ordinary `fn` is untouched. Output names are plain.
+    let blind_vis = |s: &BTreeSet<String>| -> BTreeSet<String> {
+        s.iter()
+            .filter_map(|c| match c.strip_prefix(MACRO_BLIND_PREFIX) {
+                Some(d) => Some(d.to_string()),
+                None => global_blind.contains(c).then(|| c.clone()),
+            })
+            .collect()
+    };
+    // …and the envelope's `coverage.uncovered` (and the gate verdict's coverage note) names the crate once per scan as the
+    // standalone scan does, with the macro call count. Added AFTER `global_blind` so the crate stays un-blind everywhere else.
+    for (cr, n) in &macro_dep_seen {
+        if !coverage_ledger.iter().any(|(c, _)| c == cr) {
+            coverage_ledger.push((cr.clone(), *n));
+        }
+    }
+    coverage_ledger.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
     // ⟨0.20⟩ Net destination-class (NET-DESTINATION-CLASS-DESIGN.md): the config `net-partner` hosts, read
     // here (before the entries) so the report's per-fn `netClass` carries known-partner — the SAME set the
@@ -10474,7 +10584,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let inf = inferred.get(q).cloned().unwrap_or_default();
         // Keep a pure fn if it has a BLIND reach — so the honesty disclosure survives on exactly the
         // `inferred: []` fns that need it (else `invisible` would be dropped with the pure entry).
-        let has_blind = blind_acc.get(q).is_some_and(|s| s.iter().any(|c| global_blind.contains(c)));
+        let has_blind = blind_acc.get(q).is_some_and(|s| s.iter().any(|c| global_blind.contains(c) || c.starts_with(MACRO_BLIND_PREFIX)));
         // ⟨0.39⟩ …AND KEEP A PURE FN THAT DISPATCHES. §2 rule 3 omits pure functions and §2 chaining rule 3
         // makes that absence a POSITIVE purity claim — which is the whole defect: a dispatching function
         // whose only visible implementor happens to be pure vanished from the report, so ADDING A PURE
@@ -10559,7 +10669,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // LOWER BOUND when this is non-empty.
             invisible: blind_acc
                 .get(q)
-                .map(|s| s.iter().filter(|c| global_blind.contains(*c)).cloned().collect())
+                .map(|s| blind_vis(s).into_iter().collect())
                 .unwrap_or_default(),
             // Masking-incomplete effects — carried so a CANDOR_DEPS consumer inherits the incompleteness
             // across the crate boundary (sweep [30]); the gate already fails closed locally on it.
@@ -11031,8 +11141,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         }
                         union_dispatch_hedge(&cand, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u, &mut don_u); // R1324
                         if let Some(s) = blind_acc.get(&cand) {
-                            for c in s.iter().filter(|c| global_blind.contains(*c)) {
-                                blind_u.insert(c.clone());
+                            for c in blind_vis(s) {
+                                blind_u.insert(c);
                             }
                         }
                         // SOUNDNESS R513 — THE IMPL'S UNIT IS MODULE-QUALIFIED AND `trait_impls` IS NOT.
@@ -11080,7 +11190,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     union_why(&ts[0], &mut why_u); // R1268
                                 }
                                 if let Some(s) = blind_acc.get(&ts[0]) {
-                                    blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                                    blind_u.extend(blind_vis(s));
                                 }
                             }
                         }
@@ -11109,7 +11219,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             }
                             union_dispatch_hedge(&q, &format!("{trait_leaf}::{method}"), &mut inf_u, &mut why_u, &mut don_u);
                             if let Some(s) = blind_acc.get(&q) {
-                                blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                                blind_u.extend(blind_vis(s));
                             }
                         }
                     }
@@ -11152,7 +11262,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             }
                         }
                         if let Some(s) = blind_acc.get(q) {
-                            blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                            blind_u.extend(blind_vis(s));
                         }
                     }
                 }
@@ -11432,7 +11542,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 union_dispatch_hedge(cand, &own_tail, &mut inf_u, &mut why_u, &mut don_u); // R1324
                 if let Some(s) = blind_acc.get(cand) {
-                    blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                    blind_u.extend(blind_vis(s));
                 }
                 // `foreign_impls` values are 2-segment `Type::method` tails; a module-qualified unit is
                 // reached through the same tail2 index every other resolution uses, and ONLY when the tail
@@ -11446,7 +11556,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             union_why(&ts[0], &mut why_u); // R1268
                         }
                         if let Some(s) = blind_acc.get(&ts[0]) {
-                            blind_u.extend(s.iter().filter(|c| global_blind.contains(*c)).cloned());
+                            blind_u.extend(blind_vis(s));
                         }
                     }
                 }

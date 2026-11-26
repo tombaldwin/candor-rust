@@ -1,0 +1,22 @@
+{
+ "chain": {
+  "dep_dir": "fxdeps1fn",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdeps1fn"
+ ],
+ "id": "s1fn",
+ "lib": false,
+ "note": "S3 (R1911 control): a pure dependency FN call is answered by the chained report and reads ABSENT; only the macro caller is disclosed.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "s1fn_e"
+  },
+  {
+   "kind": "q",
+   "name": "s1fn_q"
+  }
+ ]
+}

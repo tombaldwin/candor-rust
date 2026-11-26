@@ -6670,9 +6670,16 @@ fn r894_a_dependencys_published_foreign_import_is_unknown_native_when_chained() 
     assert_eq!(row(&v, "direct"), native, "{v:#}");
     assert_eq!(row(&v, "direct_mod"), native, "{v:#}");
     assert_eq!(row(&v, "via_wrapper"), native, "unchanged: {v:#}");
-    for pure in ["c_pure", "c_tuple", "c_variant", "c_macro"] {
+    for pure in ["c_pure", "c_tuple", "c_variant"] {
         assert_eq!(row(&v, pure), None, "{pure} must stay pure: {v:#}");
     }
+    // SOUNDNESS R1911 — a dependency MACRO is not a unit of the chained report, so the report cannot answer it: the call keeps the
+    // `invisible:[xdep]` disclosure the unchained scan makes (it used to read ABSENT, a purity claim about an expansion nothing
+    // read). Still no effect and no `Unknown`: the macro below expands to its argument, and the engine cannot tell it from a writer.
+    assert_eq!(row(&v, "c_macro"), Some((vec![], vec![])), "c_macro: no charge, no hedge: {v:#}");
+    let cm = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "c_macro");
+    assert!(cm.is_some_and(|f| f["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "xdep"))),
+        "c_macro keeps its `invisible` disclosure when xdep is chained: {v:#}");
     assert_eq!(row(&v, "sys_direct"), native, "a declarations-only crate's declaration still joins: {v:#}");
     let reexp = v["functions"].as_array().unwrap().iter().find(|f| f["fn"] == "sys_reexport");
     assert!(reexp.is_some_and(|f| f["invisible"].as_array().is_some_and(|a| a.iter().any(|x| x == "xsys"))),

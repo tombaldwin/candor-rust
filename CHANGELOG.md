@@ -11,6 +11,19 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Lane rust-l1b-r1911: a dependency EXPRESSION macro keeps its `invisible` disclosure when the dependency's report is chained (SOUNDNESS R1911, adds a disclosure).**
+  `D::mk!()` / `use D::mk; mk!()` whose `macro_rules!` expansion calls D's effectful fn read `[]` with `invisible:[D]` scanned alone and
+  were ABSENT, with no `coverage.uncovered` and "nothing hidden", once D's real report was chained: a macro is not a unit of the report,
+  so the join was never asked a question the report could answer, and the κ ledger dropped a crate a sibling report "covers". The
+  chained scan now keeps exactly the disclosure the unchained one makes, per UNIT (a unit that calls only a chained crate's ordinary,
+  answered fns is untouched): `invisible:[D]` and `coverage.uncovered`, never a charge and never `Unknown`, so no gate verdict moves.
+  Classifier-covered macro heads (`log`, `tracing`), calibrated and reviewed-pure crates are unchanged. Additive; no kill switch;
+  cache rev 225.
+- **Lane rust-l1b-r1911: the L1(b) counter (measurement only).** `CANDOR_L1B_INSTR=1` prints `L1BSITE` lines on stderr for unresolved
+  bare calls in a module holding unexpanded item text, split into what L1(a) hedges (`b1-hedged`), what a locally readable text does
+  NOT declare (`b0-local-undeclared`), what a module holding OPAQUE text (a dependency item macro, `$m!`, an unreadable `include!`)
+  leaves unresolved (`b2`), and the same with a glob import (`glob`). Default output is byte-identical with and without the variable;
+  the counting run uses its own cache namespace.
 - ⚠ **Lane rust-macropath-l1a: the CALLER side of unexpanded local item / impl-item / trait-item text (SOUNDNESS R1853, adds `Unknown`).**
   A local macro invocation the scanner leaves unexpanded (a path invocation such as `self::mkfn! { go }` is never bound) was
   disclosed only to the caller that spelled the hidden module's `crate::` path. Every other caller of a name that text declares read
