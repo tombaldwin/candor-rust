@@ -905,7 +905,25 @@ pub(crate) fn file_tc_reexports(items: &[syn::Item]) -> Vec<(String, Option<Stri
         TOOLCHAIN_BANG_MACROS.iter().filter(|n| names.contains(**n)).map(|n| (tc_reexport_key(n), None)).collect();
     // A glob that may carry another crate's macros (`pub use dep::*;` in an out-of-line `mod prelude;`, Fable's merge review D2,
     // f4d) can re-export ANY toolchain name to a module that globs this one: recorded as the wildcard.
-    if foreign_glob_in(items) {
+    // `#[cfg(test)]` modules are left out: they are not scanned, and their `use wasm_bindgen_test::*;` re-exports nothing to a
+    // non-test module (uuid: six rows gained a false `macro:` reason in the round-1 A/B).
+    fn strip_test(items: &[syn::Item]) -> Vec<syn::Item> {
+        items
+            .iter()
+            .filter(|it| !matches!(it, syn::Item::Mod(m) if crate::lang::is_cfg_test(&m.attrs)))
+            .map(|it| match it {
+                syn::Item::Mod(m) if m.content.is_some() => {
+                    let mut m = m.clone();
+                    if let Some((_, inner)) = &mut m.content {
+                        *inner = strip_test(inner);
+                    }
+                    syn::Item::Mod(m)
+                }
+                other => other.clone(),
+            })
+            .collect()
+    }
+    if foreign_glob_in(&strip_test(items)) {
         v.push((tc_reexport_key("*"), None));
     }
     v
