@@ -183,3 +183,28 @@ fn walk(d: &Path) -> Vec<PathBuf> {
     }
     v
 }
+
+#[test]
+fn a_hand_written_macro_arm_keeps_expanding_beside_the_disclosure() {
+    // The removal this lane's first corpus A/B found: marking a hand-written `macro_rules!` arm as an R208 twin stopped it
+    // expanding in some positions, and serde_core's `IpAddr::deserialize` lost the calls (and two `dispatchesOn` keys) its
+    // nested expansion made. This one-file shape does not reproduce that position (the A/B is the evidence for it); it pins
+    // the requirement: the arm keeps its effect AND discloses that its twin may be hidden text.
+    let d = tmp("mdef");
+    let w = "::std::fs::write(::std::env::var(\"MARK\").unwrap(), b\"x\").unwrap();";
+    std::fs::create_dir_all(d.join("crate/src")).unwrap();
+    std::fs::write(d.join("crate/Cargo.toml"), "[package]\nname = \"mdefhand\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n").unwrap();
+    std::fs::write(
+        d.join("crate/src/lib.rs"),
+        format!(
+            "#[macro_export] macro_rules! wmdef {{ ($n:ident) => {{ macro_rules! $n {{ () => {{ {w} }} }} }} }}\n\
+             #[cfg(unix)] crate::wmdef! {{ kh }}\n\
+             #[cfg(not(unix))] macro_rules! kh {{ () => {{ {w} }} }}\n\
+             pub fn via_kh() {{ kh!() }}\n"
+        ),
+    )
+    .unwrap();
+    let r = scan(&d.join("crate"), &d, &[]);
+    assert!(effect(&r, "via_kh"), "the visible arm's expansion must stay charged: {:?}", row(&r, "via_kh"));
+    assert!(unknown(&r, "via_kh"), "and disclose the hidden twin: {:?}", row(&r, "via_kh"));
+}

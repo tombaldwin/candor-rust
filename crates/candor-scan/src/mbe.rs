@@ -2534,6 +2534,13 @@ fn cover_any(it: &mut syn::Item, hand: bool) {
                 eprintln!("CFGTWINRESIDUAL\t{}", if matches!(it, syn::Item::Use(_)) { "use" } else { "type" }); // §E1 REACH COUNTER
             }
         }
+        // a hand-written `macro_rules!` arm keeps expanding (`MBE_TWIN_HAND_DEF_ATTR`: R208's disclosure only)
+        syn::Item::Macro(m) if m.ident.is_some() => {
+            if !m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_HAND_DEF_ATTR)) {
+                let id = syn::Ident::new(crate::model::MBE_TWIN_HAND_DEF_ATTR, proc_macro2::Span::call_site());
+                m.attrs.push(syn::parse_quote!(#[#id]));
+            }
+        }
         syn::Item::Mod(m) => {
             if candor_report::env::trace("CANDOR_I1_INSTR") {
                 eprintln!("I1S2MARKMOD\t{}", m.ident); // §E1 REACH COUNTER, on the ADDED branch only
@@ -4106,7 +4113,7 @@ const BUILTIN: &[&str] = &[
     "candor_i1_hidden_twin", "candor_mbe_op", "candor_mbe_prim_op", "candor_derive_synth",
     // I1 stage 3 — the emitted-definition and produced-twin marks (`model::MBE_EMITTED_DEF_ATTR`, `MBE_TWIN_DEF_ATTR`). Unlisted,
     // they held every crate with an emitted `macro_rules!` unclosable (Fable stage-3 review D2, `fmarkerhold2`).
-    "__candor_i1_emitted_def", "__candor_i1_twin_def",
+    "__candor_i1_emitted_def", "__candor_i1_twin_def", "__candor_i1_twin_def_hand",
 ];
 const STD_ITEM_MACROS: &[&str] = &["macro_rules", "thread_local", "include", "compile_error", "global_asm", "asm"];
 fn derive_hides(list: &syn::punctuated::Punctuated<syn::Path, syn::Token![,]>) -> bool {
@@ -4864,6 +4871,7 @@ mod tests {
             "candor_i1_hidden_twin",
             crate::model::MBE_EMITTED_DEF_ATTR,
             crate::model::MBE_TWIN_DEF_ATTR,
+            crate::model::MBE_TWIN_HAND_DEF_ATTR,
         ] {
             let f: syn::File = syn::parse_str(&format!("#[{m}] impl X {{ #[{m}] fn f(&self) {{}} }} pub struct X;")).unwrap();
             assert!(!super::has_hidden_impl_surface(&f.items), "{m} read as an attribute macro");

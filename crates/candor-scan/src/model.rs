@@ -1033,6 +1033,14 @@ pub(crate) fn async_ret_key(type_leaf: &str) -> String {
 /// I1 stage 3 (R1784) — the marker `mbe::cover_arm` puts on a produced `macro_rules!` arm whose cfg twin may be in hidden text:
 /// Pass A records the name as a `#[cfg]` twin (R208), so a body-position invocation discloses instead of expanding this arm.
 pub(crate) const MBE_TWIN_DEF_ATTR: &str = "__candor_i1_twin_def";
+/// cfg-twin lane A — the marker for a HAND-WRITTEN `macro_rules!` arm whose cfg twin may be in hidden text. Unlike
+/// `MBE_TWIN_DEF_ATTR` it must not stop the arm from expanding (a hand-written arm was always expanded, and refusing it
+/// removed the calls its expansion makes: serde_core's `IpAddr::deserialize` lost two `dispatchesOn` keys in this lane's
+/// A/B); Pass A files it under `MACRO_TWIN_DISCLOSE_PREFIX`, which only R208's disclosure reads.
+pub(crate) const MBE_TWIN_HAND_DEF_ATTR: &str = "__candor_i1_twin_def_hand";
+/// cfg-twin lane A — prefix of a `macro_twins` entry that adds R208's `ambiguous:` disclosure at an invocation and changes
+/// nothing else (`MBE_TWIN_HAND_DEF_ATTR`).
+pub(crate) const MACRO_TWIN_DISCLOSE_PREFIX: &str = "\u{2}twindisclose:";
 /// I1 stage 3 (R1784) — the marker `mbe::Ctx::splice` puts on a `macro_rules!` definition an EXPANSION emitted. Every crate-wide
 /// name-keyed table records such a definition under `EMITTED_MACRO_PREFIX` + name, read only for a name no SOURCE definition has:
 /// a cfg-wrapped definition (`cfg_net! { macro_rules! syscall {..} }` in a sibling module) otherwise joined the source definition

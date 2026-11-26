@@ -6506,6 +6506,10 @@ pub(crate) fn collect_decls(
                     if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_DEF_ATTR)) {
                         macro_twins.insert(name.clone());
                     }
+                    // cfg-twin lane A — a hand-written arm: the disclosure only, the expansion untouched.
+                    if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_HAND_DEF_ATTR)) {
+                        macro_twins.insert(format!("{}{name}", crate::model::MACRO_TWIN_DISCLOSE_PREFIX));
+                    }
                     if gated {
                         macro_twins.insert(gate_key.clone());
                     }

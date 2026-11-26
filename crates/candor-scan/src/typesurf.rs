@@ -117,7 +117,7 @@ fn attr_is_builtin(a: &syn::Attribute) -> bool {
 /// I1 stage 3 — candor's own emitted-definition and produced-twin marks (`model::MBE_EMITTED_DEF_ATTR`, `MBE_TWIN_DEF_ATTR`) are
 /// not attribute macros. Read as one, every crate with an emitted `macro_rules!` was held unclosable (Fable stage-3 review D2).
 fn is_stage3_marker(one: &str) -> bool {
-    one == crate::model::MBE_EMITTED_DEF_ATTR || one == crate::model::MBE_TWIN_DEF_ATTR
+    one == crate::model::MBE_EMITTED_DEF_ATTR || one == crate::model::MBE_TWIN_DEF_ATTR || one == crate::model::MBE_TWIN_HAND_DEF_ATTR
 }
 
 /// `cfg_attr(pred, a, b)`: the attributes it may apply, as (path, is a `derive`, the derive names).
