@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "e5b",
+ "lib": false,
+ "note": "visible member effectful",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e5b_e"
+  }
+ ]
+}

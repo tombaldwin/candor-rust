@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "e6",
+ "lib": false,
+ "note": "",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e6_e"
+  }
+ ]
+}

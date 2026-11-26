@@ -1,0 +1,18 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_e14",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_e14"
+ ],
+ "id": "e14",
+ "lib": false,
+ "note": "",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e14_e"
+  }
+ ]
+}

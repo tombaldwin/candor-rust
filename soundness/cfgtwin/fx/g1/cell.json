@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "g1",
+ "lib": false,
+ "note": "fabrication control: _e E with no U; _q P on every arm",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "g1_e"
+  },
+  {
+   "kind": "q",
+   "name": "g1_q"
+  }
+ ]
+}

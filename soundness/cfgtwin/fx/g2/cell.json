@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "g2",
+ "lib": false,
+ "note": "_q must read P on every arm; other_g2 (_e) U",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "g2_e"
+  },
+  {
+   "kind": "q",
+   "name": "g2_q"
+  }
+ ]
+}

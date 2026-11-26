@@ -1,0 +1,15 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_h9"
+ ],
+ "id": "h9",
+ "lib": false,
+ "note": "imported shadow; LIVE re-imports via `use super::thread_local` so the bare name resolves inside the child module",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "h9_e"
+  }
+ ]
+}

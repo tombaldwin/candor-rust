@@ -1,0 +1,8 @@
+[package]
+name = "cf_p4d6"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[workspace]

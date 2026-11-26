@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "e4",
+ "lib": false,
+ "note": "other_e4 stays P",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e4_e"
+  },
+  {
+   "kind": "q",
+   "name": "e4_q"
+  }
+ ]
+}

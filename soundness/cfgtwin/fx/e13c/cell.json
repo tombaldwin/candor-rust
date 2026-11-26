@@ -1,0 +1,18 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_e13c",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_e13c"
+ ],
+ "id": "e13c",
+ "lib": false,
+ "note": "chain-liveness control: unchained `-`, chained must be E",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e13c_e"
+  }
+ ]
+}

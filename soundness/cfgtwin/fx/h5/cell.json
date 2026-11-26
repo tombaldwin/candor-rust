@@ -1,0 +1,19 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_h5"
+ ],
+ "id": "h5",
+ "lib": false,
+ "note": "",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "h5_e"
+  },
+  {
+   "kind": "q",
+   "name": "h5_q"
+  }
+ ]
+}

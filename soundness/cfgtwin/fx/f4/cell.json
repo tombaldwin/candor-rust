@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "f4",
+ "lib": false,
+ "note": "child module emits kk before the parent source defines it; invoked inside the child",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f4_e"
+  },
+  {
+   "kind": "q",
+   "name": "f4_q"
+  }
+ ]
+}

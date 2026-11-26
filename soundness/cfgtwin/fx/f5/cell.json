@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "f5",
+ "lib": false,
+ "note": "path-invocation class: record only (D5.2 known silence), not lane B acceptance",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f5_e"
+  }
+ ]
+}

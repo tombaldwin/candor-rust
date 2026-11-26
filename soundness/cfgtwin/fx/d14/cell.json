@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d14",
+ "lib": false,
+ "note": "MEASURE: no acceptance until queue item Q3 is decided",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d14_e"
+  }
+ ]
+}

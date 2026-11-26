@@ -1,0 +1,19 @@
+{
+ "chain": null,
+ "deps": [
+  "cfg-if"
+ ],
+ "id": "d9v5",
+ "lib": false,
+ "note": "",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d9v5_e"
+  },
+  {
+   "kind": "q",
+   "name": "d9v5_q"
+  }
+ ]
+}

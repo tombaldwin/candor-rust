@@ -1,0 +1,9 @@
+[package]
+name = "cons_e9"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fx_e9 = { package = "cf_e9", path = ".." }
+
+[workspace]

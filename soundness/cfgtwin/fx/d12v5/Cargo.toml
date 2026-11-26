@@ -1,0 +1,8 @@
+[package]
+name = "cf_d12v5"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[workspace]

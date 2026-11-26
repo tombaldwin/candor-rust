@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "p3d6",
+ "lib": false,
+ "note": "",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "p3d6_e"
+  },
+  {
+   "kind": "q",
+   "name": "p3d6_q"
+  }
+ ]
+}

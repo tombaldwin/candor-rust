@@ -1,0 +1,9 @@
+[package]
+name = "cf_d8v8"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cfg-if = "1.0"
+
+[workspace]

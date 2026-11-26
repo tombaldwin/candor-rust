@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d13b",
+ "lib": false,
+ "note": "D13b: member-leg control: visible impl overrides, so pub reads U and cand must stay =pub",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d13b_e"
+  }
+ ]
+}

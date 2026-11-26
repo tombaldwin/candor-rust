@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d10v5",
+ "lib": false,
+ "note": "",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d10v5_e"
+  },
+  {
+   "kind": "q",
+   "name": "d10v5_q"
+  }
+ ]
+}

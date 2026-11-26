@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "h6b",
+ "lib": false,
+ "note": "initialiser effect: a 0 on any arm is a row outside lane A",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "h6b_e"
+  },
+  {
+   "kind": "q",
+   "name": "h6b_q"
+  }
+ ]
+}

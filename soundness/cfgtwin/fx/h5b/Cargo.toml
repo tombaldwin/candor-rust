@@ -1,0 +1,9 @@
+[package]
+name = "cf_h5b"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_h5b = { path = "fxdep_h5b" }
+
+[workspace]

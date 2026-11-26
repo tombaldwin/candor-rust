@@ -1,0 +1,21 @@
+{
+ "chain": {
+  "consumer_files": {
+   "src/lib.rs": "pub fn c_u8d6_e() { use fx_u8d6::m_u8d6::T_u8d6; fx_u8d6::Q.go_u8d6() }\n"
+  },
+  "consumer_probe": "c_u8d6_e",
+  "dep_name": "fx_u8d6",
+  "dep_package": "cf_u8d6",
+  "kind": "consumer"
+ },
+ "deps": [],
+ "id": "u8d6",
+ "lib": true,
+ "note": "producer is lib+bin; probe c_u8d6_e lives in cons/ and is scanned CHAINED against the producer report",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "u8d6_e"
+  }
+ ]
+}

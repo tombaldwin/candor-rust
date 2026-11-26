@@ -1,0 +1,15 @@
+{
+ "chain": null,
+ "deps": [
+  "paste"
+ ],
+ "id": "h10",
+ "lib": false,
+ "note": "",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "h10_e"
+  }
+ ]
+}

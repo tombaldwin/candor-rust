@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "h4",
+ "lib": false,
+ "note": "LIVE begins with `use super::wtr_h4;`: a root-level `use` is not visible bare inside the child module, so the import is re-exposed",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "h4_e"
+  },
+  {
+   "kind": "q",
+   "name": "h4_q"
+  }
+ ]
+}

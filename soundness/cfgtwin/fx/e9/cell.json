@@ -1,0 +1,21 @@
+{
+ "chain": {
+  "consumer_files": {
+   "src/lib.rs": "pub fn c_e9_e() { use fx_e9::ExtG_e9; fx_e9::QG_e9.go_e9() }\n"
+  },
+  "consumer_probe": "c_e9_e",
+  "dep_name": "fx_e9",
+  "dep_package": "cf_e9",
+  "kind": "consumer"
+ },
+ "deps": [],
+ "id": "e9",
+ "lib": true,
+ "note": "",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e9_e"
+  }
+ ]
+}

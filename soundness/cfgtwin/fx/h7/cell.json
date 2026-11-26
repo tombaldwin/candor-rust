@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "h7",
+ "lib": false,
+ "note": "roles reversed: the std text (compile_error!) is in the NON-compiled arm",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "h7_q"
+  }
+ ]
+}

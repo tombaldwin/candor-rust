@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "h11",
+ "lib": false,
+ "note": "root call_h11 is a plain macro_rules; invoked bare-textually through the crate path is not possible, so the crate:: path is a root-level macro_export below",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "h11_e"
+  },
+  {
+   "kind": "q",
+   "name": "h11_q"
+  }
+ ]
+}

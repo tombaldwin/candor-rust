@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "h8",
+ "lib": false,
+ "note": "R1811 local shadow of a std name; record pub/main. cand: >=U",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "h8_e"
+  }
+ ]
+}

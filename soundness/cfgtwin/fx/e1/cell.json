@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "e1",
+ "lib": false,
+ "note": "calibration cell for lane B; pub reads U-only (deny Fs 0)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e1_e"
+  }
+ ]
+}

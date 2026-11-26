@@ -1,0 +1,16 @@
+{
+ "chain": {
+  "edit_file": "live_g5.rs",
+  "kind": "cache-edit"
+ },
+ "deps": [],
+ "id": "g5",
+ "lib": false,
+ "note": "state A: both arms pure (exec none). state B (after the edit): live arm has hidden text, exec Fs. The runner scans A, swaps in the edit, rescans with the SAME cache dir; the reading that matters is g5_e@rescan",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "g5_e"
+  }
+ ]
+}
