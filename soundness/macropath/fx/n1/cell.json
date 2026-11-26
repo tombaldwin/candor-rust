@@ -1,0 +1,39 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn1"
+ ],
+ "id": "n1",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: N (L2 second fixture): item, f3c2: root `use dep::{mkfn, mkfnp}` (dep mkfn WRITES) + a textual-only PURE local mkfn: `crate::mkfn!` is the dep's.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n1_e"
+  },
+  {
+   "kind": "q",
+   "name": "n1_q"
+  },
+  {
+   "kind": "e",
+   "name": "n1_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "n1_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "n1_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "n1_use_q"
+  }
+ ]
+}

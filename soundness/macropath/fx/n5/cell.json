@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn5",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn5"
+ ],
+ "id": "n5",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): body: `self::mk!()` in a NON-root module that imports the dependency's mk (writes); the root export is pure.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n5_e"
+  },
+  {
+   "kind": "q",
+   "name": "n5_q"
+  }
+ ]
+}

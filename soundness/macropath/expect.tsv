@@ -321,6 +321,58 @@ l1ufcs	l1ufcs_e	Fs	-	U	U	U0F0	U1F0	U1F0
 l1ufcs	l1ufcs_q	none	-	U	U	U0F0	U1F0	U1F0
 l1use	l1use_e	Fs	-	U	U	U0F0	U1F0	U1F0
 l1use	l1use_q	none	-	U	U	U0F0	U1F0	U1F0
+n1	n1_e	Fs	U	U		U1F0	U1F0	
+n1	n1_e@chained	Fs	U	U		U1F0	U1F0	
+n1	n1_in_e	Fs	-	U		U0F0	U1F0	
+n1	n1_in_e@chained	Fs	-	U		U0F0	U1F0	
+n1	n1_in_q	none	-	U		U0F0	U1F0	
+n1	n1_in_q@chained	none	-	U		U0F0	U1F0	
+n1	n1_q	none	U	U		U1F0	U1F0	
+n1	n1_q@chained	none	U	U		U1F0	U1F0	
+n1	n1_use_e	Fs	-	U		U0F0	U1F0	
+n1	n1_use_e@chained	Fs	-	U		U0F0	U1F0	
+n1	n1_use_q	none	-	U		U0F0	U1F0	
+n1	n1_use_q@chained	none	-	U		U0F0	U1F0	
+n1r	n1r_e	none	U	U		U1F0	U1F0	
+n1r	n1r_e@chained	none	U	U		U1F0	U1F0	
+n1r	n1r_in_e	none	-	U		U0F0	U1F0	
+n1r	n1r_in_e@chained	none	-	U		U0F0	U1F0	
+n1r	n1r_in_q	none	-	U		U0F0	U1F0	
+n1r	n1r_in_q@chained	none	-	U		U0F0	U1F0	
+n1r	n1r_q	none	U	U		U1F0	U1F0	
+n1r	n1r_q@chained	none	U	U		U1F0	U1F0	
+n1r	n1r_use_e	none	-	U		U0F0	U1F0	
+n1r	n1r_use_e@chained	none	-	U		U0F0	U1F0	
+n1r	n1r_use_q	none	-	U		U0F0	U1F0	
+n1r	n1r_use_q@chained	none	-	U		U0F0	U1F0	
+n2	n2_e	Fs	I	I		U0F0	U0F0	
+n2	n2_e@chained	Fs	-	I		U0F0	U0F0	
+n2	n2_q	none	I	I		U0F0	U0F0	
+n2	n2_q@chained	none	-	I		U0F0	U0F0	
+n2r	n2r_e	none	I	I		U0F0	U0F0	
+n2r	n2r_e@chained	none	-	I		U0F0	U0F0	
+n2r	n2r_q	none	I	I		U0F0	U0F0	
+n2r	n2r_q@chained	none	-	I		U0F0	U0F0	
+n4	n4_e	none	I	I		U0F0	U0F0	
+n4	n4_e@chained	none	-	I		U0F0	U0F0	
+n4	n4_q	none	I	I		U0F0	U0F0	
+n4	n4_q@chained	none	-	I		U0F0	U0F0	
+n5	n5_e	Fs	I	I		U0F0	U0F0	
+n5	n5_e@chained	Fs	-	I		U0F0	U0F0	
+n5	n5_q	none	I	I		U0F0	U0F0	
+n5	n5_q@chained	none	-	I		U0F0	U0F0	
+n5r	n5r_e	none	I	I		U0F0	U0F0	
+n5r	n5r_e@chained	none	-	I		U0F0	U0F0	
+n5r	n5r_q	none	I	I		U0F0	U0F0	
+n5r	n5r_q@chained	none	-	I		U0F0	U0F0	
+n6	n6_e	none	I	I		U0F0	U0F0	
+n6	n6_e@chained	none	-	I		U0F0	U0F0	
+n6	n6_q	none	I	I		U0F0	U0F0	
+n6	n6_q@chained	none	-	I		U0F0	U0F0	
+n9	n9_e	Fs	-	-		U0F0	U0F0	
+n9	n9_e@chained	Fs	-	-		U0F0	U0F0	
+n9	n9_q	none	-	-		U0F0	U0F0	
+n9	n9_q@chained	none	-	-		U0F0	U0F0	
 s1fn	s1fn_e	Fs	I	I	I	U0F0	U0F0	U0F0
 s1fn	s1fn_e@chained	Fs	-	I	I	U0F0	U0F0	U0F0
 s1fn	s1fn_q	none	I	I	I	U0F0	U0F0	U0F0

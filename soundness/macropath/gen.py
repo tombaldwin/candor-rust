@@ -466,6 +466,41 @@ ecell('e16', 'K2 x G7: a LOCAL thread_local macro defined above the invocation (
 ecell('e17', 'K1 x G1 of a crate that RE-EXPORTS std\'s own thread_local: same definition, no ambiguity, std\'s binds (pure).', kind='bin', inner=E1,
       dep=DEP_EMIT + 'pub use std::thread_local;\n', pgo='std')
 
+# ---------------------------------------------------------------------------------------------------- N: L2's second fixtures
+# Lane rust-macropath-l2 (R-ROOT), written BEFORE the binding: the NON-export and non-root shapes R-ROOT must REFUSE, each with a
+# reversed twin cell whose executed truth is the opposite, so a rule that binds what rustc does not (lane residue-C's D1/E1) fails
+# one of the two in the fabrication direction or the silence direction.
+TXT_MKFN = 'macro_rules! mkfn { ($n:ident) => { pub fn $n() {} } }\nmacro_rules! mkfnp { ($n:ident) => { pub fn $n() {} } }\n'
+TXT_MKFN_W = 'macro_rules! mkfn { ($n:ident) => { pub fn $n() { @W@ } } }\nmacro_rules! mkfnp { ($n:ident) => { pub fn $n() {} } }\n'
+DEP_MKFNP = '#[macro_export] macro_rules! mkfnp { ($n:ident) => { pub fn $n() {} } }\n'
+DEP_MKFN_P = '#[macro_export] macro_rules! mkfn { ($n:ident) => { pub fn $n() {} } }\n'
+DEP_MKNOP = '#[macro_export] macro_rules! mknop { () => { () } }\n'
+ND = 'N (L2 second fixture): '
+dcell('n1', ND + 'item, f3c2: root `use dep::{mkfn, mkfnp}` (dep mkfn WRITES) + a textual-only PURE local mkfn: `crate::mkfn!` is the dep\'s.',
+      imp='use fxdep@ID@::{mkfn, mkfnp};', defs=TXT_MKFN, dep=DEP_BASE + DEP_MKFN_W + DEP_MKFNP)
+dcell('n1r', ND + 'item, f3crev2: as n1 with the bodies swapped (dep mkfn PURE, textual-only local mkfn WRITES): must not charge.',
+      imp='use fxdep@ID@::{mkfn, mkfnp};', defs=TXT_MKFN_W, dep=DEP_BASE + DEP_MKFN_P + DEP_MKFNP)
+ccell('n2', ND + 'body: root `pub(crate) use other::{mk, mknop}` where other.rs RE-EXPORTS the dependency (writes) and a third file holds a '
+      'textual-only pure mk: no local definition is the binding.', imp='pub(crate) use other::{mk, mknop};',
+      defs='pub use fxdep@ID@::{mk, nop as mknop};\n', mods='mod other;\nmod third;\nmod inner;',
+      files={'third.rs': 'macro_rules! mk { () => { () } }\nmacro_rules! mknop { () => { () } }\n'}, dep=DEP_BASE + DEP_MK_W)
+ccell('n2r', ND + 'body: n2 with the bodies swapped (dependency mk PURE, the third file\'s textual-only mk WRITES): must not charge.',
+      imp='pub(crate) use other::{mk, mknop};', defs='pub use fxdep@ID@::{mk, nop as mknop};\n', mods='mod other;\nmod third;\nmod inner;',
+      files={'third.rs': 'macro_rules! mk { () => { @W@ } }\nmacro_rules! mknop { () => { () } }\n'}, dep=DEP_BASE + DEP_MK_P)
+ccell('n4', ND + 'TWO crate roots: lib.rs owns the WRITING export; main.rs globs the dependency (pure mk) and its inner calls `crate::mk!()`, '
+      'which is the BIN crate\'s root: must not charge.', imp=R1, mods='mod inner;', defs_name=None,
+      files={'lib.rs': 'mod other;\n', 'other.rs': EXP_W + EXP_NOP}, dep=DEP_BASE + DEP_MK_P + DEP_MKNOP)
+ccell('n5', ND + 'body: `self::mk!()` in a NON-root module that imports the dependency\'s mk (writes); the root export is pure.',
+      defs=EXP_P + EXP_NOP, inner_pre='use fxdep@ID@::{mk, nop as mknop};\n', head='self::mk!()', headq='self::mknop!()', dep=DEP_BASE + DEP_MK_W)
+ccell('n5r', ND + 'body: n5 reversed (root export WRITES, the module\'s imported dependency mk is PURE): must not charge.',
+      defs=EXP_W + EXP_NOP, inner_pre='use fxdep@ID@::{mk, nop as mknop};\n', head='self::mk!()', headq='self::mknop!()', dep=DEP_BASE + DEP_MK_P)
+ccell('n6', ND + 'body: `super::mk!()` from depth 2 reaches `inner` (which imports the dependency\'s PURE mk), not the root (export WRITES): '
+      'must not charge.', mods='mod other;\nmod inner;', files={'inner/deep.rs': 'pub fn go_@ID@() { super::mk!() }\npub fn q_@ID@_pure() { super::mknop!() }\n'},
+      probes=[('n6_e', 'e', 'inner::deep::go_n6()'), ('n6_q', 'q', 'inner::deep::q_n6_pure()')], dep=DEP_BASE + DEP_MK_P)
+CELLS['n6']['extra']['inner.rs'] = 'use fxdepn6::{mk, nop as mknop};\npub mod deep;\n'
+ccell('n9', ND + 'positive: the root re-export RENAMES (`pub(crate) use other::{mk as mkr, mknop as mkrnop}`), R1 glob, `crate::mkr!()`.',
+      imp=R1 + '\npub(crate) use other::{mk as mkr, mknop as mkrnop};', defs=NX, head='crate::mkr!()', headq='crate::mkrnop!()')
+
 # ---------------------------------------------------------------------------------------------------- F: cells that should NOT compile
 FD = 'F: '
 gcell('f1', 'use fxdepf1::mk;\nmod other;\nmod inner;\n', {'other.rs': EXP_P, 'inner.rs': 'pub fn go_f1() { crate::mk!() }\n'},

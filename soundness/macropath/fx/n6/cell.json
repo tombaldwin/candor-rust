@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn6",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn6"
+ ],
+ "id": "n6",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): body: `super::mk!()` from depth 2 reaches `inner` (which imports the dependency's PURE mk), not the root (export WRITES): must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n6_e"
+  },
+  {
+   "kind": "q",
+   "name": "n6_q"
+  }
+ ]
+}

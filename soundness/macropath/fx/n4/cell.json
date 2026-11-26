@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn4",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn4"
+ ],
+ "id": "n4",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): TWO crate roots: lib.rs owns the WRITING export; main.rs globs the dependency (pure mk) and its inner calls `crate::mk!()`, which is the BIN crate's root: must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n4_e"
+  },
+  {
+   "kind": "q",
+   "name": "n4_q"
+  }
+ ]
+}

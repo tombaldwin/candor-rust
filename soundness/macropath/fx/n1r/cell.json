@@ -1,0 +1,39 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn1r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn1r"
+ ],
+ "id": "n1r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: N (L2 second fixture): item, f3crev2: as n1 with the bodies swapped (dep mkfn PURE, textual-only local mkfn WRITES): must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n1r_e"
+  },
+  {
+   "kind": "q",
+   "name": "n1r_q"
+  },
+  {
+   "kind": "e",
+   "name": "n1r_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "n1r_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "n1r_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "n1r_use_q"
+  }
+ ]
+}

@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn2",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn2"
+ ],
+ "id": "n2",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): body: root `pub(crate) use other::{mk, mknop}` where other.rs RE-EXPORTS the dependency (writes) and a third file holds a textual-only pure mk: no local definition is the binding.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n2_e"
+  },
+  {
+   "kind": "q",
+   "name": "n2_q"
+  }
+ ]
+}

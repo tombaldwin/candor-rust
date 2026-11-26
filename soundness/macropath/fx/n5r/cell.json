@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn5r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn5r"
+ ],
+ "id": "n5r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): body: n5 reversed (root export WRITES, the module's imported dependency mk is PURE): must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n5r_e"
+  },
+  {
+   "kind": "q",
+   "name": "n5r_q"
+  }
+ ]
+}

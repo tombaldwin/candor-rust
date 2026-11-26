@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn2r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn2r"
+ ],
+ "id": "n2r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): body: n2 with the bodies swapped (dependency mk PURE, the third file's textual-only mk WRITES): must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n2r_e"
+  },
+  {
+   "kind": "q",
+   "name": "n2r_q"
+  }
+ ]
+}
