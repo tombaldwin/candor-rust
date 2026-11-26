@@ -14452,10 +14452,20 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                         let g = self.glob_extra_candidates(&e);
                                         if !g.is_empty() {
                                             extras.extend(g);
-                                        } else if expand(&e, &self.uses) == e
-                                            && crate::lang::only_local_glob_supplies(&e.split("::").collect::<Vec<_>>(), &self.uses)
+                                        } else if let Some(ty) = self
+                                            .uses
+                                            .get(crate::lang::SELF_KEY)
+                                            .filter(|b| {
+                                                // only `Self` bound to a WRITTEN MODULE PATH (`d::Lone`) that names nothing here, and
+                                                // only the one-member call `Self::m`: a leaf binding (`Path`), a body item or an
+                                                // associated-type path (`Self::Value::f`) resolves by leaf and is not this shape
+                                                b.contains("::") && !b.starts_with('<') && !b.starts_with("crate::")
+                                                    && written.matches("::").count() == 1 && e == format!("{b}::{}", &written[6..])
+                                            })
+                                            .cloned()
+                                            .filter(|b| expand(b, &self.uses) == *b
+                                                && crate::lang::only_local_glob_supplies(&b.split("::").collect::<Vec<_>>(), &self.uses))
                                         {
-                                            let ty = e.rsplit_once("::").map(|(h, _)| h).unwrap_or(&e).to_string();
                                             self.mark_unresolved(format!("ambiguous:self type `{ty}` is reached only through a crate-local glob"));
                                         }
                                     }
