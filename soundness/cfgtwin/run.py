@@ -108,6 +108,14 @@ def measure_cell(binp, c, scratch, want_gates):
     d = os.path.join(FX, cid)
     ch = c.get('chain')
     out = []
+    edit_dir = os.path.join(d, 'edit')
+    if ch and ch['kind'] == 'cache-edit':
+        # `edit/` holds the state-B replacement the runner copies in by hand. Inside the scanned directory it is a file no `mod`
+        # places, which the scanner still ANALYSES as an orphan module, so its text would be state A's text (R1853's member
+        # evidence is keyed on the owner's leaf). Scan a copy without it; `edit_dir` still names the fixture's own.
+        d = os.path.join(scratch, cid + '.src')
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(os.path.join(FX, cid), d, ignore=shutil.ignore_patterns('target', 'edit'))
     rc, rows = scan(binp, d, scratch, cid)
     if rows is None:
         return [(p['name'], 'NOREPORT(rc=%d)' % rc, '') for p in c['probes']]
@@ -141,7 +149,7 @@ def measure_cell(binp, c, scratch, want_gates):
     elif ch and ch['kind'] == 'cache-edit':
         # state A scan above used the cache dir <scratch>/<cid>.cache; swap in the edit and rescan with the SAME cache dir
         w = os.path.join(scratch, cid + '.work')
-        shutil.copytree(d, w, ignore=shutil.ignore_patterns('target'))
+        shutil.copytree(d, w, ignore=shutil.ignore_patterns('target', 'edit'))
         for tag, flags in (('rescan', ()), ('rescan-incr', ('--incremental',))):
             w2 = w + '.' + tag
             shutil.copytree(w, w2)
@@ -149,7 +157,7 @@ def measure_cell(binp, c, scratch, want_gates):
             env = dict(os.environ, CANDOR_CACHE_DIR=cache)
             o1 = os.path.join(scratch, cid + '.' + tag + '.A')
             subprocess.run([binp, w2, '--out', os.path.join(o1, 'r')] + list(flags), capture_output=True, text=True, env=env)
-            shutil.copy(os.path.join(w2, 'edit', ch['edit_file']), os.path.join(w2, 'src', ch['edit_file']))
+            shutil.copy(os.path.join(edit_dir, ch['edit_file']), os.path.join(w2, 'src', ch['edit_file']))
             o2 = os.path.join(scratch, cid + '.' + tag + '.B')
             subprocess.run([binp, w2, '--out', os.path.join(o2, 'r')] + list(flags), capture_output=True, text=True, env=env)
             rows2 = rows_of(os.path.join(o2, 'r'))
