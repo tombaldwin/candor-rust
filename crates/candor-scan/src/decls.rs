@@ -156,6 +156,9 @@ pub(crate) fn scan_items(
                 if f.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
                     info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
                 }
+                if f.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_AMBIG_ATTR)) {
+                    info.refusals.push("ambiguous:same-name macro_rules! definitions".to_string()); // R1898 (`mbe::Ctx::mark_ambiguous`)
+                }
                 out.push(info);
             }
             syn::Item::Impl(im) => {
@@ -284,6 +287,9 @@ pub(crate) fn scan_items(
                         }
                         if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
                             info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
+                        }
+                        if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_AMBIG_ATTR)) {
+                            info.refusals.push("ambiguous:same-name macro_rules! definitions".to_string()); // R1898 (`mbe::Ctx::mark_ambiguous`)
                         }
                         // SOUNDNESS R1537 (c) — which kind of block declared the unit, for the co-path split in `scan.rs`.
                         if mbe_prim.is_none() && tyname.is_some() {
@@ -431,6 +437,9 @@ pub(crate) fn scan_items(
                             include_tests, tr_gen.as_ref().unwrap_or(uses), &use_alts, fields, returns, traits, elems, lazy_statics, const_strings, local_macros, drop_relevant);
                         if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
                             info.refusals.push(crate::model::MBE_TWIN_WHY.to_string()); // I1 stage 2 (`mbe::mark_hidden_twins`)
+                        }
+                        if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_AMBIG_ATTR)) {
+                            info.refusals.push("ambiguous:same-name macro_rules! definitions".to_string()); // R1898 (`mbe::Ctx::mark_ambiguous`)
                         }
                         out.push(info);
                     }

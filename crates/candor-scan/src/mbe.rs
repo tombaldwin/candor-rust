@@ -1524,6 +1524,34 @@ impl Ctx<'_> {
         bound.then_some(id)
     }
 
+    /// SOUNDNESS R1898 (cfg-twin lane B) — the invocation bound THIS file's definition of the name, but that definition is not
+    /// yet in textual scope (`scope`) and another file defines the name differently (the crate table holds `None`, or an
+    /// emitted definition of other tokens): rustc binds the earlier definition a `#[macro_use] mod` brought, not this file's
+    /// later one, and which one that is is exactly what this table cannot say. The expansion is KEPT (a charge it makes is
+    /// real for one of the two readings); only the disclosure is added (`mark_ambiguous`). Body position is R208's.
+    fn pre_def_ambiguous(&self, mac: &syn::Macro) -> bool {
+        if candor_report::env::switch("CANDOR_I1S3_SHADOW_OFF") {
+            return false;
+        }
+        let Some(id) = mac.path.get_ident().map(|i| i.to_string()) else { return false };
+        let Some(Some(own)) = self.defs.get(&id) else { return false };
+        if self.scope.contains_key(&id) || self.emitted.contains(&id) {
+            return false;
+        }
+        let own = own.to_string();
+        let other_plain = matches!(self.xdefs.get(&id), Some(None));
+        let other_emitted = match self.xdefs.get(&emitted_key(&id)) {
+            Some(Some(t)) => *t != own,
+            Some(None) => true,
+            None => false,
+        };
+        let hit = other_plain || other_emitted;
+        if hit && candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("R1898AMBIG\t{id}"); // §E1 REACH COUNTER, on the ADDED branch only
+        }
+        hit
+    }
+
     /// The invocation's expansion tokens, and whether its definition came from ANOTHER file.
     fn expand_tokens(&mut self, mac: &syn::Macro, depth: usize) -> Option<(TokenStream, bool)> {
         if depth >= MAX_DEPTH || self.budget == 0 {
@@ -1557,6 +1585,7 @@ impl Ctx<'_> {
     }
 
     fn expand_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::Item>> {
+        let ambig = self.pre_def_ambiguous(mac);
         let (ts, cross_file) = self.expand_tokens(mac, depth)?;
         let name = mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
         let mut file = syn::parse2::<syn::File>(ts).ok()?;
@@ -1596,6 +1625,9 @@ impl Ctx<'_> {
         }
         self.budget -= 1;
         self.splice(&mut file.items, depth + 1);
+        if ambig {
+            mark_ambiguous_items(&mut file.items);
+        }
         Some(file.items)
     }
 
@@ -1606,6 +1638,7 @@ impl Ctx<'_> {
     /// file's macro) any generated item carries a `#[cfg]` (see `expand_items`).
     fn expand_impl_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::ImplItem>> {
         use syn::parse::Parser;
+        let ambig = self.pre_def_ambiguous(mac);
         let (ts, cross_file) = self.expand_tokens(mac, depth)?;
         let mut gen = (|input: syn::parse::ParseStream| {
             let mut v = Vec::new();
@@ -1626,6 +1659,13 @@ impl Ctx<'_> {
         }
         self.budget -= 1;
         self.splice_impl_items(&mut gen, depth + 1);
+        if ambig {
+            for g in gen.iter_mut() {
+                if let syn::ImplItem::Fn(f) = g {
+                    push_ambig(&mut f.attrs);
+                }
+            }
+        }
         Some(gen)
     }
 
@@ -1686,6 +1726,7 @@ impl Ctx<'_> {
     /// name-keyed hedge only while R1784 kept the DEFINER partial. A RESOLUTION: the generated members are the trait's own.
     fn expand_trait_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::TraitItem>> {
         use syn::parse::Parser;
+        let ambig = self.pre_def_ambiguous(mac);
         let (ts, cross_file) = self.expand_tokens(mac, depth)?;
         let mut gen = (|input: syn::parse::ParseStream| {
             let mut v = Vec::new();
@@ -1703,6 +1744,15 @@ impl Ctx<'_> {
         }
         self.budget -= 1;
         self.splice_trait_items(&mut gen, depth + 1);
+        if ambig {
+            for g in gen.iter_mut() {
+                if let syn::TraitItem::Fn(f) = g {
+                    if f.default.is_some() {
+                        push_ambig(&mut f.attrs);
+                    }
+                }
+            }
+        }
         Some(gen)
     }
 
@@ -3273,12 +3323,75 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
                     item.sigs.iter().filter(|(k, _)| k.starts_with(&pre) && !have.contains(&k[pre.len()..])).collect();
                 extra.sort_by(|a, b| a.0.cmp(b.0));
                 for (k, sig) in extra {
-                    let mut f: syn::ImplItemFn = syn::parse_quote!(#sig {});
+                    // SOUNDNESS R1863 (cfg-twin lane B) — the stood member is the UNION of its two arms: the hidden override (which
+                    // this pass cannot read, hence its `Unknown`) and the trait's own default, which is what this arm's impl
+                    // inherits when the visible arm is the one compiled. An EMPTY body dropped the second: the call resolved to
+                    // the stood member and the effectful default (`same_e`, executed `Fs`) was charged to nothing, so `deny Fs`
+                    // read 0. The body now calls the trait's member through its UFCS path, which the resolver answers with the
+                    // default's unit (and, for a trait with no local default, the foreign model or nothing, so the member's own
+                    // `Unknown` is still the floor). A call edge only ADDS what the default does; no charge or disclosure moves.
+                    let body = match &im.trait_ {
+                        Some((_, tp, _)) => stood_body(&im.self_ty, tp, sig),
+                        None => syn::parse_quote!({}),
+                    };
+                    let mut f: syn::ImplItemFn = syn::parse_quote!(#sig #body);
                     mark_fn_as(&mut f.attrs, &format!("{owner}::{}", &k[pre.len()..]), "I1S2MARKSTOOD");
                     im.items.push(syn::ImplItem::Fn(f));
                 }
             }
         }
+    }
+}
+
+/// SOUNDNESS R1898 — stamp `MBE_AMBIG_ATTR` on an expansion's fns (see `Ctx::pre_def_ambiguous`).
+fn push_ambig(attrs: &mut Vec<syn::Attribute>) {
+    if !attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_AMBIG_ATTR)) {
+        let id = syn::Ident::new(crate::model::MBE_AMBIG_ATTR, proc_macro2::Span::call_site());
+        attrs.push(syn::parse_quote!(#[#id]));
+    }
+}
+
+fn mark_ambiguous_items(items: &mut [syn::Item]) {
+    for it in items {
+        match it {
+            syn::Item::Fn(f) => push_ambig(&mut f.attrs),
+            syn::Item::Impl(im) => {
+                for ii in im.items.iter_mut() {
+                    if let syn::ImplItem::Fn(f) = ii {
+                        push_ambig(&mut f.attrs);
+                    }
+                }
+            }
+            syn::Item::Trait(t) => {
+                for ti in t.items.iter_mut() {
+                    if let syn::TraitItem::Fn(f) = ti {
+                        if f.default.is_some() {
+                            push_ambig(&mut f.attrs);
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &mut m.content {
+                    mark_ambiguous_items(inner);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// SOUNDNESS R1863 (cfg-twin lane B) — the body of a stood member: `{ <S as Tr>::m(self, (), ..) }`, the call that reaches the
+/// trait's own member. Argument values are placeholders (the body is never compiled, only read for its edges).
+fn stood_body(self_ty: &syn::Type, tr: &syn::Path, sig: &syn::Signature) -> syn::Block {
+    let name = &sig.ident;
+    let recv = sig.receiver().is_some();
+    let rest = sig.inputs.len().saturating_sub(usize::from(recv));
+    let args: Vec<syn::Expr> = (0..rest).map(|_| syn::parse_quote!(())).collect();
+    if recv {
+        syn::parse_quote!({ <#self_ty as #tr>::#name(self #(, #args)*) })
+    } else {
+        syn::parse_quote!({ <#self_ty as #tr>::#name(#(#args),*) })
     }
 }
 
@@ -4168,7 +4281,7 @@ const BUILTIN: &[&str] = &[
     // candor's OWN marker attributes, none of which is an attribute macro: the I1 stage-2 twin mark (`mark_hidden_twins`), the
     // R1157/R1180 operator-impl marks and the R1146 synthesised-derive mark. Read as attribute macros they held every R828
     // hedge in any crate with a macro-made operator impl or a synthesised comparison (Fable stage-2 review, finding (c)).
-    "candor_i1_hidden_twin", "candor_mbe_op", "candor_mbe_prim_op", "candor_derive_synth",
+    "candor_i1_hidden_twin", "candor_i1_ambiguous_macro", "candor_mbe_op", "candor_mbe_prim_op", "candor_derive_synth",
     // I1 stage 3 — the emitted-definition and produced-twin marks (`model::MBE_EMITTED_DEF_ATTR`, `MBE_TWIN_DEF_ATTR`). Unlisted,
     // they held every crate with an emitted `macro_rules!` unclosable (Fable stage-3 review D2, `fmarkerhold2`).
     "__candor_i1_emitted_def", "__candor_i1_twin_def", "__candor_i1_twin_def_hand",
@@ -4928,6 +5041,7 @@ mod tests {
             "candor_mbe_prim_op",
             "candor_derive_synth",
             "candor_i1_hidden_twin",
+            crate::model::MBE_AMBIG_ATTR,
             crate::model::MBE_EMITTED_DEF_ATTR,
             crate::model::MBE_TWIN_DEF_ATTR,
             crate::model::MBE_TWIN_HAND_DEF_ATTR,

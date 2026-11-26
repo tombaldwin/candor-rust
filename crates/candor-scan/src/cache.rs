@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev222 (rustagent-cfgB, cfg-twin lane B): a stood member's body reaches the trait's own member (R1863), and a fn an item-,
+    // impl-item- or trait-item-position expansion makes from a definition that is not yet in textual scope, beside another file's
+    // definition of the name, carries R208's `ambiguous:` (R1898); a rev221 entry holds neither.
     // rev221 (rustagent-cfgA, cfg-twin lane A): hand-written `#[cfg]` module arms are covered (R1828/R1862), out-of-line arms take
     // part through crate-wide claims (`FileDecls::i1_arms`, `i1_claims`; R1824/R1862), a module-gated impl's default leg is
     // hedged (R1897), and a bare toolchain macro name that a `use` or a local definition rebinds is hidden text (R1899); a rev220
@@ -773,7 +776,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev221/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev222/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -2632,6 +2635,21 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
         // withdrawn; the name is recorded so an invocation of it can disclose.
         if acc.local_macros.get(k).is_some_and(|prev| prev != v) {
             acc.macro_twins.insert(k.clone());
+        }
+        // SOUNDNESS R1855 (cfg-twin lane B) — a SOURCE definition in one file and an EMITTED one of the same name in another
+        // (`#[macro_use] mod defs;` whose `defs.rs` makes `kx!` through a definer, beside a `macro_rules! kx` of the parent): the
+        // two are keyed apart (`EMITTED_MACRO_PREFIX`), so the same-name check above never met them, and the collector read the
+        // source arm alone, silent over the emitted one's write (`kx2_pre_e`). `decls` already files the SAME-file pair under
+        // `EMITTED_SHADOW_PREFIX`; this is the cross-file half, in either merge order (the check runs as each side arrives). It
+        // adds R208's `ambiguous:` disclosure only: the source arm still expands, nothing is withdrawn.
+        {
+            let (bare, other) = match k.strip_prefix(crate::model::EMITTED_MACRO_PREFIX) {
+                Some(b) => (b.to_string(), b.to_string()),
+                None => (k.clone(), format!("{}{k}", crate::model::EMITTED_MACRO_PREFIX)),
+            };
+            if acc.local_macros.get(&other).is_some_and(|prev| prev != v) && !candor_report::env::switch("CANDOR_I1S3_SHADOW_OFF") {
+                acc.macro_twins.insert(format!("{}{bare}", crate::model::EMITTED_SHADOW_PREFIX));
+            }
         }
         acc.local_macros.insert(k.clone(), v.clone()); // macro NAME → arm tokens; last-writer-wins on a rare collision
     }

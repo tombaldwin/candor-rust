@@ -1059,6 +1059,10 @@ pub(crate) const MBE_OP_ATTR: &str = "candor_mbe_op";
 /// SOUNDNESS R1541 / I1 stage 2 — the attribute `mbe::mark_hidden_twins` stamps on a `#[cfg]`-gated fn whose name the same
 /// module's UNEXPANDED macro text also defines: another cfg arm of it may be hidden. Pass A turns it into a refusal.
 pub(crate) const MBE_TWIN_ATTR: &str = "candor_i1_hidden_twin";
+/// SOUNDNESS R1898 (cfg-twin lane B) — the marker `mbe::Ctx` stamps on every fn an ITEM-, IMPL-ITEM- or TRAIT-ITEM-position
+/// expansion makes when the invocation bound the file's own LATER definition of the name while another file defines it
+/// differently. Pass A turns it into R208's `ambiguous:` refusal; the expansion itself is untouched.
+pub(crate) const MBE_AMBIG_ATTR: &str = "candor_i1_ambiguous_macro";
 /// The reason that refusal publishes.
 pub(crate) const MBE_TWIN_WHY: &str = "macro:another cfg arm of this fn is hidden by an unexpanded macro";
 /// SOUNDNESS R1157 — the qual segment that keeps such an impl's unit apart from a hand-written impl's (`decls::scan_items`).

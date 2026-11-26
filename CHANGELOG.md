@@ -11,6 +11,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **cfg-twin cover, lane B (SOUNDNESS R1863, R1855, R1898).** Three one-rule closings of the same hidden-twin family.
+  - R1863 (a resolution): where a hidden `#[cfg]` impl overrides a trait member that the visible own-cfg impl inherits, the
+    engine stands a marked member on the visible impl. Its body was empty, so the call resolved to it and the trait's own
+    (effectful) default was charged to nothing: `Unknown` alone, `deny Fs` exit 0 over an executed write. The stood member now
+    calls the trait's member through its UFCS path, so a call reads the default's effect beside the `Unknown`. A foreign trait
+    (no local default unit) keeps the stood member's `Unknown` as before. No row is removed.
+  - R1855 (adds `Unknown`): a `macro_rules!` written in one file and a same-named one EMITTED by a macro in another file
+    (`#[macro_use] mod defs;`) are now a disclosed `ambiguous:` pair at a body-position invocation, as the same-file pair already
+    was. The source arm still expands; nothing is withdrawn.
+  - R1898 (adds `Unknown`): an item-, impl-item- or trait-item-position invocation whose own file defines the name only LATER in
+    the file, while another file defines it differently, bound the file's own definition. The fns it makes now carry
+    `ambiguous:same-name macro_rules! definitions`; the expansion is kept.
 - ⚠ **cfg-twin cover, lane A (SOUNDNESS R1862 with R1824/R1828, R1897, R1899, R1901).** An effectful member defined only in
   an unexpanded macro arm of a `#[cfg]` module twin read ABSENT over an executed write on v0.43.0 when the arms were
   out-of-line, hand-written, `cfg_if!`-made or gated only through an enclosing module. Each closing ADDS `Unknown`
