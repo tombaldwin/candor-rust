@@ -140,9 +140,9 @@ fn l1b_counter_fires_on_its_shapes_not_its_controls_and_changes_no_output() {
     let sites: Vec<(&str, &str)> = err
         .lines()
         .filter_map(|l| l.strip_prefix("L1BSITE\t"))
-        .filter_map(|l| {
+        .map(|l| {
             let t: Vec<&str> = l.split('\t').collect();
-            Some((t[0], t[1]))
+            (t[0], t[1])
         })
         .collect();
     let has = |b: &str, u: &str| sites.iter().any(|(bb, uu)| *bb == b && *uu == u);
