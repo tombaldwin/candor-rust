@@ -14464,6 +14464,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                             })
                                             .cloned()
                                             .filter(|b| expand(b, &self.uses) == *b
+                                                // a type this crate declares under that leaf is what the glob brings (palette's
+                                                // `alpha::Alpha` through `use crate::*`), resolved by leaf: not this shape
+                                                && !self.returns.contains_key(&crate::model::nominal_key(b.rsplit("::").next().unwrap_or(b)))
                                                 && crate::lang::only_local_glob_supplies(&b.split("::").collect::<Vec<_>>(), &self.uses))
                                         {
                                             self.mark_unresolved(format!("ambiguous:self type `{ty}` is reached only through a crate-local glob"));
