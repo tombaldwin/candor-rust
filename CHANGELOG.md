@@ -11,6 +11,27 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **cfg-twin cover, lane A (SOUNDNESS R1862 with R1824/R1828, R1897, R1899, R1901).** An effectful member defined only in
+  an unexpanded macro arm of a `#[cfg]` module twin read ABSENT over an executed write on v0.43.0 when the arms were
+  out-of-line, hand-written, `cfg_if!`-made or gated only through an enclosing module. Each closing ADDS `Unknown`
+  (`macro:another cfg arm of this fn is hidden by an unexpanded macro`, or R128's `macro:module items hidden by an
+  unexpanded macro`); no charge and no disclosure is removed, so a `deny Unknown` gate can go from green to red.
+  - A HAND-WRITTEN cfg module arm is covered like a produced one, from its siblings' real readings (never from R1857's
+    opaque stand-in, which stays exactly where v0.43.0 applies it), and so is a hand-written gated fn, inline module,
+    `macro_rules!` or trait default beside same-list hidden text. A hand-written `use` or `type` alias is left as written
+    (covering it would delete its binding): a named residual.
+  - OUT-OF-LINE arms (`mod x;`, `#[path]`, `cfg_attr(path)`, a `mod` declared inside `cfg_if!`) take part through
+    crate-wide claims: each file exports its arms' readings and groups (`FileDecls::i1_arms`), the merge joins them, and a
+    file whose claims moved is re-spliced (its digest is in its cache entry, so an edit to a sibling arm's file is
+    followed on a warm cache). Two declarations of one file are one arm.
+  - An impl inside a `#[cfg]`-gated inline module puts the trait default into the crate-wide default leg (R1897).
+  - A bare toolchain macro name (`thread_local!`, …) that a `use`, a glob, `#[macro_use] extern crate` or a local
+    definition rebinds is read as that macro's text, not excluded (R1899).
+  - A path call whose module only unexpanded text declares (`cfg_if! { if #[cfg(unix)] { pub mod m { .. } } .. }`, then
+    `m::go()`) discloses R128 (R1901), and a type such a `cfg_if!` arm declares is R452 (b) evidence.
+  - Cache rev 221. Non-shipping counters `CFGTWINQ3` / `CFGTWINQ3D` (under `CANDOR_I1_INSTR`) measure the queued file-level
+    gating question.
+
 - **candor-scan is the ONLY user route; the rustc dylint lint is the family's oracle instrument** (decision 2026-11-23,
   BACKLOG §5.1 option A). Report bytes are unchanged (no cache rev bump); this is help text, wrapper routing and docs.
   - `candor-scan --help` no longer calls the nightly engine "the sound gate". It states what the scanner discloses

@@ -1843,41 +1843,47 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // parsing thread's source map (see `fn_locs`/`SendFile`). They ride alongside the moved file so Pass B
     // (single-threaded) can zip them onto each FnInfo without re-resolving a now-dead span.
     // Each parse also returns the `include!` targets it consulted (R145) — the fresh cache key needs them.
+    // One file's round-1 parse and splice, with the cross-file cfg-twin claims it consumes (cfg-twin lane A; empty in round 1,
+    // the joined claims in the re-splice below and in round 2).
+    let prep = |rel: &str, claims: &crate::mbe::ArmClaims| -> Option<(ParsedFile, Vec<String>)> {
+        let p = &paths.iter().find(|(_, r)| r == rel)?.0;
+        let text = std::fs::read_to_string(p).ok()?;
+        // SOUNDNESS R308 — see `parse_file_2015_tolerant`: a file `syn` rejects gets ONE retry with
+        // Rust-2015 bare closure-trait objects normalised, because one elided `dyn` currently drops
+        // every function in the file.
+        let (mut file, _relaxed) = crate::lang::parse_file_2015_tolerant(&text)?;
+        crate::sidecar::index_file(rel, &file); // STEP 0b — before any splice; a no-op unless the sidecar is on
+        // SOUNDNESS R145 — splice readable `include!` text in place, tag the unreadable rest. Done
+        // HERE, on the parsing thread, because the spliced items' spans resolve only against this
+        // thread's source map (see `fn_locs`).
+        let mut read = Vec::new();
+        if text.contains("include!") {
+            let dir = p.parent().unwrap_or(root);
+            crate::lang::splice_includes(&mut file.items, dir, &include_env, &mut Vec::new(), &mut read);
+        }
+        if text.contains("pin_project") || text.contains("link!") {
+            crate::lang::splice_pin_project(&mut file.items); // R988, R960
+        }
+        if text.contains("macro_rules") || (!xmacros.is_empty() && text.contains('!')) || !claims.is_empty() {
+            crate::mbe::splice_local_macros_with(&mut file.items, &xmacros, claims); // R1004
+        }
+        crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
+        if text.contains("DeriveEntity") {
+            crate::mbe::splice_sea_orm_entities(&mut file.items); // R1605
+        }
+        let mut locs = Vec::new();
+        fn_locs(&file.items, rel, include_tests, &mut locs);
+        // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
+        Some(((SendFile(file), locs), read))
+    };
+    let no_claims = crate::mbe::ArmClaims::default();
     let round1: Vec<Option<(ParsedFile, Vec<String>)>> = per_file
         .par_iter()
         .map(|(rel, _, cached)| {
             if cached.is_some() {
                 return None; // decls reusable from cache — defer the parse (it may not be needed at all)
             }
-            let p = &paths.iter().find(|(_, r)| r == rel)?.0;
-            let text = std::fs::read_to_string(p).ok()?;
-            // SOUNDNESS R308 — see `parse_file_2015_tolerant`: a file `syn` rejects gets ONE retry with
-            // Rust-2015 bare closure-trait objects normalised, because one elided `dyn` currently drops
-            // every function in the file.
-            let (mut file, _relaxed) = crate::lang::parse_file_2015_tolerant(&text)?;
-            crate::sidecar::index_file(rel, &file); // STEP 0b — before any splice; a no-op unless the sidecar is on
-            // SOUNDNESS R145 — splice readable `include!` text in place, tag the unreadable rest. Done
-            // HERE, on the parsing thread, because the spliced items' spans resolve only against this
-            // thread's source map (see `fn_locs`).
-            let mut read = Vec::new();
-            if text.contains("include!") {
-                let dir = p.parent().unwrap_or(root);
-                crate::lang::splice_includes(&mut file.items, dir, &include_env, &mut Vec::new(), &mut read);
-            }
-            if text.contains("pin_project") || text.contains("link!") {
-                crate::lang::splice_pin_project(&mut file.items); // R988, R960
-            }
-            if text.contains("macro_rules") || (!xmacros.is_empty() && text.contains('!')) {
-                crate::mbe::splice_local_macros(&mut file.items, &xmacros); // R1004
-            }
-            crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
-            if text.contains("DeriveEntity") {
-                crate::mbe::splice_sea_orm_entities(&mut file.items); // R1605
-            }
-            let mut locs = Vec::new();
-            fn_locs(&file.items, rel, include_tests, &mut locs);
-            // SAFETY: see `SendFile` — freshly parsed, uniquely owned, moved once, then single-threaded.
-            Some(((SendFile(file), locs), read))
+            prep(rel, &no_claims)
         })
         .collect();
 
@@ -1983,6 +1989,55 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 parsed_files.insert(rel, sf.0);
             }
         }
+    }
+
+    // SOUNDNESS R1862 / R1824 / R1828 (cfg-twin lane A) — THE CROSS-FILE CLAIMS. Every file's arm records (`FileDecls::i1_arms`,
+    // claim-independent: read before any marking) are joined crate-wide (`mbe::arm_claims`); a file whose claims differ from the
+    // ones its decls were derived under (`FileDecls::i1_claims`: none on a fresh parse) is parsed and spliced again with them, and
+    // its cached units are dropped. Warm or cold, a file's decls and units are derived under the claims the crate asks of it now
+    // (Fable S7), which is what the digest in its entry records.
+    let arm_claims: HashMap<String, crate::mbe::ArmClaims> = if crate::mbe::r1857_off() {
+        HashMap::new()
+    } else {
+        let recs: Vec<(String, &[String])> =
+            decls_per_file.iter().map(|(rel, _, fd)| (module_path(Path::new(rel)), fd.i1_arms.as_slice())).collect();
+        crate::mbe::arm_claims(&recs)
+    };
+    let claims_of = |rel: &str| arm_claims.get(&module_path(Path::new(rel))).unwrap_or(&no_claims);
+    let respl: Vec<usize> = decls_per_file
+        .iter()
+        .enumerate()
+        .filter(|(_, (rel, _, fd))| claims_of(rel).digest() != fd.i1_claims)
+        .map(|(i, _)| i)
+        .collect();
+    for i in respl {
+        let rel = decls_per_file[i].0.clone();
+        let claims = claims_of(&rel);
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("CFGTWINRESPLICE\t{rel}"); // §E1 REACH COUNTER
+        }
+        let Some(((sf, locs), read)) = prep(&rel, claims) else { continue };
+        let _cfg_off = crate::lang::CfgOffScope::enter(cfg_off_files.contains(&rel)); // R977
+        let mut fd = file_decls(&sf.0.items, include_tests, Path::new(&rel));
+        fd.i1_claims = claims.digest();
+        let ch = if read.is_empty() {
+            decls_per_file[i].1.clone()
+        } else {
+            let own = paths
+                .iter()
+                .find(|(_, r)| r == &rel)
+                .and_then(|(p, _)| std::fs::read(p).ok())
+                .map(|b| fnv1a(&b))
+                .unwrap_or_default();
+            let k = crate::lang::include_closure_hash(&own, &read, &walked_canon);
+            if cfg_off_files.contains(&rel) { format!("{k}+cfgoff") } else { k }
+        };
+        fd.include_targets = read;
+        decls_per_file[i] = (rel.clone(), ch, fd);
+        cached_fninfos.remove(&rel);
+        disk_decl_hash.remove(&rel);
+        parsed_locs.insert(rel.clone(), locs);
+        parsed_files.insert(rel, sf.0);
     }
 
     // Pass A MERGE — replay the original accumulation in WALK ORDER over the per-file decls, so the
@@ -3001,8 +3056,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     if t.contains("pin_project") || t.contains("link!") {
                         crate::lang::splice_pin_project(&mut f.items); // R988, R960 — the round-2 twin
                     }
-                    if t.contains("macro_rules") || (!xmacros.is_empty() && t.contains('!')) {
-                        crate::mbe::splice_local_macros(&mut f.items, &xmacros); // R1004 — the round-2 twin
+                    let claims = claims_of(rel); // cfg-twin lane A — the claims its cached decls were derived under
+                    if t.contains("macro_rules") || (!xmacros.is_empty() && t.contains('!')) || !claims.is_empty() {
+                        crate::mbe::splice_local_macros_with(&mut f.items, &xmacros, claims); // R1004 — the round-2 twin
                     }
                     crate::mbe::splice_derived_comparisons(&mut f.items); // R1146 — the round-2 twin
                     if t.contains("DeriveEntity") {
@@ -4469,6 +4525,43 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
     }
+    // cfg-twin lane A (Fable G7) — a NON-SHIPPING reach counter for the queued file-level gating question (Q3): the module paths
+    // of every file a `#[cfg]`-gated `mod x;` declares (`FileDecls::i1_arms` `O` records), so a file under one is known to sit in
+    // a gated chain. Read only under `CANDOR_I1_INSTR`.
+    let q3_gated: Vec<String> = {
+        let mut v: Vec<String> = decls_per_file
+            .iter()
+            .flat_map(|(_, _, fd)| fd.i1_arms.iter())
+            .filter_map(|r| r.strip_prefix("O\u{1f}").and_then(|r| r.split('\u{1f}').nth(1)).map(str::to_string))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    // G7's default-leg variant (D14's shape: an EMPTY visible impl in a gated file): a trait default `Tr::m` for which a hidden
+    // `S as Tr::m` key exists while no gated impl of `S as Tr` was recorded. An UPPER bound of that conjunction: whether the
+    // visible impl sits in a gated file is not recorded for an ungated impl. Non-shipping, `CANDOR_I1_INSTR` only.
+    let q3_default_leg: Vec<String> = if q3_gated.is_empty() {
+        Vec::new()
+    } else {
+        let gated_ik: HashSet<&str> = merged.i1_gated_impls.iter().filter_map(|g| g.split_once('|').map(|(ik, _)| ik)).collect();
+        let quals: HashSet<&str> = fns.iter().map(|f| f.qual.as_str()).collect();
+        merged
+            .i1_xkeys
+            .iter()
+            .filter_map(|x| {
+                let (ik, m) = x.rsplit_once("::")?;
+                let (_, tr) = ik.split_once(" as ")?;
+                let d = format!("{tr}::{m}");
+                (!gated_ik.contains(ik) && quals.iter().any(|q| *q == d || q.ends_with(&format!("::{d}")))).then_some(d)
+            })
+            .collect()
+    };
+    for d in &q3_default_leg {
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("CFGTWINQ3D\t{d}"); // §E1 REACH COUNTER (non-shipping, Fable G7, default leg)
+        }
+    }
     for f in &fns {
         if i1c_on && !f.refusals.iter().any(|w| w == crate::model::MBE_TWIN_WHY) {
             let hit = f.i1_cand.as_deref().is_some_and(|c| {
@@ -4478,6 +4571,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             });
             let dflt = !i1c_defaults.is_empty()
                 && i1c_defaults.iter().any(|d| f.qual == *d || f.qual.ends_with(&format!("::{d}")));
+            // G7: an impl member (∧) in a file whose declaring `mod` chain is gated (∧) whose (trait, member) last segment
+            // matches an exported hidden key (∧) the twin check did not hedge. The row's final `Unknown` is judged against the
+            // report by whoever reads the counter (the conjunction's last leg).
+            if !q3_gated.is_empty() && !hit && !dflt && f.impl_kind == 2 && f.i1_cand.is_none() {
+                let file = f.loc.split(':').next().unwrap_or("");
+                let mp = module_path(Path::new(file));
+                let in_chain = q3_gated.iter().any(|t| mp == *t || mp.starts_with(&format!("{t}::")));
+                let owner = f.qual.rsplit("::").nth(1).unwrap_or("");
+                let keyed = in_chain
+                    && crate::mbe::twin_cand_keys(&format!("{}|{owner}|{}", f.impl_trait, f.leaf), &i1c_renames)
+                        .iter()
+                        .any(|k| !k.starts_with("p:") && merged.i1_xkeys.contains(k));
+                if keyed && candor_report::env::trace("CANDOR_I1_INSTR") {
+                    eprintln!("CFGTWINQ3\t{}", f.qual); // §E1 REACH COUNTER (non-shipping, Fable G7)
+                }
+            }
             if hit || dflt {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default().insert(crate::model::MBE_TWIN_WHY.to_string());
@@ -8881,13 +8990,25 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             //     item position. Ask `by_leaf` whether ANY unit's qual IS the module-relative target, and
             //     the root case answers itself.
             let rel = c.path.strip_prefix("crate::").unwrap_or(&c.path);
+            // SOUNDNESS R1901 (cfg-twin lane A) — the path's MODULE is one only unexpanded text declares (`lang::MACRO_DECL_MOD`):
+            // `cfg_if! { if #[cfg(unix)] { pub mod m { .. } } else { pub mod m { .. } } }` then `m::go()`. Neither arm is read,
+            // no module of that name exists to be a macro module, and the head reads as a crate name: ABSENT over a write on
+            // v0.43.0. A dependency or toolchain crate of that name is not this.
+            let hidden_mod_head = || {
+                let head = rel.split("::").next().unwrap_or("");
+                rel.contains("::")
+                    && merged.macro_hidden_fns.contains(&format!("{}{head}", crate::lang::MACRO_DECL_MOD))
+                    && !deps.contains(head)
+                    && !deps_idx.crates.contains(dep_renames.get(head).map(String::as_str).unwrap_or(head))
+                    && !matches!(head, "std" | "core" | "alloc" | "self" | "super")
+            };
             let r128_fired = !c.is_macro
                 && !c.method
                 && !already_handled
                 && !tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
                 && !by_leaf.get(&c.leaf).is_some_and(|v| v.iter().any(|q| q == rel))
                 && !local_types.contains(&c.leaf)
-                && (macro_hidden_owner(&c.path, 1, &merged.macro_modules) || {
+                && (macro_hidden_owner(&c.path, 1, &merged.macro_modules) || hidden_mod_head() || {
                     let hit = macro_hidden_owner(&c.path, 1, &r1690_glob_macro);
                     if hit && candor_report::env::trace("CANDOR_R1657S2_INSTR") {
                         eprintln!("R1690GLOBMACRO\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER, ADDED branch only

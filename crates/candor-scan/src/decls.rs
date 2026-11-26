@@ -1626,6 +1626,11 @@ fn normalize_rel(p: &Path) -> std::path::PathBuf {
     out
 }
 
+/// cfg-twin lane A — `mod_targets` for `mbe::arm_records`.
+pub(crate) fn mod_targets_pub(items: &[syn::Item], modpath: &str, dir: &Path, include_tests: bool) -> HashMap<String, Vec<String>> {
+    mod_targets(items, modpath, dir, include_tests)
+}
+
 /// `mod NAME;` / `mod NAME { … }` declarations at ONE module level -> the module path(s) their body is
 /// analysed under. Without a `#[path]` redirect that is simply `<modpath>::<NAME>`, which is what
 /// `module_path` yields for both `NAME.rs` and `NAME/mod.rs`. With one, the target is resolved as a FILE

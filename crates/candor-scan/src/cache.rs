@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev221 (rustagent-cfgA, cfg-twin lane A): hand-written `#[cfg]` module arms are covered (R1828/R1862), out-of-line arms take
+    // part through crate-wide claims (`FileDecls::i1_arms`, `i1_claims`; R1824/R1862), a module-gated impl's default leg is
+    // hedged (R1897), and a bare toolchain macro name that a `use` or a local definition rebinds is hidden text (R1899); a rev220
+    // entry holds none of them.
     // rev220 (rustagent-r1857): SOUNDNESS R1857 — a produced `#[cfg]` module arm is marked against what its sibling arm's
     // hidden text may define at any depth (`mbe::mark_module_twins`, `CANDOR_R1857_OFF`), and a covered module arm marks its
     // trait defaults; a rev219 entry holds the unmarked units.
@@ -769,7 +773,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev220/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev221/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -1025,6 +1029,14 @@ pub(crate) struct FileDecls {
     pub(crate) i1_renames: Vec<String>,
     #[serde(default)]
     pub(crate) i1_gated_impls: Vec<String>,
+    /// cfg-twin lane A — `mbe::arm_records`: this file's `#[cfg]` module groups (inline arms with their readings, out-of-line
+    /// targets) and its own reading as an out-of-line arm. Joined crate-wide by `mbe::arm_claims` (`scan.rs`).
+    #[serde(default)]
+    pub(crate) i1_arms: Vec<String>,
+    /// cfg-twin lane A — the digest of the `mbe::ArmClaims` this file's splice consumed (`""`: none). A file whose digest
+    /// differs from the one the crate now asks of it is re-spliced (`scan.rs`), so a stale claim is never replayed.
+    #[serde(default)]
+    pub(crate) i1_claims: String,
     /// I1 stage 1 — last segments of every macro path this file still holds as an unexpanded invocation.
     #[serde(default)]
     pub(crate) i1_unexpanded: Vec<String>,
@@ -1231,6 +1243,7 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
     // I1 stage 1 — the retirement input: which macros this file expanded in full, and which it still invokes unexpanded.
     let (i1_expanded, i1_unexpanded) = crate::mbe::expansion_facts(items);
     let (i1_xkeys, i1_renames, i1_gated_impls) = crate::mbe::twin_facts(items); // I1 stage 2c
+    let i1_arms = crate::mbe::arm_records(items, modpath, &dir, include_tests); // cfg-twin lane A
     let i1_hidden_impls = crate::mbe::has_hidden_impl_surface(items); // I1 (the R1804 exposure)
     let mut i1_foreign_macros = crate::mbe::foreign_bang_macros(items); // I1 (RC2: a bang macro in a body)
     let mut outline = Vec::new();
@@ -1357,6 +1370,8 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
         i1_xkeys,
         i1_renames,
         i1_gated_impls,
+        i1_arms,
+        i1_claims: String::new(),
         nested_impl_members: nested_local.into_iter().collect(),
         nested_impl_foreign: nested_foreign.into_iter().collect(),
         nonnominal_impls: nonnominal.into_iter().collect(),

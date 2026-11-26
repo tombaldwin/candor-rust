@@ -7876,6 +7876,10 @@ pub(crate) fn collect_macro_modules(
 pub(crate) const MACRO_DECL_TYPE: &str = "<macrodecl>";
 /// SOUNDNESS R1636 — the same, for a `type` ALIAS that text declares.
 pub(crate) const MACRO_DECL_ALIAS: &str = "<macroalias>";
+/// SOUNDNESS R1901 (cfg-twin lane A) — a MODULE name an item-position invocation's text declares (`mod NAME`), filed in
+/// `macro_hidden_fns` under this prefix: the head of a path call that names a module only unexpanded text declares
+/// (`cfg_if! { if #[cfg(unix)] { pub mod m { .. } } else { .. } }`, then `m::go()`) is R128's state (`scan.rs`).
+pub(crate) const MACRO_DECL_MOD: &str = "<macromod>";
 
 pub(crate) fn collect_macro_hidden_decls(
     items: &[syn::Item],
@@ -7923,6 +7927,53 @@ pub(crate) fn collect_macro_hidden_decls(
                 // a type this crate declares where candor could not read it, and a `fn` name the same kind of text writes.
                 // Read off the PARSED item list, never off the token text (a doc comment's "the struct is" would file
                 // `is`); an invocation whose arguments are not an item list contributes no type.
+                // SOUNDNESS R1901 (cfg-twin lane A) — a `cfg_if!` invocation's arms are item lists too (`if #[cfg(..)] { .. }`),
+                // read at every inline module depth: a type declared in a module only the unexpanded `cfg_if!` text holds is the
+                // same R452 (b) evidence as one in a module candor read in part.
+                let cfgif_items: Vec<syn::Item> = if m.ident.is_none()
+                    && m.mac.path.segments.last().is_some_and(|s| s.ident == "cfg_if")
+                    && !candor_report::env::switch("CANDOR_R1636_OFF")
+                {
+                    fn flat(items: &[syn::Item], out: &mut Vec<syn::Item>) {
+                        for it in items {
+                            if let syn::Item::Mod(md) = it {
+                                if let Some((_, inner)) = &md.content {
+                                    flat(inner, out);
+                                }
+                            }
+                            out.push(it.clone());
+                        }
+                    }
+                    let mut v = Vec::new();
+                    if let Ok(arms) =
+                        syn::parse2::<crate::collector::CfgIfArms>(crate::model::respan_call_site(m.mac.tokens.clone()))
+                    {
+                        for b in &arms.0 {
+                            let items: Vec<syn::Item> = b
+                                .stmts
+                                .iter()
+                                .filter_map(|st| match st {
+                                    syn::Stmt::Item(i) => Some(i.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            flat(&items, &mut v);
+                        }
+                    }
+                    v
+                } else {
+                    Vec::new()
+                };
+                for gi in cfgif_items.iter().filter(|g| !matches!(g, syn::Item::Type(_) | syn::Item::Mod(_))) {
+                    let n = match gi {
+                        syn::Item::Struct(x) => x.ident.to_string(),
+                        syn::Item::Enum(x) => x.ident.to_string(),
+                        syn::Item::Union(x) => x.ident.to_string(),
+                        _ => continue,
+                    };
+                    types.insert(format!("{MACRO_DECL_TYPE}{n}"));
+                    types.insert(n);
+                }
                 if m.ident.is_none() && !candor_report::env::switch("CANDOR_R1636_OFF") {
                     if let Ok(f) = syn::parse2::<syn::File>(m.mac.tokens.clone()) {
                         for gi in &f.items {
@@ -7945,7 +7996,14 @@ pub(crate) fn collect_macro_hidden_decls(
                         }
                     }
                 }
+                let mut prev_mod = false;
                 for t in toks.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                    if prev_mod && !t.is_empty() && m.ident.is_none() {
+                        fns.insert(format!("{MACRO_DECL_MOD}{t}")); // R1901 — see `MACRO_DECL_MOD`
+                    }
+                    if !t.is_empty() {
+                        prev_mod = t == "mod";
+                    }
                     if prev_fn && !t.is_empty() {
                         match &m.ident {
                             // I1 stage 1 — a `macro_rules!` BODY's names are tagged with the macro, so the merge can retire

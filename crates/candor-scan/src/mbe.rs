@@ -781,6 +781,15 @@ struct Ctx<'x> {
     /// I1 stage 3 (R1784) — the names of `macro_rules!` definitions an EXPANSION emitted (a macro-defining macro). Such a
     /// name binds only where its definition is in TEXTUAL scope (`scope`), never through the file-wide once-defined table.
     emitted: std::collections::HashSet<String>,
+    /// SOUNDNESS R1899 — the `TOOLCHAIN_BANG_MACROS` names whose BARE spelling may not bind the toolchain's macro in this
+    /// file: a non-crate-rooted `use` imports the name (or a glob / `#[macro_use] extern crate` may), or a local or crate-wide
+    /// `macro_rules!` defines it. `is_hidden_text` and `read_hidden`'s toolchain arm read the path alone; for these names a
+    /// bare invocation is another macro's text, read as any other.
+    tc_shadow: std::collections::HashSet<String>,
+    /// SOUNDNESS R1862 / R1824 (cfg-twin lane A) — the cross-file claims this file's splice consumes (`ArmClaims`).
+    claims: DecodedClaims,
+    /// the inline module path of the list being spliced, within this file (`a::b`), for `claims` lookups.
+    modpath: Vec<String>,
 }
 
 /// I1 step 1 — every name a `use` item of this file binds through a path that is NOT rooted at `crate`/`self`/`super`
@@ -875,7 +884,8 @@ impl Ctx<'_> {
         // shadowing the name is read below.
         let root_tc = mac.path.segments.len() == 1
             || matches!(mac.path.segments.first().map(|s| s.ident.to_string()).as_deref(), Some("std" | "core" | "alloc"));
-        if root_tc && TOOLCHAIN_BANG_MACROS.contains(&name.as_str()) && table.get(&name).is_none() {
+        let bare_shadowed = mac.path.segments.len() == 1 && mac.path.leading_colon.is_none() && self.tc_shadow.contains(&name);
+        if root_tc && !bare_shadowed && TOOLCHAIN_BANG_MACROS.contains(&name.as_str()) && table.get(&name).is_none() {
             declared_names(&mac.tokens, &mut h.loose);
             return;
         }
@@ -1217,15 +1227,55 @@ impl Ctx<'_> {
     /// SOUNDNESS R1857 — what one module arm's hidden text may define, at every depth of it: each item-position invocation
     /// left unexpanded, and each impl-item and trait-item invocation (keyed `Owner::m`), read by `read_hidden` as the
     /// per-module cover reads them. Keys are unprefixed (see `cover_arm_keyed`).
+    /// Does this arm hold text `read_arm_hidden` reads: `holds_hidden`'s, or a body-position path invocation of a local macro
+    /// that writes an `impl` (see `read_arm_hidden`).
+    fn holds_arm_text(&self, items: &[syn::Item]) -> bool {
+        if holds_hidden(items, &self.partial, &self.tc_shadow) {
+            return true;
+        }
+        if !self.bodies.values().any(|bs| bs.iter().any(writes_impl)) && !self.xdefs.values().flatten().any(|t| t.contains("impl")) {
+            return false;
+        }
+        let mut h = Hidden::default();
+        self.read_arm_hidden(items, &mut h);
+        !h.is_empty()
+    }
+
     fn read_arm_hidden(&self, items: &[syn::Item], h: &mut Hidden) {
+        // cfg-twin lane A — a BODY-position invocation by PATH (`crate::m! {}` inside `fn host`) of a local macro whose body
+        // writes an `impl`: the body hoist (R1813) binds bare names only, so the impl it emits stays unexpanded text of this arm
+        // (`p6`), and the twin impl in a sibling arm read alone. Read with the one reader, as item text.
+        struct BodyPaths<'a>(Vec<&'a syn::Macro>);
+        impl<'ast> syn::visit::Visit<'ast> for BodyPaths<'ast> {
+            fn visit_macro(&mut self, m: &'ast syn::Macro) {
+                if m.path.segments.len() > 1 {
+                    self.0.push(m);
+                }
+            }
+            fn visit_item(&mut self, _: &'ast syn::Item) {}
+        }
+        let body_paths = |b: &syn::Block, h: &mut Hidden| {
+            let mut v = BodyPaths(Vec::new());
+            syn::visit::Visit::visit_block(&mut v, b);
+            let table = BodyTable { scoped: None, bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
+            for mac in v.0 {
+                let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                if table.get(&name).is_some_and(|bs| bs.is_some_and(|bs| bs.iter().any(writes_impl))) {
+                    self.read_hidden(mac, None, items, h, 0);
+                }
+            }
+        };
         for it in items {
             match it {
-                syn::Item::Macro(m) if is_hidden_text(m, &self.partial) => self.read_hidden(&m.mac, None, items, h, 0),
+                syn::Item::Fn(f) => body_paths(&f.block, h),
+                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) => self.read_hidden(&m.mac, None, items, h, 0),
                 syn::Item::Impl(im) => {
                     let owner = ty_key(&im.self_ty);
                     for ii in &im.items {
-                        if let syn::ImplItem::Macro(m) = ii {
-                            self.read_hidden(&m.mac, Some(&owner), items, h, 0);
+                        match ii {
+                            syn::ImplItem::Macro(m) => self.read_hidden(&m.mac, Some(&owner), items, h, 0),
+                            syn::ImplItem::Fn(f) => body_paths(&f.block, h),
+                            _ => {}
                         }
                     }
                 }
@@ -1280,7 +1330,15 @@ impl Ctx<'_> {
             }
         }
         let whole = candor_report::env::switch("CANDOR_R1857_WHOLE");
-        for idxs in groups.values().filter(|v| v.len() >= 2) {
+        let here = self.modpath.join("::");
+        for (name, idxs) in groups.iter() {
+            // cfg-twin lane A — what the arms of this group in OTHER files claim (`ArmClaims::inline`): the real reading of
+            // every out-of-line target's hidden text. A group of one `mod` item can still be a group (`cfg_attr(path)`: one
+            // declaration, two files), which only that claim can show.
+            let xclaim = self.claims.inline.get(&claim_key(&here, name)).filter(|h| !h.is_empty());
+            if idxs.len() < 2 && xclaim.is_none() {
+                continue;
+            }
             let readings: Vec<Option<Hidden>> = idxs
                 .iter()
                 .map(|&i| {
@@ -1293,7 +1351,7 @@ impl Ctx<'_> {
                         }
                         return Some(Hidden { opaque: true, ..Hidden::default() });
                     };
-                    if !holds_hidden(inner, &self.partial) {
+                    if !self.holds_arm_text(inner) {
                         return None;
                     }
                     let mut h = Hidden::default();
@@ -1302,23 +1360,54 @@ impl Ctx<'_> {
                     Some(h)
                 })
                 .collect();
-            for (bi, &b) in idxs.iter().enumerate() {
-                if depth == 0 && !spliced.get(b).copied().unwrap_or(false) {
-                    continue;
+            // the stand-ins: an out-of-line arm's opaque reading above (R1857's floor for a PRODUCED inline twin)
+            let standin: Vec<bool> =
+                idxs.iter().map(|&i| matches!(&out[i], syn::Item::Mod(m) if m.content.is_none())).collect();
+            // cfg-twin lane A — export each INLINE arm's reading for the out-of-line arms in other files (`ARM_READ_MARK`,
+            // read by `arm_records`). Read here, before any arm of the group is marked.
+            if !r1857_off() {
+                for (ai, &a) in idxs.iter().enumerate() {
+                    if let (false, Some(r), syn::Item::Mod(m)) = (standin[ai], readings[ai].as_ref(), &mut out[a]) {
+                        if let Some((_, inner)) = &mut m.content {
+                            if !inner.iter().any(|it| is_read_marker(it, ARM_READ_MARK)) {
+                                inner.push(read_marker(ARM_READ_MARK, r));
+                            }
+                        }
+                    }
                 }
+            }
+            for (bi, &b) in idxs.iter().enumerate() {
+                // SOUNDNESS R1828 / R1862 `k_hand` (cfg-twin lane A) — a HAND-WRITTEN arm is an arm: rustc chooses between
+                // two written `#[cfg]` modules exactly as between two produced ones. It is covered from what its siblings'
+                // text REALLY claims: an inline sibling's reading, and an out-of-line sibling's FILE reading (`xclaim`),
+                // never the opaque stand-in, which stays where v0.43.0 applies it, on a produced arm (Fable S5′). It is
+                // marked without removing a binding (`cover_any(.., hand)`), so it only adds `Unknown`.
+                let hand = depth == 0 && !spliced.get(b).copied().unwrap_or(false);
                 let mut h = Hidden::default();
-                for r in readings.iter().enumerate().filter(|(ai, _)| *ai != bi).filter_map(|(_, r)| r.as_ref()) {
-                    h.absorb(r.clone());
+                for (ai, r) in readings.iter().enumerate() {
+                    if ai == bi || (hand && standin[ai]) {
+                        continue;
+                    }
+                    if let Some(r) = r {
+                        h.absorb(r.clone());
+                    }
+                }
+                let own_target = matches!(&out[b], syn::Item::Mod(m) if m.content.is_none());
+                if !own_target {
+                    if let Some(x) = xclaim {
+                        h.absorb(x.clone());
+                    }
                 }
                 if h.is_empty() {
                     continue;
                 }
                 if let syn::Item::Mod(m) = &mut out[b] {
                     if candor_report::env::trace("CANDOR_I1_INSTR") {
-                        eprintln!("R1857MODTWIN\t{}\t{}", m.ident, if h.opaque { "opaque" } else { "keyed" }); // §E1 REACH COUNTER
+                        let tag = if hand { "R1862HAND" } else { "R1857MODTWIN" };
+                        eprintln!("{tag}\t{}\t{}", m.ident, if h.opaque { "opaque" } else { "keyed" }); // §E1 REACH COUNTER
                     }
                     if let Some((_, inner)) = &mut m.content {
-                        cover_arm_keyed(inner, &h);
+                        cover_arm_keyed(inner, &h, hand);
                     }
                 }
             }
@@ -1811,7 +1900,9 @@ impl Ctx<'_> {
                         // unless the module is `#[macro_use]`.
                         let saved = self.scope.clone();
                         let saved_bodies = self.scope_bodies.clone();
+                        self.modpath.push(md.ident.to_string());
                         self.splice(inner, depth);
+                        self.modpath.pop();
                         if !md.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
                             self.scope = saved;
                             self.scope_bodies = saved_bodies;
@@ -1835,7 +1926,7 @@ impl Ctx<'_> {
             let (mut item, mut member) = (Hidden::default(), Hidden::default());
             for it in out.iter() {
                 match it {
-                    syn::Item::Macro(m) if is_hidden_text(m, &self.partial) => {
+                    syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) => {
                         let mut h = Hidden::default();
                         self.read_hidden(&m.mac, None, &out, &mut h, 0);
                         if candor_report::env::trace("CANDOR_I1_INSTR") {
@@ -1869,7 +1960,7 @@ impl Ctx<'_> {
                 }
             }
             // I1 stage 2b — does this module still hold unexpanded ITEM text at all (whatever its reading came to)?
-            let has_hidden = out.iter().any(|it| matches!(it, syn::Item::Macro(m) if is_hidden_text(m, &self.partial)));
+            let has_hidden = out.iter().any(|it| matches!(it, syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow)));
             mark_hidden_twins(&mut out, &spliced, &item, &member, has_hidden);
             // SOUNDNESS R1857 — cfg-twin MODULES: one arm's hidden text, at any depth of it, may define what the other arm
             // shows (`mark_module_twins`).
@@ -2296,7 +2387,7 @@ fn invocation_key(mac: &syn::Macro) -> String {
 /// except a PARTIAL one (its items stand spliced; what it did not splice is kept as its own item) and the toolchain's own
 /// item macros, whose expansions are fixed and bind nothing of the crate's (`thread_local!`, `compile_error!`, …;
 /// `include!` is not exempt: an unread include is hidden text).
-fn is_hidden_text(m: &syn::ItemMacro, partial: &std::collections::HashSet<String>) -> bool {
+fn is_hidden_text(m: &syn::ItemMacro, partial: &std::collections::HashSet<String>, tc_shadow: &std::collections::HashSet<String>) -> bool {
     if m.ident.is_some() || m.mac.path.is_ident("macro_rules") || partial.contains(&invocation_key(&m.mac)) {
         return false;
     }
@@ -2308,7 +2399,10 @@ fn is_hidden_text(m: &syn::ItemMacro, partial: &std::collections::HashSet<String
     }
     let root = m.mac.path.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
     let toolchain_path = m.mac.path.segments.len() == 1 || matches!(root.as_str(), "std" | "core" | "alloc");
-    !(toolchain_path && TOOLCHAIN_BANG_MACROS.contains(&leaf.as_str()))
+    // SOUNDNESS R1899 — the exclusion is for the TOOLCHAIN's binding, not for the name: a bare `thread_local!` this file
+    // imports from a dependency (`use dep::thread_local;`), or defines itself, is that macro's text.
+    let bare_shadowed = m.mac.path.segments.len() == 1 && m.mac.path.leading_colon.is_none() && tc_shadow.contains(&leaf);
+    !(toolchain_path && TOOLCHAIN_BANG_MACROS.contains(&leaf.as_str())) || bare_shadowed
 }
 
 pub(crate) fn is_gated(a: &[syn::Attribute]) -> bool {
@@ -2423,14 +2517,43 @@ fn cover_arm(it: &mut syn::Item) {
     }
 }
 
+/// cfg-twin lane A — `cover_arm` for an arm the splice did NOT produce (a hand-written module arm, or a file read as an
+/// out-of-line arm). The same marks, with one difference: a `use` or a `type` alias is LEFT AS WRITTEN. `cover_arm` puts a
+/// produced one back as hidden text, which is the state every pre-stage-2 build read for it; for a hand-written binding no
+/// build read it that way, and replacing it would remove the edge through it to a possibly effectful target — a removal,
+/// which this additive cover may not make. So those two positions stay a named residual on a hand-written arm (counted
+/// under `CFGTWINRESIDUAL`), while every unit, trait default and `macro_rules!` definition is marked.
+fn cover_any(it: &mut syn::Item, hand: bool) {
+    if !hand {
+        cover_arm(it);
+        return;
+    }
+    match it {
+        syn::Item::Use(_) | syn::Item::Type(_) => {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("CFGTWINRESIDUAL\t{}", if matches!(it, syn::Item::Use(_)) { "use" } else { "type" }); // §E1 REACH COUNTER
+            }
+        }
+        syn::Item::Mod(m) => {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("I1S2MARKMOD\t{}", m.ident); // §E1 REACH COUNTER, on the ADDED branch only
+            }
+            if let Some((_, inner)) = &mut m.content {
+                inner.iter_mut().for_each(|x| cover_any(x, true));
+            }
+        }
+        _ => cover_arm(it),
+    }
+}
+
 /// SOUNDNESS R1857 — does this module body hold unexpanded text at any depth: an item-position invocation (`is_hidden_text`),
 /// or an impl-item or trait-item invocation left in an impl or trait.
-fn holds_hidden(items: &[syn::Item], partial: &std::collections::HashSet<String>) -> bool {
+fn holds_hidden(items: &[syn::Item], partial: &std::collections::HashSet<String>, tc: &std::collections::HashSet<String>) -> bool {
     items.iter().any(|it| match it {
-        syn::Item::Macro(m) => is_hidden_text(m, partial),
+        syn::Item::Macro(m) => is_hidden_text(m, partial, tc),
         syn::Item::Impl(im) => im.items.iter().any(|ii| matches!(ii, syn::ImplItem::Macro(_))),
         syn::Item::Trait(t) => t.items.iter().any(|ti| matches!(ti, syn::TraitItem::Macro(_))),
-        syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| holds_hidden(inner, partial)),
+        syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| holds_hidden(inner, partial, tc)),
         _ => false,
     })
 }
@@ -2439,7 +2562,7 @@ fn holds_hidden(items: &[syn::Item], partial: &std::collections::HashSet<String>
 /// `Ctx::read_arm_hidden` with the same `item_keys`/`read_hidden` the per-module cover uses). Keys are read unprefixed through
 /// every depth of the arm, so a name the hidden text defines in a nested module covers that name at every depth here: an
 /// over-approximation in the hedge direction. An opaque reading covers the whole arm (`cover_arm`).
-fn cover_arm_keyed(items: &mut [syn::Item], h: &Hidden) {
+fn cover_arm_keyed(items: &mut [syn::Item], h: &Hidden, hand: bool) {
     let type_twins: std::collections::HashSet<String> = items
         .iter()
         .filter_map(|it| match it {
@@ -2459,7 +2582,7 @@ fn cover_arm_keyed(items: &mut [syn::Item], h: &Hidden) {
         .collect();
     for (i, it) in items.iter_mut().enumerate() {
         if h.opaque {
-            cover_arm(it);
+            cover_any(it, hand);
             continue;
         }
         match it {
@@ -2471,19 +2594,19 @@ fn cover_arm_keyed(items: &mut [syn::Item], h: &Hidden) {
             }
             syn::Item::Use(_) | syn::Item::Type(_) => {
                 if covered_names[i] {
-                    cover_arm(it);
+                    cover_any(it, hand);
                 }
             }
             syn::Item::Macro(m) if m.ident.is_some() => {
                 if covered_names[i] {
-                    cover_arm(it);
+                    cover_any(it, hand);
                 }
             }
             syn::Item::Mod(m) => {
                 if h.covers(&m.ident.to_string()) {
-                    cover_arm(it);
+                    cover_any(it, hand);
                 } else if let Some((_, inner)) = &mut m.content {
-                    cover_arm_keyed(inner, h);
+                    cover_arm_keyed(inner, h, hand);
                 }
             }
             syn::Item::Impl(im) => {
@@ -2928,6 +3051,24 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
         }
         k.names.iter().any(|n| item.covers(n))
     };
+    // SOUNDNESS R1828 (cfg-twin lane A) — a HAND-WRITTEN gated fn, inline module or `macro_rules!` definition beside hidden
+    // text that may define its name is an arm too (`d11`: `#[cfg(unix)] crate::wfn! { pub fn go(); }` beside
+    // `#[cfg(not(unix))] pub fn go() {}` in one file read the stub alone, ABSENT over a write). The same `visible_twin` test a
+    // produced arm passes; marked without removing a binding (`cover_any(.., true)`), so a hand-written `use` or `type` is
+    // left as written (a named residual) and only `Unknown` is added.
+    let hand_flags: Vec<bool> = out
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            !spliced.get(i).copied().unwrap_or(false)
+                && is_gated(crate::lang::item_attrs(it))
+                && !crate::lang::is_cfg_test(crate::lang::item_attrs(it))
+                && (matches!(it, syn::Item::Fn(_))
+                    || matches!(it, syn::Item::Mod(m) if m.content.is_some())
+                    || matches!(it, syn::Item::Macro(m) if m.ident.is_some()))
+                && visible_twin(it, out)
+        })
+        .collect();
     let flags: Vec<bool> = out
         .iter()
         .enumerate()
@@ -2953,6 +3094,13 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
         })
         .collect();
     for (i, it) in out.iter_mut().enumerate() {
+        if hand_flags[i] {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("R1828HAND\t{}", item_keys(it, &[]).names.first().cloned().unwrap_or_default()); // §E1 REACH COUNTER
+            }
+            cover_any(it, true);
+            continue;
+        }
         if flags[i] {
             let keep_use = matches!(&*it, syn::Item::Use(u) if use_into(&u.tree, &marked_mods, true));
             if !keep_use {
@@ -2976,13 +3124,22 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
         }
         // I1 stage 2c — a gated DEFAULT body beside the trait's own unexpanded trait-item text that may define it (`rd_e`).
         if let syn::Item::Trait(t) = it {
-            if !member.is_empty() && !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
+            if (!member.is_empty() || (is_gated(&t.attrs) && !item.is_empty())) && !candor_report::env::switch("CANDOR_I1S2C_XMOD_OFF") {
                 let tn = t.ident.to_string();
+                // SOUNDNESS R1828 (cfg-twin lane A) — or a default of a trait that is itself one `#[cfg]` arm, beside a twin trait
+                // whose member text (or item text) may define it (`d11v2`: `#[cfg(unix)] trait T { hid! { fn go } }` beside
+                // `#[cfg(not(unix))] trait T { fn go(&self) {} }` read the pure default alone).
+                let trait_arm = is_gated(&t.attrs);
                 for ti in t.items.iter_mut() {
                     if let syn::TraitItem::Fn(f) = ti {
                         let n = f.sig.ident.to_string();
                         if f.default.is_some() && is_gated(&f.attrs) && member.covers_method(&tn, &n, false) {
                             mark_fn_as(&mut f.attrs, &format!("{tn}::{n}"), "I1S2MARKTRAITITEM");
+                        } else if f.default.is_some()
+                            && trait_arm
+                            && (member.covers_method(&tn, &n, false) || trait_default_twin(item, &tn, &n))
+                        {
+                            mark_fn_as(&mut f.attrs, &format!("{tn}::{n}"), "R1828TRAITARM");
                         }
                     }
                 }
@@ -3081,6 +3238,308 @@ fn i1_refused(g: &syn::Item) -> bool {
     }
 }
 
+/// cfg-twin lane A — the marker carrying one INLINE module arm's reading (pushed into the arm by `mark_module_twins`), and
+/// the one carrying a whole FILE's reading as an out-of-line arm (`splice_local_macros_with`). Read by `arm_records`.
+const ARM_READ_MARK: &str = "__candor_i1_arm_read";
+const FILE_READ_MARK: &str = "__candor_i1_file_read";
+
+/// One reading as marker tokens: `O` (opaque), `k:`/`l:`/`x:` + a key, loose name or impl-scoped key. `sigs` is not carried:
+/// only the in-list impl arm's stood member reads it, and a claim is never read there.
+fn read_marker(mark: &str, h: &Hidden) -> syn::Item {
+    let mut v: Vec<String> = Vec::new();
+    if h.opaque {
+        v.push("O".to_string());
+    }
+    v.extend(h.keys.iter().map(|k| format!("k:{k}")));
+    v.extend(h.loose.iter().map(|k| format!("l:{k}")));
+    v.extend(h.xkeys.iter().map(|k| format!("x:{k}")));
+    v.sort();
+    let mut ts = TokenStream::new();
+    ts.extend([TokenTree::Ident(Ident::new(mark, proc_macro2::Span::call_site()))]);
+    for k in v {
+        ts.extend([TokenTree::Literal(proc_macro2::Literal::string(&k))]);
+    }
+    syn::Item::Verbatim(ts)
+}
+
+fn marker_strings(it: &syn::Item, mark: &str) -> Option<Vec<String>> {
+    let syn::Item::Verbatim(ts) = it else { return None };
+    let mut toks = ts.clone().into_iter();
+    if !matches!(toks.next(), Some(TokenTree::Ident(a)) if a == mark) {
+        return None;
+    }
+    Some(
+        toks.filter_map(|t| match t {
+            TokenTree::Literal(l) => match syn::parse2::<syn::Lit>(TokenTree::Literal(l).into()) {
+                Ok(syn::Lit::Str(s)) => Some(s.value()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect(),
+    )
+}
+
+fn is_read_marker(it: &syn::Item, mark: &str) -> bool {
+    marker_strings(it, mark).is_some()
+}
+
+/// A serialised reading (the `read_marker` strings joined by `\u{1d}`) back into a `Hidden`.
+fn reading_of(s: &str) -> Hidden {
+    let mut h = Hidden::default();
+    for t in s.split('\u{1d}').filter(|t| !t.is_empty()) {
+        match t.split_once(':') {
+            _ if t == "O" => h.opaque = true,
+            Some(("k", k)) => {
+                h.keys.insert(k.to_string());
+            }
+            Some(("l", k)) => {
+                h.loose.insert(k.to_string());
+            }
+            Some(("x", k)) => {
+                h.xkeys.insert(k.to_string());
+            }
+            _ => {}
+        }
+    }
+    h
+}
+
+/// The `ArmClaims::inline` key of one group: the inline module path of its list within the file, and the `mod` name.
+fn claim_key(list: &str, name: &str) -> String {
+    format!("{list}\u{1f}{name}")
+}
+
+/// SOUNDNESS R1862 / R1824 / R1828 (cfg-twin lane A) — THE CROSS-FILE CLAIMS ONE FILE'S SPLICE CONSUMES.
+///
+/// THE EXPOSURE. The module-twin cover (`Ctx::mark_module_twins`) is per item list. Where an arm of a `#[cfg]` module group
+/// is OUT OF LINE (`mod x;`, `#[path]`, `cfg_attr(path)`), its items are another file's, which this file's splice never
+/// reads, and that file's splice does not know it is an arm: so a pure out-of-line arm beside an inline arm's hidden text
+/// (R1862 `k_outline2`), two `#[path]` arms (`k_path`), and a hand-written inline arm beside an out-of-line live arm
+/// (`k_handout`) all read silent on v0.43.0. The R1857 stand-in answers only a PRODUCED inline arm, wholesale.
+///
+/// THE MODEL. Every file exports the real readings of its arms' hidden text (`arm_records`: each inline arm's, and the
+/// file's own as an out-of-line arm), and the groups its lists declare, with each out-of-line arm's TARGET module path
+/// (`decls::mod_targets`, which already honours `#[path]` and `cfg_attr(path)`). `scan.rs` joins them crate-wide
+/// (`arm_claims`) and re-splices each file that has a claim to consume, with `ArmClaims`: `as_arm` (the union of every
+/// OTHER arm's reading, for this file's own units) and `inline` (the out-of-line arms' readings, for this file's inline
+/// arms). Degeneracy is by target FILE only (two `mod x;` naming one file are one arm, Fable S1): an inline arm is never
+/// degenerate with anything. Marking is `cover_arm_keyed`'s, whose depth-insensitive match keeps S3.
+///
+/// Held SERIALISED (`read_marker`'s strings), so the table is `Sync` for the parallel splice; decoded per file
+/// (`DecodedClaims`).
+#[derive(Default, Clone)]
+pub(crate) struct ArmClaims {
+    as_arm: Option<String>,
+    inline: std::collections::BTreeMap<String, String>,
+}
+
+fn ser_reading(h: &Hidden) -> String {
+    let mut v: Vec<String> = h.keys.iter().map(|k| format!("k:{k}")).collect();
+    v.extend(h.loose.iter().map(|k| format!("l:{k}")));
+    v.extend(h.xkeys.iter().map(|k| format!("x:{k}")));
+    if h.opaque {
+        v.push("O".into());
+    }
+    v.sort();
+    v.join("\u{1d}")
+}
+
+impl ArmClaims {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.as_arm.as_ref().is_none_or(|h| h.is_empty()) && self.inline.values().all(|h| h.is_empty())
+    }
+    /// A stable digest of what this file consumes: part of what its decls and units were derived under.
+    pub(crate) fn digest(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut parts: Vec<String> = self.inline.iter().map(|(k, h)| format!("{k}={h}")).collect();
+        if let Some(h) = &self.as_arm {
+            parts.push(format!("@={h}"));
+        }
+        crate::cache::fnv1a(parts.join("\u{1e}").as_bytes())
+    }
+    fn decode(&self) -> DecodedClaims {
+        DecodedClaims {
+            as_arm: self.as_arm.as_deref().map(reading_of),
+            inline: self.inline.iter().map(|(k, v)| (k.clone(), reading_of(v))).collect(),
+        }
+    }
+}
+
+/// `ArmClaims`, decoded for one file's splice.
+#[derive(Default)]
+struct DecodedClaims {
+    as_arm: Option<Hidden>,
+    inline: HashMap<String, Hidden>,
+}
+
+/// cfg-twin lane A — this file's arm records (`cache::FileDecls::i1_arms`), from the spliced items:
+/// - `F␟<file module path>␟<reading>`: the file's own reading as an out-of-line arm (`FILE_READ_MARK`);
+/// - `I␟<group>␟<list path in file>␟<name>␟<reading>`: an inline arm of a gated `mod` group (reading may be empty);
+/// - `O␟<group>␟<target module path>`: one target of an out-of-line arm.
+///
+/// `<group>` is `<parent module path>␞<mod name>`.
+pub(crate) fn arm_records(items: &[syn::Item], modpath: &str, dir: &std::path::Path, include_tests: bool) -> Vec<String> {
+    fn walk(
+        items: &[syn::Item],
+        modpath: &str,
+        inpath: &str,
+        dir: &std::path::Path,
+        include_tests: bool,
+        out: &mut Vec<String>,
+    ) {
+        let targets = crate::decls::mod_targets_pub(items, modpath, dir, include_tests);
+        // SOUNDNESS R1901 (cfg-twin lane A) — an out-of-line `mod` declared inside an item-position `cfg_if!` (`if #[cfg(unix)] {
+        // #[path = "u.rs"] mod imp; } else { .. }`) is an arm of the same group as a written one: every branch's declarations
+        // are lifted here (for the group table only; nothing else reads them), as `lang::cfg_if_use_items` lifts its `use`s.
+        let lifted: Vec<syn::Item> = items
+            .iter()
+            .filter_map(|it| match it {
+                syn::Item::Macro(m) if m.mac.path.segments.last().is_some_and(|s| s.ident == "cfg_if") => Some(m),
+                _ => None,
+            })
+            .filter_map(|m| syn::parse2::<crate::collector::CfgIfArms>(crate::model::respan_call_site(m.mac.tokens.clone())).ok())
+            .flat_map(|arms| arms.0.into_iter())
+            .flat_map(|b| b.stmts.into_iter())
+            .filter_map(|st| match st {
+                syn::Stmt::Item(syn::Item::Mod(mut m)) if m.content.is_none() => {
+                    m.attrs.push(syn::parse_quote!(#[cfg(candor_cfg_if_arm)]));
+                    Some(syn::Item::Mod(m))
+                }
+                _ => None,
+            })
+            .collect();
+        if !lifted.is_empty() {
+            let lt = crate::decls::mod_targets_pub(&lifted, modpath, dir, include_tests);
+            for (name, ts) in lt {
+                let group = format!("{modpath}\u{1e}{name}");
+                for t in ts {
+                    out.push(format!("O\u{1f}{group}\u{1f}{t}\u{1f}{inpath}"));
+                }
+            }
+        }
+        for it in items {
+            let syn::Item::Mod(m) = it else { continue };
+            if !include_tests && crate::lang::is_cfg_test(&m.attrs) {
+                continue;
+            }
+            let name = m.ident.to_string();
+            let sub = if modpath.is_empty() { name.clone() } else { format!("{modpath}::{name}") };
+            let group = format!("{modpath}\u{1e}{name}");
+            match &m.content {
+                Some((_, inner)) => {
+                    if is_gated(&m.attrs) {
+                        let r = inner.iter().filter_map(|x| marker_strings(x, ARM_READ_MARK)).flatten().collect::<Vec<_>>();
+                        out.push(format!("I\u{1f}{group}\u{1f}{inpath}\u{1f}{name}\u{1f}{}", r.join("\u{1d}")));
+                    }
+                    let inp = if inpath.is_empty() { name.clone() } else { format!("{inpath}::{name}") };
+                    walk(inner, &sub, &inp, &dir.join(&name), include_tests, out);
+                }
+                None if is_gated(&m.attrs) => {
+                    for t in targets.get(&name).into_iter().flatten() {
+                        out.push(format!("O\u{1f}{group}\u{1f}{t}\u{1f}{inpath}"));
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let file_read: Vec<String> = items.iter().filter_map(|x| marker_strings(x, FILE_READ_MARK)).flatten().collect();
+    if !file_read.is_empty() {
+        out.push(format!("F\u{1f}{modpath}\u{1f}{}", file_read.join("\u{1d}")));
+    }
+    walk(items, modpath, "", dir, include_tests, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// cfg-twin lane A — the crate-wide join: per file (by its module path and its own records), the claims it consumes.
+/// `records`: every file's `(module path, i1_arms)`. A group is an arm set when it has at least two DISTINCT arms (inline
+/// arms, each distinct; out-of-line targets, distinct by module path, i.e. by file).
+pub(crate) fn arm_claims(records: &[(String, &[String])]) -> HashMap<String, ArmClaims> {
+    let mut file_read: HashMap<String, Hidden> = HashMap::new();
+    // group -> (inline arms: (file modpath, list path, name, reading)), out-of-line targets
+    #[derive(Default)]
+    struct G {
+        inline: Vec<(String, String, String, Hidden)>,
+        targets: std::collections::BTreeSet<String>,
+        decl_files: std::collections::BTreeSet<(String, String, String)>,
+    }
+    let mut groups: std::collections::BTreeMap<String, G> = Default::default();
+    for (fmp, recs) in records {
+        for r in recs.iter() {
+            let p: Vec<&str> = r.split('\u{1f}').collect();
+            match p.as_slice() {
+                ["F", mp, read] => {
+                    file_read.entry(mp.to_string()).or_default().absorb(reading_of(read));
+                }
+                ["I", g, inpath, name, read] => {
+                    groups.entry(g.to_string()).or_default().inline.push((
+                        fmp.clone(),
+                        inpath.to_string(),
+                        name.to_string(),
+                        reading_of(read),
+                    ));
+                }
+                ["O", g, t, inpath] => {
+                    let e = groups.entry(g.to_string()).or_default();
+                    e.targets.insert(t.to_string());
+                    let name = g.rsplit('\u{1e}').next().unwrap_or("").to_string();
+                    e.decl_files.insert((fmp.clone(), inpath.to_string(), name));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut acc: HashMap<String, DecodedClaims> = HashMap::new();
+    for g in groups.values() {
+        if g.targets.is_empty() || g.inline.len() + g.targets.len() < 2 {
+            continue; // no out-of-line arm (the in-list cover answers it), or one arm only (Fable S1: same file twice)
+        }
+        // each out-of-line target, as an arm: every OTHER arm's reading
+        for t in &g.targets {
+            let mut h = Hidden::default();
+            for (_, _, _, r) in &g.inline {
+                h.absorb(r.clone());
+            }
+            for t2 in g.targets.iter().filter(|t2| *t2 != t) {
+                if let Some(r) = file_read.get(t2) {
+                    h.absorb(r.clone());
+                }
+            }
+            if !h.is_empty() {
+                let c = acc.entry(t.clone()).or_default();
+                c.as_arm.get_or_insert_with(Hidden::default).absorb(h);
+            }
+        }
+        // the declaring list's inline arms: every out-of-line target's reading
+        let mut x = Hidden::default();
+        for t in &g.targets {
+            if let Some(r) = file_read.get(t) {
+                x.absorb(r.clone());
+            }
+        }
+        if !x.is_empty() {
+            for (fmp, inpath, name) in &g.decl_files {
+                acc.entry(fmp.clone()).or_default().inline.entry(claim_key(inpath, name)).or_default().absorb(x.clone());
+            }
+        }
+    }
+    acc.into_iter()
+        .map(|(k, d)| {
+            let c = ArmClaims {
+                as_arm: d.as_arm.as_ref().map(ser_reading),
+                inline: d.inline.iter().map(|(k, h)| (k.clone(), ser_reading(h))).collect(),
+            };
+            (k, c)
+        })
+        .collect()
+}
+
 /// I1 stage 2c — the marker carrying one module's exported hidden keys (`Hidden::xkeys`, `p:`-prefixed path keys, and the
 /// renames the hidden text writes as `=Alias=Orig`).
 const XKEYS_MARK: &str = "__candor_i1_xkeys";
@@ -3089,7 +3548,7 @@ const XKEYS_MARK: &str = "__candor_i1_xkeys";
 /// renames it writes (`Alias=Orig`, last segments), and every cfg-gated trait impl block (`S as Tr|m1,m2`, the members it
 /// writes). Read into `cache::FileDecls`, unioned at the merge, consulted at pass B.
 pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<String>) {
-    fn walk(items: &[syn::Item], x: &mut Vec<String>, r: &mut Vec<String>, g: &mut Vec<String>) {
+    fn walk(items: &[syn::Item], x: &mut Vec<String>, r: &mut Vec<String>, g: &mut Vec<String>, gated_mod: bool) {
         for it in items {
             match it {
                 syn::Item::Verbatim(ts) => {
@@ -3112,7 +3571,11 @@ pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<
                 syn::Item::Type(t) if !candor_report::env::switch("CANDOR_I1S2D_ALIAS_OFF") => {
                     r.push(format!("{}={}", t.ident, ty_key(&t.ty)));
                 }
-                syn::Item::Impl(im) if is_gated(&im.attrs) => {
+                // SOUNDNESS R1897 (cfg-twin lane A) — an impl inside a `#[cfg]`-gated inline module is an arm of that cfg as surely
+                // as one carrying the attribute itself: the member leg already reads it so (`decls::GatedModScope`), and without
+                // the same reading here an EMPTY visible impl in a gated module (`gatevia viamod_e`) put no default into the
+                // default leg, so the trait's pure default answered a call whose live arm was hidden text (ABSENT over a write).
+                syn::Item::Impl(im) if is_gated(&im.attrs) || gated_mod => {
                     if let Some(t) = trait_key(im) {
                         let ms: Vec<String> = im
                             .items
@@ -3127,7 +3590,7 @@ pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<
                 }
                 syn::Item::Mod(m) => {
                     if let Some((_, inner)) = &m.content {
-                        walk(inner, x, r, g);
+                        walk(inner, x, r, g, gated_mod || is_gated(&m.attrs));
                     }
                 }
                 _ => {}
@@ -3135,7 +3598,7 @@ pub(crate) fn twin_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>, Vec<
         }
     }
     let (mut x, mut r, mut g) = (Vec::new(), Vec::new(), Vec::new());
-    walk(items, &mut x, &mut r, &mut g);
+    walk(items, &mut x, &mut r, &mut g, false);
     for v in [&mut x, &mut r, &mut g] {
         v.sort();
         v.dedup();
@@ -4232,6 +4695,11 @@ pub(crate) fn mbe_trait_of(it: &syn::Item) -> Option<(String, Vec<String>)> {
 /// Splice, beside every item-position invocation of a `macro_rules!` this file defines exactly once, the
 /// free functions and `extern` blocks it expands to. See the module doc for what is refused.
 pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacros) {
+    splice_local_macros_with(items, xdefs, &ArmClaims::default());
+}
+
+/// `splice_local_macros`, with the cross-file cfg-twin claims this file consumes (`ArmClaims`, cfg-twin lane A).
+pub(crate) fn splice_local_macros_with(items: &mut Vec<syn::Item>, xdefs: &CrateMacros, claims: &ArmClaims) {
     let mut imported = std::collections::HashSet::new();
     if !candor_report::env::switch("CANDOR_I1_BIND_OFF") {
         imported_names(items, &mut imported);
@@ -4240,7 +4708,7 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
     collect_defs(items, &imported, &mut defs);
     // R1156 — a name defined more than once (`None`) may still be expanded from its textual scope.
     // I1 stage 3 (R1813) — a file whose only definitions are BODY-local still has body-position invocations to read.
-    if defs.is_empty() && xdefs.iter().all(|(k, d)| d.is_none() || k.starts_with(ALL_BODIES_KEY)) && body_off() {
+    if defs.is_empty() && xdefs.iter().all(|(k, d)| d.is_none() || k.starts_with(ALL_BODIES_KEY)) && body_off() && claims.is_empty() {
         return;
     }
     let mut bodies: HashMap<String, Vec<TokenStream>> = HashMap::new();
@@ -4262,6 +4730,18 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
         }
     }
     all_bodies(items, &mut bodies);
+    // SOUNDNESS R1899 — which toolchain macro names a BARE invocation in this file may not bind to the toolchain.
+    let tc_shadow: std::collections::HashSet<String> = TOOLCHAIN_BANG_MACROS
+        .iter()
+        .filter(|n| {
+            imported.contains(**n)
+                || imported.contains("*")
+                || bodies.contains_key(**n)
+                || xdefs.get(**n).is_some()
+                || xdefs.get(&emitted_key(n)).is_some()
+        })
+        .map(|n| n.to_string())
+        .collect();
     let mut cx = Ctx {
         arms: HashMap::new(),
         defs,
@@ -4273,8 +4753,29 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
         bodies,
         scope_bodies: HashMap::new(),
         emitted: Default::default(),
+        tc_shadow,
+        claims: claims.decode(),
+        modpath: Vec::new(),
     };
     cx.splice(items, 0);
+    // SOUNDNESS R1862 / R1824 (cfg-twin lane A) — THIS FILE AS AN OUT-OF-LINE MODULE ARM. Its own hidden text, read whole
+    // (the same `read_arm_hidden` an inline arm is read with), is exported for the sibling arms in other files
+    // (`FILE_READ_MARK` → `cache::FileDecls::i1_arms`); read BEFORE this file's own units are marked, so a claim never
+    // depends on another claim. Then the sibling arms' claims, joined crate-wide by `arm_claims`, mark this file's units
+    // exactly as an inline arm's are (`cover_arm_keyed`, hand-written: no binding is removed).
+    if !r1857_off() && cx.holds_arm_text(items) {
+        let mut h = Hidden::default();
+        cx.read_arm_hidden(items, &mut h);
+        if !h.is_empty() {
+            items.push(read_marker(FILE_READ_MARK, &h));
+        }
+    }
+    if let Some(h) = cx.claims.as_arm.as_ref().filter(|h| !h.is_empty()) {
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("CFGTWINFILE\t{}", if h.opaque { "opaque" } else { "keyed" }); // §E1 REACH COUNTER, ADDED branch only
+        }
+        cover_arm_keyed(items, h, true);
+    }
 }
 
 

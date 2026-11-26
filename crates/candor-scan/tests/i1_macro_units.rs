@@ -1725,9 +1725,12 @@ fn r1857_module_twin_arms_keep_a_hedge() {
     }
     assert_eq!(eff(&rows, "fv::vis_e"), vec!["Fs".to_string()], "vis_e: two visible arms, no hedge: {rows:?}");
     assert_eq!(eff(&rows, "fs::keep_e"), vec!["Fs".to_string(), "Unknown".to_string()], "keep_e keeps the live default's Fs: {rows:?}");
-    // The kill switch restores main's reading: every probe resolves to the visible pure arm alone.
+    // The kill switch restores main's reading: every probe resolves to the visible pure arm alone. Except `fi::ovr_e`, which
+    // a second, independent rule now also holds (SOUNDNESS R1897, cfg-twin lane A): the visible arm's empty `impl TI for Q`
+    // sits in a `#[cfg]`-gated module, so the crate-wide default leg hedges `TI::go_i` whatever R1857 does.
     let (off, _) = scan(&d, None, &[("CANDOR_R1857_OFF", "1")]);
-    for f in probes {
+    for f in probes.iter().filter(|f| **f != "fi::ovr_e") {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "R1857_OFF: {f} reads the visible arm alone: {off:?}");
     }
+    assert!(eff(&off, "fi::ovr_e").contains(&"Unknown".to_string()), "R1897's default leg holds fi::ovr_e under R1857_OFF: {off:?}");
 }
