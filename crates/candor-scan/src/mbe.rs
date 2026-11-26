@@ -2424,8 +2424,27 @@ fn use_as_hidden_text(u: &syn::ItemUse) -> syn::Item {
     })
 }
 
-fn mark_fn(attrs: &mut Vec<syn::Attribute>, n: &str) {
-    mark_fn_as(attrs, n, "I1S2MARKFN");
+fn mark_fn(sp: Option<proc_macro2::Span>, attrs: &mut Vec<syn::Attribute>, n: &str) {
+    mark_fn_at(sp, attrs, n, "I1S2MARKFN");
+}
+
+/// The span of an item's first token: where `decls::fn_locs` reads its location from.
+fn first_span(t: &impl quote::ToTokens) -> Option<proc_macro2::Span> {
+    t.to_token_stream().into_iter().next().map(|t| t.span())
+}
+
+/// `mark_fn_as`, with the marker carrying the item's first-token span (cfg-twin lane A). A marker pushed onto an item with
+/// NO attributes becomes its first token, so a `call_site` span moved the unit's location to `:1:1` (measured: getrandom
+/// 0.2.17's out-of-line `#[path]` arms, 35 rows in this lane's first A/B).
+fn mark_fn_at(sp: Option<proc_macro2::Span>, attrs: &mut Vec<syn::Attribute>, n: &str, counter: &str) {
+    if !attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_ATTR)) {
+        let sp = if attrs.is_empty() { sp.unwrap_or_else(proc_macro2::Span::call_site) } else { proc_macro2::Span::call_site() };
+        let id = syn::Ident::new(crate::model::MBE_TWIN_ATTR, sp);
+        attrs.push(syn::parse_quote_spanned!(sp=> #[#id]));
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("{counter}\t{n}"); // §E1 REACH COUNTER, on the ADDED branch only
+        }
+    }
 }
 
 /// `counter`: the §E1 reach counter the mark is counted under (fn, method, trait default).
@@ -2454,13 +2473,13 @@ fn cover_arm(it: &mut syn::Item) {
         }
         syn::Item::Fn(f) => {
             let n = f.sig.ident.to_string();
-            mark_fn(&mut f.attrs, &n);
+            mark_fn(first_span(&*f), &mut f.attrs, &n);
         }
         syn::Item::Impl(im) => {
             for ii in im.items.iter_mut() {
                 if let syn::ImplItem::Fn(f) = ii {
                     let n = f.sig.ident.to_string();
-                    mark_fn(&mut f.attrs, &n);
+                    mark_fn(first_span(&*f), &mut f.attrs, &n);
                 }
             }
         }
@@ -2505,7 +2524,7 @@ fn cover_arm(it: &mut syn::Item) {
                 if let syn::TraitItem::Fn(f) = ti {
                     if f.default.is_some() {
                         let n = format!("{tn}::{}", f.sig.ident);
-                        mark_fn_as(&mut f.attrs, &n, "R1857MARKTRAIT");
+                        mark_fn_at(first_span(&*f), &mut f.attrs, &n, "R1857MARKTRAIT");
                     }
                 }
             }
@@ -2596,7 +2615,7 @@ fn cover_arm_keyed(items: &mut [syn::Item], h: &Hidden, hand: bool) {
             syn::Item::Fn(f) => {
                 let n = f.sig.ident.to_string();
                 if h.covers(&n) {
-                    mark_fn_as(&mut f.attrs, &n, "R1857MARKFN");
+                    mark_fn_at(first_span(&*f), &mut f.attrs, &n, "R1857MARKFN");
                 }
             }
             syn::Item::Use(_) | syn::Item::Type(_) => {
@@ -2630,7 +2649,7 @@ fn cover_arm_keyed(items: &mut [syn::Item], h: &Hidden, hand: bool) {
                                 || h.xkeys.contains(&format!("* as {t}"))
                         });
                         if h.covers_method(&owner, &n, tt) || trait_leg {
-                            mark_fn_as(&mut f.attrs, &format!("{owner}::{n}"), "R1857MARKMETH");
+                            mark_fn_at(first_span(&*f), &mut f.attrs, &format!("{owner}::{n}"), "R1857MARKMETH");
                         }
                     }
                 }
@@ -2641,7 +2660,7 @@ fn cover_arm_keyed(items: &mut [syn::Item], h: &Hidden, hand: bool) {
                     if let syn::TraitItem::Fn(f) = ti {
                         let n = f.sig.ident.to_string();
                         if f.default.is_some() && trait_default_twin(h, &tn, &n) {
-                            mark_fn_as(&mut f.attrs, &format!("{tn}::{n}"), "R1857MARKTRAIT");
+                            mark_fn_at(first_span(&*f), &mut f.attrs, &format!("{tn}::{n}"), "R1857MARKTRAIT");
                         }
                     }
                 }
@@ -3002,7 +3021,7 @@ fn cover_trait_marker_by(it: &mut syn::Item, twin: impl Fn(&str, &str) -> bool) 
         if let syn::TraitItem::Fn(f) = ti {
             if f.default.is_some() && twin(&tn, &f.sig.ident.to_string()) {
                 let n = format!("{tn}::{}", f.sig.ident);
-                mark_fn_as(&mut f.attrs, &n, "I1S2MARKTRAIT");
+                mark_fn_at(first_span(&*f), &mut f.attrs, &n, "I1S2MARKTRAIT");
                 hit = true;
             }
         }
@@ -3141,12 +3160,12 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
                     if let syn::TraitItem::Fn(f) = ti {
                         let n = f.sig.ident.to_string();
                         if f.default.is_some() && is_gated(&f.attrs) && member.covers_method(&tn, &n, false) {
-                            mark_fn_as(&mut f.attrs, &format!("{tn}::{n}"), "I1S2MARKTRAITITEM");
+                            mark_fn_at(first_span(&*f), &mut f.attrs, &format!("{tn}::{n}"), "I1S2MARKTRAITITEM");
                         } else if f.default.is_some()
                             && trait_arm
                             && (member.covers_method(&tn, &n, false) || trait_default_twin(item, &tn, &n))
                         {
-                            mark_fn_as(&mut f.attrs, &format!("{tn}::{n}"), "R1828TRAITARM");
+                            mark_fn_at(first_span(&*f), &mut f.attrs, &format!("{tn}::{n}"), "R1828TRAITARM");
                         }
                     }
                 }
@@ -3205,7 +3224,7 @@ fn mark_hidden_twins(out: &mut [syn::Item], spliced: &[bool], item: &Hidden, mem
                     if (block || is_gated(&f.attrs))
                         && (both(&owner, &n) || trait_twin || (produced_block && item.covers_method(&owner, &n, true)))
                     {
-                        mark_fn_as(&mut f.attrs, &format!("{owner}::{n}"), "I1S2MARKMETH");
+                        mark_fn_at(first_span(&*f), &mut f.attrs, &format!("{owner}::{n}"), "I1S2MARKMETH");
                     }
                 }
             }

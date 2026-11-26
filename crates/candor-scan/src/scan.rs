@@ -2010,13 +2010,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         .filter(|(_, (rel, _, fd))| claims_of(rel).digest() != fd.i1_claims)
         .map(|(i, _)| i)
         .collect();
-    for i in respl {
+    // Parsed on rayon workers, as round 1 is (`fn_locs` must run on the thread that parsed the file, `decls::fn_locs`).
+    type Reparsed = (usize, Option<(ParsedFile, Vec<String>)>);
+    let reparsed: Vec<Reparsed> = respl
+        .par_iter()
+        .map(|&i| (i, prep(&decls_per_file[i].0, claims_of(&decls_per_file[i].0))))
+        .collect();
+    for (i, r) in reparsed {
         let rel = decls_per_file[i].0.clone();
         let claims = claims_of(&rel);
         if candor_report::env::trace("CANDOR_I1_INSTR") {
             eprintln!("CFGTWINRESPLICE\t{rel}"); // §E1 REACH COUNTER
         }
-        let Some(((sf, locs), read)) = prep(&rel, claims) else { continue };
+        let Some(((sf, locs), read)) = r else { continue };
         let _cfg_off = crate::lang::CfgOffScope::enter(cfg_off_files.contains(&rel)); // R977
         let mut fd = file_decls(&sf.0.items, include_tests, Path::new(&rel));
         fd.i1_claims = claims.digest();

@@ -208,3 +208,53 @@ fn a_hand_written_macro_arm_keeps_expanding_beside_the_disclosure() {
     assert!(effect(&r, "via_kh"), "the visible arm's expansion must stay charged: {:?}", row(&r, "via_kh"));
     assert!(unknown(&r, "via_kh"), "and disclose the hidden twin: {:?}", row(&r, "via_kh"));
 }
+
+#[test]
+fn a_unit_marked_from_another_files_claim_keeps_its_location() {
+    // A marker pushed onto a fn with no attributes became its first token, and a `call_site` span put the unit at `:1:1`
+    // (getrandom 0.2.17's `#[path]` arms in this lane's first A/B). The marked unit must keep the line it is written on.
+    let d = tmp("loc");
+    let w = "::std::fs::write(::std::env::var(\"MARK\").unwrap(), b\"x\").unwrap();";
+    let c = d.join("crate");
+    std::fs::create_dir_all(c.join("src")).unwrap();
+    std::fs::write(c.join("Cargo.toml"), "[package]\nname = \"locarm\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n").unwrap();
+    std::fs::write(
+        c.join("src/lib.rs"),
+        format!(
+            "#[macro_export] macro_rules! wfn {{ ($v:vis fn $n:ident();) => {{ $v fn $n() {{ {w} }} }} }}\n\
+             #[cfg(unix)] #[path = \"live.rs\"] pub mod m;\n\
+             #[cfg(not(unix))] #[path = \"pure.rs\"] pub mod m;\n\
+             pub fn probe() {{ m::go(); }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(c.join("src/live.rs"), "crate::wfn! { pub fn go(); }\n").unwrap();
+    std::fs::write(c.join("src/pure.rs"), "\n\npub fn go() {}\n").unwrap();
+    let out = d.join("o");
+    let o = Command::new(env!("CARGO_BIN_EXE_candor-scan"))
+        .arg(&c)
+        .arg("--out")
+        .arg(out.join("r"))
+        .env("CANDOR_CACHE_DIR", d.join("cache"))
+        .env_remove("CANDOR_DEPS")
+        .env_remove("CANDOR_CONFIG")
+        .output()
+        .unwrap();
+    assert!(o.status.code().is_some_and(|c| c == 0 || c == 1));
+    let mut found = false;
+    for e in std::fs::read_dir(&out).unwrap() {
+        let p = e.unwrap().path();
+        if !p.to_string_lossy().ends_with(".scan.json") {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        for f in v["functions"].as_array().unwrap() {
+            if f["fn"].as_str() == Some("pure::go") {
+                found = true;
+                assert_eq!(f["loc"].as_str(), Some("src/pure.rs:3:1"), "{f}");
+                assert!(f["inferred"].as_array().unwrap().iter().any(|e| e == "Unknown"), "{f}");
+            }
+        }
+    }
+    assert!(found, "pure::go must be marked from live.rs's claim");
+}
