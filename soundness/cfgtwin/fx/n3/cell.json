@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "n3",
+ "lib": false,
+ "note": "R1908: local-module glob; gated_n3 (both arms visible) must read E with no U",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n3_e"
+  },
+  {
+   "kind": "e",
+   "name": "n3_tl"
+  }
+ ]
+}

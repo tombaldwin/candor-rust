@@ -1,0 +1,15 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_n2"
+ ],
+ "id": "n2",
+ "lib": false,
+ "note": "R1906: two #[path] arms, hidden text a dependency macro",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n2_e"
+  }
+ ]
+}

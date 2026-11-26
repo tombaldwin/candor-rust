@@ -211,13 +211,15 @@ fn r1657b_a_guessed_hop_that_settles_on_the_caller_is_disclosed() {
 #[test]
 fn r1675_a_tail_claimant_under_an_unknown_written_head_is_disclosed() {
     // Fixture `p1` (polling 3.x's shape): `mod kq; use kq as sys;` emitted by a macro, so `sys` is hidden from the scan; the
-    // I1 stage 2 note: invoked BY PATH here, because a bare `select!()` is now expanded and `sys` resolves (charged `Fs`).
+    // I1 stage 2 note: invoked BY PATH here, because a bare `select!()` is now expanded and `sys` resolves (charged `Fs`). Since
+    // SOUNDNESS R1853 a `crate::` path invocation of a crate macro is expanded too, so the path names another crate's macro
+    // (`wrapdep::select!`), which no scan of this crate expands: the head stays hidden, which is this test's subject.
     // root `Poller::wait` calls `self.poller.wait()` on `poller: sys::Poller`. Published 0.41.3, f6c278e8 and the first 1b cut
     // all settled `sys::Poller::wait` on the ROOT `Poller::wait` (itself) and read the unit ABSENT over a write (executed).
     let d = fixture(
         "r1675",
         &[
-            ("main.rs", "#[macro_export]\nmacro_rules! select { () => { mod kq; use kq as sys; } }\ncrate::select!();\npub struct Poller { poller: sys::Poller }\nimpl Poller {\n    pub fn new() -> Poller { Poller { poller: sys::Poller } }\n    pub fn wait(&self) -> u8 { self.poller.wait() }\n}\nfn main() {}\n"),
+            ("main.rs", "#[macro_export]\nmacro_rules! select { () => { mod kq; use kq as sys; } }\nwrapdep::select!();\npub struct Poller { poller: sys::Poller }\nimpl Poller {\n    pub fn new() -> Poller { Poller { poller: sys::Poller } }\n    pub fn wait(&self) -> u8 { self.poller.wait() }\n}\nfn main() {}\n"),
             ("kq.rs", &format!("pub struct Poller;\nimpl Poller {{ pub fn wait(&self) -> u8 {{ {W} 1 }} }}\n")),
         ],
     );

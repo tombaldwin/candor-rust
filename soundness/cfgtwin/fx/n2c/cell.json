@@ -1,0 +1,15 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_n2c"
+ ],
+ "id": "n2c",
+ "lib": false,
+ "note": "R1906: two #[path] arms, hidden text a dependency macro (+ an unrelated local macro_rules!)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n2c_e"
+  }
+ ]
+}

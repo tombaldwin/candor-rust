@@ -3916,6 +3916,34 @@ pub(crate) fn glob_candidates_ext(
 }
 
 
+/// SOUNDNESS R1850 — the written module path `segs` names nothing this module declares or imports, no dependency or std root,
+/// and the only globs in scope that could supply its head are CRATE-LOCAL (`use crate::reexp::*;`, whose own globs this map
+/// does not follow): `glob_candidates` has no candidate, so the path resolves to nothing, yet rustc resolves it through that
+/// glob. The caller discloses at the site instead of reading it pure.
+pub(crate) fn only_local_glob_supplies(segs: &[&str], uses: &HashMap<String, String>) -> bool {
+    let Some(head) = segs.first().copied() else { return false };
+    if segs.len() < 2 || glob_candidates(segs, uses, &|_| false).is_some() {
+        return false;
+    }
+    let Some(all) = uses.get(MODDECL_ALL_KEY) else { return false };
+    if all.split('\u{1}').any(|n| n == head)
+        || uses.contains_key(head)
+        || matches!(head, "std" | "core" | "alloc" | "proc_macro" | "crate" | "self" | "super")
+        || PRELUDE_AND_PRIMS.contains(&head)
+        || PRIMS_MORE.contains(&head)
+        || uses.get(DEPS_KEY).is_some_and(|d| d.split('\u{1}').any(|n| n == head))
+    {
+        return false;
+    }
+    let Some(globs) = uses.get(ALLGLOB_KEY) else { return false };
+    globs.split('\u{1}').filter(|g| !g.is_empty()).any(|g| {
+        let groot = g.split("::").next().unwrap_or(g);
+        matches!(groot, "crate" | "self" | "super")
+            || module_declares(uses, groot) == Some(true)
+            || uses.get(groot).is_some_and(|v| v.starts_with("crate::") || v.starts_with("self::") || v.starts_with("super::"))
+    })
+}
+
 /// VEIN A — does the module this map describes declare `name` in the TYPE namespace? `None` when the
 /// map carries no declaration list (a pass that does not know which module it is in), which every
 /// caller reads as "cannot say" and answers exactly as before this existed.

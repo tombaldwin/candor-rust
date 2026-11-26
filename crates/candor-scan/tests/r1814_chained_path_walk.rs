@@ -282,7 +282,10 @@ fn the_path_and_method_spellings_of_one_call_on_one_structural_node_disclose_ali
     // `inh_zz`), which is why the disclosure cannot be narrowed to members some chained unit names
     for f in ["gl_ufcs_zq", "gl_tannot_zq", "gl_lone_zq", "gl_kmac_ufcs_zq", "gl_inh_zq"] {
         let (i, _) = on.get(f).cloned().unwrap_or_default();
-        assert!(i.contains(&"Unknown".to_string()), "{f}: the structural start discloses: {i:?}");
+        // SOUNDNESS R1853 (lane residue-C): the producer's `crate::gen_impls!(Kmac)` is a PATH invocation of its own macro, now
+        // expanded, so `Kmac::inh_zz` is a producer unit and the chained call reads its real write instead of the hedge.
+        let resolved = f == "gl_inh_zq" && i.contains(&"Fs".to_string());
+        assert!(i.contains(&"Unknown".to_string()) || resolved, "{f}: the structural start discloses: {i:?}");
     }
     for f in ["gl_cls_zq", "gl_annot_zq", "gl_kmac_cls_zq", "gl_kmac_annot_zq"] {
         assert_eq!(inf(&on, f), Some(set(&["Db", "Unknown"])), "{f}: classified, structural start: the curated Db and the hedge");

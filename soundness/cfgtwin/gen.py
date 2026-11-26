@@ -48,12 +48,13 @@ def sub(s, **kw):
     return s
 
 
-def cell(cid, files, probes, deps=None, lib=False, extra=None, chain=None, note='', rustflags=None):
+def cell(cid, files, probes, deps=None, lib=False, extra=None, chain=None, note='', rustflags=None, hdr=True):
     """files: relpath-under-src -> text (main.rs/lib.rs text is the BODY; HDR and the dispatcher are added).
     probes: list of (name, kind, body) where body is the fn body; the fn is `pub fn <name>() { body }`
-    (a probe whose body is None is declared in `files` itself)."""
+    (a probe whose body is None is declared in `files` itself). `hdr=False` omits HDR (its `macro_rules!` definitions), for a
+    cell whose subject is a crate that defines NO macro (section N)."""
     assert cid not in CELLS, cid
-    CELLS[cid] = dict(id=cid, files=files, probes=probes, deps=deps or {}, lib=lib, extra=extra or {}, chain=chain, note=note)
+    CELLS[cid] = dict(id=cid, files=files, probes=probes, deps=deps or {}, lib=lib, extra=extra or {}, chain=chain, note=note, hdr=hdr)
 
 
 def pred(cid, probe, pub, main, cand):
@@ -634,6 +635,47 @@ pred('g5', 'g5_e@rescan', '-', '-', 'U')
 pred('g5', 'g5_e@rescan-incr', '-', '-', 'U')
 
 
+# ----------------------------------------------------------------------------------------------- N. no local macro (R1906, R1908)
+# Every cell above carries HDR's `macro_rules!`, which is what made the arm cover run at all: in a crate that defines NO macro the
+# cover never ran (SOUNDNESS R1906, Fable's cfg-twin lane A merge review, fixtures `nolocal*`). The hidden text here is a
+# DEPENDENCY's macro. `_ctl` is the one-variable calibration twin: the same crate plus one unrelated local `macro_rules!`, which
+# made the cover run on main.
+_WFN = '#[macro_export] macro_rules! wfn { ($v:vis fn $n:ident();) => { $v fn $n() { EFF } } }\n'
+for _cid, _ctl in (('n1', False), ('n1c', True)):
+    cell(_cid, {'main.rs': sub('#![allow(unused)]\n' + ('macro_rules! unrelated { () => {} }\n' if _ctl else '') +
+                               '#[cfg(unix)] pub mod m_{id} { fxdep_{id}::wfn! { pub fn go_{id}(); } pub fn pure_{id}() {} }\n'
+                               '#[cfg(not(unix))] pub mod m_{id} { pub fn go_{id}() {} pub fn pure_{id}() {} }\n', id=_cid)},
+         [(_cid + '_e', 'e', sub('m_{id}::go_{id}()', id=_cid)), (_cid + '_q', 'q', sub('m_{id}::pure_{id}()', id=_cid))],
+         deps={'fxdep_' + _cid: '{ path = "fxdep_%s" }' % _cid}, extra={'@dep/fxdep_%s/src/lib.rs' % _cid: _WFN}, hdr=False,
+         note='R1906: inline hand-written twins, hidden text a dependency macro' + (' (+ an unrelated local macro_rules!)' if _ctl else ''))
+    pred(_cid, _cid + '_e', '-', 'U' if _ctl else '-', 'U'); pred(_cid, _cid + '_q', '-', 'U' if _ctl else '-', 'record')
+for _cid, _ctl in (('n2', False), ('n2c', True)):
+    cell(_cid, {'main.rs': sub('#![allow(unused)]\n' + ('macro_rules! unrelated { () => {} }\n' if _ctl else '') +
+                               '#[cfg(unix)] #[path = "live_{id}.rs"] pub mod m_{id};\n'
+                               '#[cfg(not(unix))] #[path = "pure_{id}.rs"] pub mod m_{id};\n', id=_cid)},
+         [(_cid + '_e', 'e', sub('m_{id}::go_{id}()', id=_cid))],
+         deps={'fxdep_' + _cid: '{ path = "fxdep_%s" }' % _cid},
+         extra={'@dep/fxdep_%s/src/lib.rs' % _cid: _WFN, 'live_%s.rs' % _cid: sub('fxdep_{id}::wfn! { pub fn go_{id}(); }\n', id=_cid),
+                'pure_%s.rs' % _cid: sub('pub fn go_{id}() {}\n', id=_cid)}, hdr=False,
+         note='R1906: two #[path] arms, hidden text a dependency macro' + (' (+ an unrelated local macro_rules!)' if _ctl else ''))
+    pred(_cid, _cid + '_e', 'U', 'U', 'U')
+# R1908: a bare `thread_local!` beside a glob, with a hand-written gated pair whose BOTH arms are visible. A glob of a module this file
+# declares cannot carry another crate's macro (`n3`: `gated_n3` must not be hedged); a dependency glob still may (`n3d`, recorded). Each
+# defines one unrelated `macro_rules!`, so the cover runs on main too (R1906) and main's over-hold is visible.
+_N3 = ('#![allow(unused)]\nmacro_rules! unrelated_{id} { () => {} }\npub mod helpers_{id} { pub fn h_{id}() {} }\nuse {G}::*;\nuse std::cell::Cell;\n'
+       'thread_local! { static X_{id}: Cell<u8> = { EFF Cell::new(0) }; }\n'
+       '#[cfg(unix)] pub fn gated_{id}() { EFF }\n#[cfg(not(unix))] pub fn gated_{id}() {}\n')
+cell('n3', {'main.rs': sub(_N3.replace('{G}', 'helpers_{id}'), id='n3')},
+     [('n3_e', 'e', 'gated_n3()'), ('n3_tl', 'e', 'X_n3.with(|c| c.get())')], hdr=False,
+     note='R1908: local-module glob; gated_n3 (both arms visible) must read E with no U')
+pred('n3', 'n3_e', 'E', 'E+U', 'E'); pred('n3', 'n3_tl', 'E', 'E', 'E')
+cell('n3d', {'main.rs': sub(_N3.replace('{G}', 'fxdep_{id}'), id='n3d')},
+     [('n3d_e', 'e', 'gated_n3d()'), ('n3d_tl', 'e', 'X_n3d.with(|c| c.get())')],
+     deps={'fxdep_n3d': '{ path = "fxdep_n3d" }'}, extra={'@dep/fxdep_n3d/src/lib.rs': 'pub fn hd() {}\n'}, hdr=False,
+     note='R1908: dependency glob; may rebind thread_local, so the hold stays (recorded)')
+pred('n3d', 'n3d_e', 'E', 'E+U', 'record'); pred('n3d', 'n3d_tl', 'E', 'E', 'E')
+
+
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):
     arms = ''.join('        "%s" => %s%s(),\n' % (p, crate_ref, p) for p, _, _ in c['probes'])
@@ -662,7 +704,7 @@ def render(out):
         for p, k, b in c['probes']:
             if b is not None:
                 probes_def += 'pub fn %s() { %s }\n' % (p, b if b.rstrip().endswith((';', '}')) else b + ';')
-        text = HDR.replace('EFF', EFF) + body.replace('EFF', EFF) + '\n' + probes_def
+        text = (HDR.replace('EFF', EFF) if c.get('hdr', True) else '') + body.replace('EFF', EFF) + '\n' + probes_def
         if c['lib']:
             open(os.path.join(d, 'src', 'lib.rs'), 'w').write(text)
             open(os.path.join(d, 'src', 'main.rs'), 'w').write(dispatcher(c, 'cf_%s::' % cid))

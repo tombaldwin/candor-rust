@@ -11,6 +11,30 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Lane residue-C: six small-reach rows from the `Self`/std binding, path-macro and cfg-twin areas (SOUNDNESS R1846, R1850,
+  R1853, R1859, R1860, R1902, R1906, R1908).** Each was an executed silence or fabrication on v0.43.0 and main.
+  - R1846 (a resolution, plus one disclosure): `Self::m(..)` in a trait's DEFAULT body naming a SUPERTRAIT's member read ABSENT
+    over a write. It now reads what `<Self as Sup>::m` reads: a local supertrait's default body and the bounded dispatch over its
+    implementors, a dependency supertrait's member through the chained join (with its key), and a std supertrait's member through
+    every local implementor of the trait, disclosed `dispatch:<Trait>.<m>` when the trait is `pub` (a downstream implementor is
+    out of sight). `<Self as Sup>::m` for a REQUIRED supertrait member, which also read ABSENT, now dispatches.
+  - R1853 (a resolution): a PATH invocation of the crate's own macro (`crate::m!`, `self::m!`, `super::m!`, `$crate::m!`) at item,
+    impl-item and body position is expanded like the bare spelling, so the fns and impls it writes are units. It stays hidden text
+    beside its expansion, and it is NOT expanded inside a `#[cfg]` arm (a gated module/impl, or a file declared as one), at
+    trait-item position, or where the expansion is itself gated: there the produced twin reads silent on the bare spelling too.
+  - R1850 (a resolution, plus one disclosure): `Self::m` in an impl whose self type is a dependency path that two globs, or a
+    glob beside `use super::*`, may supply, takes the candidates the written path takes; through a crate-local glob of a globbing
+    module it is disclosed `ambiguous:self type .. is reached only through a crate-local glob`.
+  - R1859 / R1860 / R1902 (removes a charge, adds the real one): the std inherent table no longer reads std's private `sys::*`
+    types (`sys::fs::File::read_at` is not `std::fs::File`'s); under `use std::fs::File; impl Tr for File`, `Self::m` with no std
+    inherent `m` and no std trait fn `m` reads the crate's member (this impl's or another impl's of the type) INSTEAD of the std
+    path the classifier charged by prefix. A pure own member no longer reads `Fs`; a sibling's `Env` is no longer lost.
+  - R1906 (adds `Unknown`): the hand-written cfg-arm cover now runs in a crate that defines no `macro_rules!`.
+  - R1908 (removes an over-hold): a glob of a module or item the file declares no longer rebinds a toolchain macro name
+    (`thread_local!`) unless the crate re-exports a macro of that name; a dependency glob still does.
+  - Kill switches `CANDOR_R1846_OFF`, `CANDOR_R1850_OFF`, `CANDOR_R1853_OFF`, `CANDOR_R1860_OFF`, `CANDOR_R1902_OFF`,
+    `CANDOR_R1906_OFF`, `CANDOR_R1908_OFF`. Cache rev 223. The cfg-twin matrix gains section N (`n1`–`n3d`).
+
 - ⚠ **cfg-twin cover, lane B (SOUNDNESS R1863, R1855, R1898).** Three one-rule closings of the same hidden-twin family.
   - R1863 (a resolution): where a hidden `#[cfg]` impl overrides a trait member that the visible own-cfg impl inherits, the
     engine stands a marked member on the visible impl. Its body was empty, so the call resolved to it and the trait's own

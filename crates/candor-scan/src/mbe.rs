@@ -790,6 +790,9 @@ struct Ctx<'x> {
     claims: DecodedClaims,
     /// the inline module path of the list being spliced, within this file (`a::b`), for `claims` lookups.
     modpath: Vec<String>,
+    /// SOUNDNESS R1853 — how many `#[cfg]`-gated modules, impls or traits enclose the list being spliced. A PATH invocation is
+    /// not expanded inside one (`local_path_name`).
+    gated: usize,
 }
 
 /// SOUNDNESS R1899 (cfg-twin lane A) — every name a `use` of this file binds through a path rooted at neither the crate
@@ -829,6 +832,130 @@ fn non_toolchain_imports(items: &[syn::Item]) -> std::collections::HashSet<Strin
     let mut out = std::collections::HashSet::new();
     items_walk(items, &mut out);
     out
+}
+
+/// SOUNDNESS R1908 — the crate-table key recording that SOME file of the crate binds the toolchain macro name `n` through a
+/// `use` not rooted at the toolchain (`pub use dep::thread_local;` in a module another file globs). No macro name begins
+/// with a control character, so the key cannot collide with a definition.
+pub(crate) fn tc_reexport_key(n: &str) -> String {
+    format!("\u{1}tcuse:{n}")
+}
+
+/// SOUNDNESS R1908 — this file's entries for the crate table: every `TOOLCHAIN_BANG_MACROS` name a `use` here binds through
+/// a non-toolchain root (`non_toolchain_imports`). Read for every file whose text passes `may_reexport_toolchain_name`.
+pub(crate) fn file_tc_reexports(items: &[syn::Item]) -> Vec<(String, Option<String>)> {
+    let names = non_toolchain_imports(items);
+    TOOLCHAIN_BANG_MACROS.iter().filter(|n| names.contains(**n)).map(|n| (tc_reexport_key(n), None)).collect()
+}
+
+/// SOUNDNESS R1908 — the cheap text test before `file_tc_reexports` parses a file: some `use` statement names a toolchain
+/// macro as a whole word. A false positive costs a parse; a false negative would lose a re-export, so it reads every `use `.
+pub(crate) fn may_reexport_toolchain_name(text: &str) -> bool {
+    let b = text.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0;
+    while let Some(off) = text[i..].find("use") {
+        let at = i + off;
+        i = at + 3;
+        if (at > 0 && word(b[at - 1])) || b.get(at + 3).is_some_and(|c| word(*c)) {
+            continue;
+        }
+        let end = text[at..].find(';').map(|e| at + e).unwrap_or(text.len());
+        let stmt = &text[at + 3..end];
+        if TOOLCHAIN_BANG_MACROS.iter().any(|n| {
+            stmt.match_indices(n).any(|(k, _)| {
+                let sb = stmt.as_bytes();
+                (k == 0 || !word(sb[k - 1])) && sb.get(k + n.len()).is_none_or(|c| !word(*c))
+            })
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+/// SOUNDNESS R1908 — the head of a glob `use` (`use a::b::*` → `a`), `None` for a non-glob tree. A leading `::` is `"::"`.
+fn glob_heads(t: &syn::UseTree, root: Option<&str>, out: &mut Vec<String>) {
+    match t {
+        syn::UseTree::Path(p) => {
+            let first = p.ident.to_string();
+            glob_heads(&p.tree, Some(root.unwrap_or(first.as_str())), out)
+        }
+        syn::UseTree::Glob(_) => {
+            if let Some(r) = root {
+                out.push(r.to_string());
+            }
+        }
+        syn::UseTree::Group(g) => g.items.iter().for_each(|x| glob_heads(x, root, out)),
+        _ => {}
+    }
+}
+
+/// SOUNDNESS R1908 — the names a glob head can be at this level without being another crate: the items this list declares.
+fn level_names(items: &[syn::Item]) -> std::collections::HashSet<String> {
+    let mut s = std::collections::HashSet::new();
+    for it in items {
+        let id = match it {
+            syn::Item::Mod(m) => Some(&m.ident),
+            syn::Item::Enum(e) => Some(&e.ident),
+            syn::Item::Struct(e) => Some(&e.ident),
+            syn::Item::Union(e) => Some(&e.ident),
+            syn::Item::Trait(e) => Some(&e.ident),
+            syn::Item::Type(e) => Some(&e.ident),
+            _ => None,
+        };
+        if let Some(id) = id {
+            s.insert(id.to_string());
+        }
+    }
+    s
+}
+
+/// SOUNDNESS R1908 — `(foreign, local)`: whether some level of this file holds a glob that may be another crate's (a head
+/// that is not `crate`/`self`/`super`, not the toolchain, and not an item declared at that level; or `#[macro_use] extern
+/// crate`), and whether one holds a crate-local glob (a `crate`/`self`/`super` head or a declared item).
+fn glob_kinds(items: &[syn::Item]) -> (bool, bool) {
+    let names = level_names(items);
+    let (mut foreign, mut local) = (false, false);
+    for it in items {
+        match it {
+            syn::Item::Use(u) => {
+                let mut heads = Vec::new();
+                glob_heads(&u.tree, if u.leading_colon.is_some() { Some("::") } else { None }, &mut heads);
+                for h in heads {
+                    match h.as_str() {
+                        "std" | "core" | "alloc" => {}
+                        "crate" | "self" | "super" => local = true,
+                        _ if names.contains(&h) => local = true,
+                        _ => foreign = true,
+                    }
+                }
+            }
+            syn::Item::ExternCrate(e)
+                if e.attrs.iter().any(|a| a.path().is_ident("macro_use"))
+                    && !matches!(e.ident.to_string().as_str(), "std" | "core" | "alloc") =>
+            {
+                foreign = true;
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    let (f, l) = glob_kinds(inner);
+                    foreign |= f;
+                    local |= l;
+                }
+            }
+            _ => {}
+        }
+    }
+    (foreign, local)
+}
+
+fn foreign_glob_in(items: &[syn::Item]) -> bool {
+    glob_kinds(items).0
+}
+
+fn local_glob_in(items: &[syn::Item]) -> bool {
+    glob_kinds(items).1
 }
 
 /// I1 step 1 — every name a `use` item of this file binds through a path that is NOT rooted at `crate`/`self`/`super`
@@ -1500,7 +1627,9 @@ impl Ctx<'_> {
     /// The invocation's macro, when it is a bare name this file defines once — or, R1004, a name this
     /// file does not define at all and the CRATE defines once (identically everywhere it is defined).
     fn local_name(&self, mac: &syn::Macro) -> Option<String> {
-        let id = mac.path.get_ident()?.to_string();
+        let Some(id) = mac.path.get_ident().map(|i| i.to_string()) else {
+            return self.local_path_name(mac);
+        };
         if id == "macro_rules" {
             return None;
         }
@@ -1522,6 +1651,51 @@ impl Ctx<'_> {
             return None;
         }
         bound.then_some(id)
+    }
+
+    /// SOUNDNESS R1853 — a PATH invocation of the crate's own macro at item, impl-item or trait-item position: `crate::m!`,
+    /// `self::m!`, `super::m!` (any number of `super`s) and `$crate::m!` (which the expander writes `crate::m`). rustc resolves
+    /// these by path, to a `#[macro_export]` definition at the crate root or a `use` re-export, never by textual scope, so the
+    /// path is bound only to a definition that is UNIQUE by name: this file's once-defined one, else the crate's (R1004), and
+    /// not a name the file also imports from another crate. A name defined twice, or only by an expansion, is not bound and
+    /// the invocation stays hidden text, as before. Before, `get_ident` refused every path, so `crate::mkfn! { go }` minted no
+    /// `go` and its callers read pure over a write; body position already bound the leaf (`collector`). `CANDOR_R1853_OFF=1`.
+    fn local_path_name(&self, mac: &syn::Macro) -> Option<String> {
+        if candor_report::env::switch("CANDOR_R1853_OFF") || mac.path.leading_colon.is_some() || mac.path.segments.len() < 2 {
+            return None;
+        }
+        // Not inside a cfg arm: in a `#[cfg]`-gated module, impl or trait (`gated`), or a file declared as one (`ARM_FILE`, set
+        // by the walk). There the expansion meets the other arm's visible twin as a PRODUCED arm, whose union is not read for
+        // every kind: a pure override an expansion writes took the call from the live arm's effectful default (`fs::keep_e`,
+        // tests/i1_macro_units.rs), as the bare spelling's does on v0.43.0. Left unexpanded it is hidden text, which the arm
+        // cover discloses: the main reading.
+        if self.gated > 0 || ARM_FILE.with(|c| c.get()) {
+            return None;
+        }
+        let segs: Vec<String> = mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if mac.path.segments.iter().any(|s| !s.arguments.is_none()) {
+            return None;
+        }
+        let (leaf, head) = segs.split_last()?;
+        let ok_head = match head.first().map(String::as_str) {
+            Some("crate") | Some("self") => head.len() == 1,
+            Some("super") => head.iter().all(|h| h == "super"),
+            _ => false,
+        };
+        if !ok_head || leaf == "macro_rules" {
+            return None;
+        }
+        let bound = match self.defs.get(leaf) {
+            Some(d) => d.is_some(),
+            None => matches!(self.xdefs.get(leaf), Some(Some(_))),
+        };
+        if !bound || self.imported.contains(leaf) || self.emitted.contains(leaf) {
+            return None;
+        }
+        if candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("R1853PATH\t{}", segs.join("::")); // §E1 REACH COUNTER, on the ADDED branch only
+        }
+        Some(leaf.clone())
     }
 
     /// SOUNDNESS R1898 (cfg-twin lane B) — the invocation bound THIS file's definition of the name, but that definition is not
@@ -1711,7 +1885,12 @@ impl Ctx<'_> {
                     // block OPAQUE (`lang.rs`, `impl_opaque_key`) — "its members are not all readable" — and once
                     // the expansion stands in its place that is no longer true. A nested invocation the expansion
                     // itself could not expand is still a `Macro` item in `gen`, so the block stays opaque for it.
+                    // SOUNDNESS R1853 — a PATH invocation is kept beside its expansion (see the item-position arm).
+                    let keep = mac_by_path(&m.mac);
                     out.extend(gen);
+                    if keep {
+                        out.push(it);
+                    }
                     continue;
                 }
             }
@@ -1726,6 +1905,13 @@ impl Ctx<'_> {
     /// name-keyed hedge only while R1784 kept the DEFINER partial. A RESOLUTION: the generated members are the trait's own.
     fn expand_trait_items(&mut self, mac: &syn::Macro, depth: usize) -> Option<Vec<syn::TraitItem>> {
         use syn::parse::Parser;
+        // SOUNDNESS R1853 — NOT a path invocation at trait-item position. Expanded, `trait T { crate::wt! { fn go(&self); } }`
+        // in one `#[cfg]` arm becomes a produced trait whose default meets the other arm's hand-written `go` under one key, and
+        // that twin reads ABSENT over a write (the bare spelling does on v0.43.0 and main: cfg-twin matrix V2, nine cells). Left
+        // unexpanded it is hidden text, which the cover discloses. The silence of the un-twinned case stays a named residual.
+        if mac_by_path(mac) {
+            return None;
+        }
         let ambig = self.pre_def_ambiguous(mac);
         let (ts, cross_file) = self.expand_tokens(mac, depth)?;
         let mut gen = (|input: syn::parse::ParseStream| {
@@ -1774,7 +1960,11 @@ impl Ctx<'_> {
                     if candor_report::env::trace("CANDOR_I1_INSTR") {
                         eprintln!("I1S3TRAITITEM\t{}", m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default()); // §E1 REACH COUNTER
                     }
+                    let keep = mac_by_path(&m.mac); // SOUNDNESS R1853 — a PATH invocation is kept beside its expansion
                     out.extend(gen);
+                    if keep {
+                        out.push(it);
+                    }
                     continue;
                 }
             }
@@ -1949,7 +2139,22 @@ impl Ctx<'_> {
                         // `use`-map key) no longer re-discloses what now stands spliced beside it; R828 and R452's
                         // `macro_rules!`-BODY evidence is retired crate-wide from the same markers (`cache::retire_expanded`).
                         // A partial expansion (anything on the refusal list) keeps the invocation, and with it every hedge.
-                        if full {
+                        // SOUNDNESS R1853 — a PATH invocation (`crate::m!`) is expanded beside itself and KEPT as hidden text: every
+                        // hedge main gave it stays (the cfg-arm cover, R128's module evidence), and its items now stand as units too.
+                        // Replaced by the marker, its expansion became a produced cfg arm, and a produced arm's twin union is not read
+                        // for every item kind (the bare spelling `wuse!` in a `#[cfg]` module twin reads ABSENT on every arm): 38
+                        // cfg-twin matrix cells went from `U` to ABSENT. Kept, it is a resolution that withdraws nothing.
+                        let by_path = mac_by_path(&m.mac);
+                        if by_path && fns.iter().any(|g| is_gated(crate::lang::item_attrs(g))) {
+                            // R1853 — an expansion that is itself a cfg arm (`crate::wov! {}` → `#[cfg(not(unix))] impl Tr for Q { fn
+                            // go() {} }`, matrix E15) meets a visible twin as a produced arm, whose union is not read for every
+                            // kind: keep the main reading (the invocation as hidden text, nothing spliced).
+                            out.push(it);
+                            continue;
+                        }
+                        if by_path {
+                            out.push(it);
+                        } else if full {
                             let name = m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
                             if candor_report::env::trace("CANDOR_I1_INSTR") {
                                 eprintln!("I1EXPANDED\t{name}"); // §E1 REACH COUNTER
@@ -1980,7 +2185,12 @@ impl Ctx<'_> {
                     }
                 }
                 // R1245 — a hand-written impl whose members a local macro declares.
-                syn::Item::Impl(im) => self.splice_impl_items(&mut im.items, depth),
+                syn::Item::Impl(im) => {
+                    let g = usize::from(is_gated(&im.attrs));
+                    self.gated += g;
+                    self.splice_impl_items(&mut im.items, depth);
+                    self.gated -= g;
+                }
                 // I1 stage 3 (D1) — a trait whose members a local macro declares.
                 syn::Item::Trait(t) => self.splice_trait_items(&mut t.items, depth),
                 syn::Item::Mod(md) => {
@@ -1990,7 +2200,10 @@ impl Ctx<'_> {
                         let saved = self.scope.clone();
                         let saved_bodies = self.scope_bodies.clone();
                         self.modpath.push(md.ident.to_string());
+                        let g = usize::from(is_gated(&md.attrs));
+                        self.gated += g;
                         self.splice(inner, depth);
+                        self.gated -= g;
                         self.modpath.pop();
                         if !md.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
                             self.scope = saved;
@@ -2116,15 +2329,23 @@ impl BodyWalk<'_, '_> {
                 }
             }
         };
-        let Some(id) = mac.path.get_ident().map(|i| i.to_string()) else {
-            foreign(mac);
-            return;
+        // SOUNDNESS R1853 — a path invocation (`crate::m!`, `self::m!`, `super::m!`, `$crate::m!`) binds the crate's unique
+        // definition by path (`local_path_name`), never the body-local textual scope.
+        let (id, by_path) = match mac.path.get_ident().map(|i| i.to_string()) {
+            Some(id) => (id, false),
+            None => match self.cx.local_path_name(mac) {
+                Some(leaf) => (leaf, true),
+                None => {
+                    foreign(mac);
+                    return;
+                }
+            },
         };
         if id == "macro_rules" || self.depth >= MAX_DEPTH || self.cx.budget == 0 {
             return;
         }
         // which definition: the body-local one in textual scope, else the module's (`local_name`, the item splice's rule)
-        let def: Option<Option<std::rc::Rc<Vec<Arm>>>> = match self.overlay.get(&id) {
+        let def: Option<Option<std::rc::Rc<Vec<Arm>>>> = match self.overlay.get(&id).filter(|_| !by_path) {
             Some(Some(t)) => Some(t.parse::<TokenStream>().ok().and_then(|t| parse_arms(&t)).map(std::rc::Rc::new)),
             Some(None) => Some(None),
             None => self.cx.local_name(mac).map(|n| self.cx.arms_of(&n)),
@@ -3888,6 +4109,33 @@ pub(crate) fn expansion_facts(items: &[syn::Item]) -> (Vec<String>, Vec<String>)
     (v.expanded.into_iter().collect(), v.unexpanded.into_iter().collect())
 }
 
+thread_local! {
+    /// SOUNDNESS R1853 — the file being spliced may be a `#[cfg]` module ARM (`decls::file_module_may_be_arm`): no path
+    /// invocation in it is expanded. Set by `scan.rs` around each file's splice (`ArmFileScope`).
+    static ARM_FILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// SOUNDNESS R1853 — `ARM_FILE` for the length of one file's splice, restored on drop.
+pub(crate) struct ArmFileScope(bool);
+
+impl ArmFileScope {
+    pub(crate) fn enter(on: bool) -> Self {
+        ArmFileScope(ARM_FILE.with(|c| c.replace(on)))
+    }
+}
+
+impl Drop for ArmFileScope {
+    fn drop(&mut self) {
+        let prev = self.0;
+        ARM_FILE.with(|c| c.set(prev));
+    }
+}
+
+/// SOUNDNESS R1853 — is this invocation spelled by PATH (`crate::m!`, `self::m!`, `super::m!`, `$crate::m!`) rather than by a bare name?
+fn mac_by_path(mac: &syn::Macro) -> bool {
+    mac.path.get_ident().is_none()
+}
+
 /// I1 oracle seed — `CANDOR_I1_SEED_DROP=<macro>` leaves every item-position invocation of that macro unexpanded, so its
 /// units are ABSENT; the oracle's presence leg must report them. An instrument, recorded as a switch.
 fn seed_dropped(mac: &syn::Macro) -> bool {
@@ -4910,11 +5158,20 @@ pub(crate) fn splice_local_macros_with(items: &mut Vec<syn::Item>, xdefs: &Crate
     all_bodies(items, &mut bodies);
     // SOUNDNESS R1899 — which toolchain macro names a BARE invocation in this file may not bind to the toolchain.
     let tc_imports = non_toolchain_imports(items);
+    // SOUNDNESS R1908 — a glob is evidence that a name MAY be rebound only when it can carry another crate's macro. A glob of
+    // a module or item this file declares at that level (`mod helpers; use helpers::*;`, `use Kind::*;`) is a crate-local
+    // path, like `use crate::m::*` / `use super::*`: it brings a toolchain-named macro only where the crate re-exports one
+    // (`tc_reexport_key`, read from every file) or defines one (`bodies`/`xdefs` below). A dependency glob and
+    // `#[macro_use] extern crate` still shadow every name. `CANDOR_R1908_OFF=1` restores the any-glob reading.
+    let r1908 = !candor_report::env::switch("CANDOR_R1908_OFF");
+    let foreign_glob = if r1908 { foreign_glob_in(items) } else { imported.contains("*") };
+    let local_glob = r1908 && local_glob_in(items);
     let tc_shadow: std::collections::HashSet<String> = TOOLCHAIN_BANG_MACROS
         .iter()
         .filter(|n| {
             tc_imports.contains(**n)
-                || imported.contains("*")
+                || foreign_glob
+                || (local_glob && xdefs.contains_key(&tc_reexport_key(n)))
                 || bodies.contains_key(**n)
                 || xdefs.get(**n).is_some()
                 || xdefs.get(&emitted_key(n)).is_some()
@@ -4935,6 +5192,7 @@ pub(crate) fn splice_local_macros_with(items: &mut Vec<syn::Item>, xdefs: &Crate
         tc_shadow,
         claims: claims.decode(),
         modpath: Vec::new(),
+        gated: 0,
     };
     cx.splice(items, 0);
     // SOUNDNESS R1862 / R1824 (cfg-twin lane A) — THIS FILE AS AN OUT-OF-LINE MODULE ARM. Its own hidden text, read whole

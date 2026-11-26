@@ -1,0 +1,19 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_n3d"
+ ],
+ "id": "n3d",
+ "lib": false,
+ "note": "R1908: dependency glob; may rebind thread_local, so the hold stays (recorded)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n3d_e"
+  },
+  {
+   "kind": "e",
+   "name": "n3d_tl"
+  }
+ ]
+}

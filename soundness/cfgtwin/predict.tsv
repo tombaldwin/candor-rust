@@ -351,3 +351,13 @@ g2	g2_q	-	-	-
 g5	g5_e	-	-	-
 g5	g5_e@rescan	-	-	U
 g5	g5_e@rescan-incr	-	-	U
+n1	n1_e	-	-	U
+n1	n1_q	-	-	record
+n1c	n1c_e	-	U	U
+n1c	n1c_q	-	U	record
+n2	n2_e	U	U	U
+n2c	n2c_e	U	U	U
+n3	n3_e	E	E+U	E
+n3	n3_tl	E	E	E
+n3d	n3d_e	E	E+U	record
+n3d	n3d_tl	E	E	E

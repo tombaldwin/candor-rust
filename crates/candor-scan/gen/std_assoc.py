@@ -12,7 +12,14 @@ usage: std_assoc.py <rust-src library dir>  -> lines, sorted, unique:
     T<TAB><fn name>                   a fn declared in a `pub trait` body (any receiver)
 The integer types' inherent fns are written inside `int_impl!`/`uint_impl!`, so every `pub fn` in
 `int_macros.rs` / `uint_macros.rs` is filed under every signed / unsigned integer leaf, and every `pub fn` in a
-`macro_rules!` of `core/src/num/mod.rs` that writes an integer impl (`from_str_int_impl!`) under every integer leaf."""
+`macro_rules!` of `core/src/num/mod.rs` that writes an integer impl (`from_str_int_impl!`) under every integer leaf.
+
+SOUNDNESS R1859 — the inherent rows are read OUTSIDE `std/src/sys` (and `sys_common`): those modules are std's private
+platform layer, whose types reuse public leaves (`sys::fs::File` has `read_at`, `seek`, `fsync`; `sys::net::TcpStream` has
+`socket`), so keyed by leaf they answered "std::fs::File has an inherent `read_at`" — false (it is `FileExt`'s), and `Self::
+read_at` in an impl for `File` was read as std's instead of the impl's own member. The public types that wrap them define
+their own inherents outside `sys`; the only `pub use crate::sys::…` re-exports are `fortanix_sgx`'s and `thread::local_impl`'s
+(target-specific / unstable). The `T` rows (trait fns) are read everywhere, as before."""
 import os, re, sys
 lib = sys.argv[1]
 pub_fn = re.compile(r'\bpub\s+(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)')
@@ -74,6 +81,10 @@ def self_leaf(header):
     leaf = base.split('::')[-1].strip()
     return leaf if re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', leaf) else None
 
+SYS_DIRS = [os.path.join(lib, 'std', 'src', d) for d in ('sys', 'sys_common')]
+def private_platform(root):
+    return any(root == d or root.startswith(d + os.sep) for d in SYS_DIRS)
+
 inh = set(); trait_fns = set()
 for crate in ('core', 'alloc', 'std'):
     for root, dirs, files in os.walk(os.path.join(lib, crate, 'src')):
@@ -82,6 +93,14 @@ for crate in ('core', 'alloc', 'std'):
             if not f.endswith('.rs') or f in ('tests.rs', 'benches.rs'):
                 continue
             s = strip_comments(open(os.path.join(root, f), errors='replace').read())
+            if private_platform(root):
+                for t in pub_trait.finditer(s):
+                    b = s.find('{', t.end())
+                    if b < 0: continue
+                    e = block_end(s, b)
+                    for m in any_fn.finditer(s[b:e+1]):
+                        trait_fns.add(m.group(1))
+                continue
             if f in ('int_macros.rs', 'uint_macros.rs'):
                 leaves = SIGNED if f == 'int_macros.rs' else UNSIGNED
                 for m in pub_fn.finditer(s):
@@ -127,7 +146,7 @@ for crate in ('core', 'alloc', 'std'):
     for root, dirs, files in os.walk(os.path.join(lib, crate, 'src')):
         dirs[:] = [d for d in dirs if d not in ('tests', 'benches')]
         for f in files:
-            if f.endswith('.rs') and f not in ('tests.rs', 'benches.rs'):
+            if f.endswith('.rs') and f not in ('tests.rs', 'benches.rs') and not private_platform(root):
                 texts.append(strip_comments(open(os.path.join(root, f), errors='replace').read()))
 for s in texts:
     for md in macro_def.finditer(s):

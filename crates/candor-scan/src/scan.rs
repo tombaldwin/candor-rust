@@ -1596,6 +1596,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let mut modsite = crate::decls::ModSiteCache::default();
     // SOUNDNESS R977 — the admitted files that sit under a module compiled out of the default build.
     let mut cfg_off_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // SOUNDNESS R1853 — the admitted files that may be one arm of a `#[cfg]` module twin (`decls::file_module_may_be_arm`).
+    let mut arm_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     // When peeking, every `continue` below becomes a KEEP and every keep becomes a skip — one flag, one
     // walk, so the two file sets are exact complements and no file can fall between them.
     let peeking = peek_excluded;
@@ -1736,6 +1738,9 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
             cfg_off_files.insert(rel.to_string_lossy().into_owned());
         }
+        if !candor_report::env::switch("CANDOR_R1853_OFF") && crate::decls::file_module_may_be_arm(root, rel, &mut modsite) {
+            arm_files.insert(rel.to_string_lossy().into_owned());
+        }
         paths.push((p.to_path_buf(), rel.to_string_lossy().into_owned()));
     }
 
@@ -1792,11 +1797,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             .par_iter()
             .filter_map(|(p, _)| {
                 let text = std::fs::read_to_string(p).ok()?;
-                if !text.contains("macro_rules") {
+                // SOUNDNESS R1908 — and every toolchain macro name a `use` re-binds, so a crate-local glob of that module
+                // still shadows it (`mbe::tc_reexport_key`).
+                let defs = text.contains("macro_rules");
+                let reexp = !candor_report::env::switch("CANDOR_R1908_OFF") && crate::mbe::may_reexport_toolchain_name(&text);
+                if !defs && !reexp {
                     return None;
                 }
                 let (file, _) = crate::lang::parse_file_2015_tolerant(&text)?;
-                Some(crate::mbe::file_macro_defs(&file.items))
+                let mut v = if defs { crate::mbe::file_macro_defs(&file.items) } else { Vec::new() };
+                if reexp {
+                    v.extend(crate::mbe::file_tc_reexports(&file.items));
+                }
+                Some(v)
             })
             .collect::<Vec<_>>(),
     );
@@ -1821,6 +1834,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // SOUNDNESS R977 — the cfg-off verdict comes from ANOTHER file (the declaring `mod`), so it is
             // part of what this file's cached decls and FnInfos were derived under: fold it into the key.
             let key = if cfg_off_files.contains(rel) { format!("{key}+cfgoff") } else { key };
+            let key = if arm_files.contains(rel) { format!("{key}+armctx") } else { key }; // R1853 — another file decides it
             let key = match &xmacros_key { Some(x) => format!("{key}+xmac{x}"), None => key };
             (rel.clone(), key)
         })
@@ -1864,7 +1878,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         if text.contains("pin_project") || text.contains("link!") {
             crate::lang::splice_pin_project(&mut file.items); // R988, R960
         }
-        if text.contains("macro_rules") || (!xmacros.is_empty() && text.contains('!')) || !claims.is_empty() {
+        if splice_gate(&text, &xmacros, claims) {
+            let _arm = crate::mbe::ArmFileScope::enter(arm_files.contains(rel)); // R1853
             crate::mbe::splice_local_macros_with(&mut file.items, &xmacros, claims); // R1004
         }
         crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
@@ -3063,7 +3078,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         crate::lang::splice_pin_project(&mut f.items); // R988, R960 — the round-2 twin
                     }
                     let claims = claims_of(rel); // cfg-twin lane A — the claims its cached decls were derived under
-                    if t.contains("macro_rules") || (!xmacros.is_empty() && t.contains('!')) || !claims.is_empty() {
+                    if splice_gate(&t, &xmacros, claims) {
+                        let _arm = crate::mbe::ArmFileScope::enter(arm_files.contains(*rel)); // R1853 — the round-2 twin
                         crate::mbe::splice_local_macros_with(&mut f.items, &xmacros, claims); // R1004 — the round-2 twin
                     }
                     crate::mbe::splice_derived_comparisons(&mut f.items); // R1146 — the round-2 twin
@@ -13478,4 +13494,19 @@ fn r1484_own_arm(
 pub(crate) fn arm_set_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| candor_report::env::switch("CANDOR_ARMSET_OFF"))
+}
+
+/// Whether a file's round-1 (and round-2) parse runs `mbe::splice_local_macros_with`. It holds the item-position expansion AND
+/// the cfg-arm cover (`mark_hidden_twins`, `mark_module_twins`, the out-of-line `F` record), so it must run wherever an arm can
+/// hide a twin. SOUNDNESS R1906 — that is any file with an invocation: before, a crate defining no `macro_rules!` never ran
+/// it, so `#[cfg(unix)] mod m { dep::wfn! { pub fn go(); } } #[cfg(not(unix))] mod m { pub fn go() {} }` read `m::go` pure
+/// over an executed write. `CANDOR_R1906_OFF=1` restores the old gate.
+fn splice_gate(text: &str, xmacros: &crate::mbe::CrateMacros, claims: &crate::mbe::ArmClaims) -> bool {
+    if text.contains("macro_rules") || !claims.is_empty() {
+        return true;
+    }
+    if candor_report::env::switch("CANDOR_R1906_OFF") {
+        return !xmacros.is_empty() && text.contains('!');
+    }
+    text.contains('!')
 }

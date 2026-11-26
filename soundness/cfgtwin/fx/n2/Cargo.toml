@@ -1,0 +1,9 @@
+[package]
+name = "cf_n2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_n2 = { path = "fxdep_n2" }
+
+[workspace]

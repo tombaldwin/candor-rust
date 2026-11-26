@@ -12104,6 +12104,100 @@ impl<'a> CallCollector<'a> {
         }
     }
 
+    /// SOUNDNESS R1846 — `Self::m(..)` (or a value bound to it) in the DEFAULT body of trait `tr`, where `tr` itself declares no
+    /// member `m`: R160 binds `Self` to `tr`, so the path formed `tr::m`, which names no unit, and the call read ABSENT over an
+    /// executed write (`trait Q: LSup { fn q() { Self::ls_w() } }`; rusqlite's `CreateVTab::create` → `Self::connect`, clircle's
+    /// `Self::try_from` under a std `TryFrom` supertrait). `Self` is the implementor, and the member is a SUPERTRAIT's. Rust's
+    /// own reading is `<Self as Sup>::m`, so this answers what that spelling answers:
+    /// - a LOCAL supertrait (transitively) declaring `m` → the written trait path `Sup::m` (its default body) and the bounded
+    ///   CHA over `Sup`'s implementors (`targets`);
+    /// - otherwise the member is a dependency's or std's: every visible implementor of `tr` gets the typed `Ty::m` edge (its own
+    ///   impl of the supertrait), a dependency supertrait is routed as `T::m` under `T: dep::Sup` is (the chained join and the
+    ///   obligation-1 key, `route_foreign_generic_member`), and where an implementor can be out of sight — `tr` is `pub` and a
+    ///   std supertrait is in its closure (no key can name a std member, R1347), or the implementor set is empty or past the CHA
+    ///   bound — the site is disclosed, `dispatch:<tr>.<m>`.
+    ///
+    /// Returns false (nothing done) outside that shape. `CANDOR_R1846_OFF=1`.
+    fn r1846_super_member(
+        &mut self,
+        p: &syn::ExprPath,
+        segs: &[String],
+        tr: &str,
+        leaf: &str,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+        targets: &mut Vec<(String, Option<String>)>,
+    ) -> bool {
+        if candor_report::env::switch("CANDOR_R1846_OFF") || self.trait_self.as_deref() != Some(tr) || p.qself.is_some() {
+            return false;
+        }
+        let Some(lt) = self.local_traits.get(tr) else { return false };
+        if lt.methods.contains(leaf) || lt.assoc.contains(leaf) || self.trait_declares_method(tr, leaf, 0)
+            || self.r1685_impl_declared(tr, leaf)
+        {
+            return false; // the trait (or, for a receiver member, a local supertrait) declares it: the existing route
+        }
+        let decl = self.declaring_traits(tr, leaf, true);
+        if decl.iter().any(|d| d != tr) {
+            for d in decl {
+                if candor_report::env::trace("CANDOR_R1846_INSTR") {
+                    eprintln!("R1846LOCAL\t{tr}\t{d}\t{leaf}"); // §E1 REACH COUNTER
+                }
+                let dp = self.expand_scoped(&format!("{d}::{leaf}"));
+                self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+                    path: dp, leaf: leaf.to_string(), str_arg: None, typed: false, method: false,
+                    is_macro: false, path_lits_partial: false, path_lit2: None });
+                targets.push((d, None));
+            }
+            return true;
+        }
+        // A non-local supertrait in `tr`'s local closure: which kinds.
+        let (mut dep_sups, mut std_sup, mut seen, mut st) = (Vec::new(), false, Vec::new(), vec![tr.to_string()]);
+        while let Some(t) = st.pop() {
+            if seen.contains(&t) || seen.len() > 16 {
+                continue;
+            }
+            seen.push(t.clone());
+            let Some(l) = self.local_traits.get(&t) else { continue };
+            for s in &l.supertraits {
+                if self.local_traits.contains_key(s) {
+                    st.push(s.clone());
+                    continue;
+                }
+                let full = crate::lang::expand(s, &self.uses);
+                let root = full.split("::").next().unwrap_or("");
+                if full.contains("::") && crate::lang::is_dependency_crate_root(root) {
+                    dep_sups.push(s.clone());
+                } else {
+                    std_sup = true; // std/core/alloc, or a bare leaf this file does not import: no key can name it
+                }
+            }
+        }
+        if dep_sups.is_empty() && !std_sup {
+            return false; // no supertrait outside the crate: a member no trait declares (a macro-made one), left as it was
+        }
+        if candor_report::env::trace("CANDOR_R1846_INSTR") {
+            eprintln!("R1846FOREIGN\t{tr}\t{leaf}\tdep={}\tstd={std_sup}", dep_sups.join(",")); // §E1 REACH COUNTER
+        }
+        for s in &dep_sups {
+            self.route_foreign_generic_member(p, segs, s, leaf, args);
+        }
+        let impls: Vec<String> = self.trait_impls.get(tr).cloned().unwrap_or_default();
+        let bounded = !impls.is_empty() && impls.len() <= 12;
+        if bounded {
+            for ty in &impls {
+                let tl = ty.rsplit("::").next().unwrap_or(ty);
+                self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+                    path: format!("{tl}::{leaf}"), leaf: leaf.to_string(), str_arg: None, typed: true, method: true,
+                    is_macro: false, path_lits_partial: false, path_lit2: None });
+            }
+        }
+        let public = self.returns.contains_key(&crate::model::pub_trait_key(tr));
+        if !bounded || (public && std_sup) {
+            self.mark_unresolved(format!("dispatch:{tr}.{leaf}"));
+        }
+        true
+    }
+
     fn route_trait_member_path(
         &mut self,
         p: &syn::ExprPath,
@@ -12146,8 +12240,13 @@ impl<'a> CallCollector<'a> {
                 }
                 _ => false,
             };
+            // SOUNDNESS R1846 — `<Self as Sup>::m` in a trait's DEFAULT body names the unknown implementor through ANY trait it
+            // implements (a supertrait here), not only the enclosing one: read as a concrete type, it formed `Tr::m` and a
+            // REQUIRED supertrait member (`<Self as VTab>::connect`) read ABSENT over an executed write.
+            let r1846 = !candor_report::env::switch("CANDOR_R1846_OFF");
             let unnamed = projection || qid.as_deref().is_some_and(|i| {
-                generic(self, i).is_some() || (i == "Self" && self.trait_self.as_deref() == Some(tr.as_str()))
+                generic(self, i).is_some()
+                    || (i == "Self" && (self.trait_self.as_deref() == Some(tr.as_str()) || (r1846 && self.trait_self.is_some())))
             });
             let concrete = if unnamed {
                 None
@@ -12199,7 +12298,9 @@ impl<'a> CallCollector<'a> {
             let rs: Vec<&str> = path.split("::").collect();
             if rs.len() >= 2 {
                 let tr = rs[rs.len() - 2].to_string();
-                if self.local_traits.contains_key(&tr) {
+                if self.local_traits.contains_key(&tr) && self.r1846_super_member(p, &segs, &tr, leaf, args, &mut targets) {
+                    // SOUNDNESS R1846 — handled: `targets` holds the declaring local supertraits, if any.
+                } else if self.local_traits.contains_key(&tr) {
                     // The first argument may NAME the implementor (`Dsl::limit(&s1)`): only a plain
                     // binding is read, from `vars` alone — never a typed expression, so no inference
                     // this engine does elsewhere (the builder assumption) can mis-name it.
@@ -12618,7 +12719,7 @@ impl<'a> CallCollector<'a> {
         let inherent = crate::std_assoc::has_inherent(leaf, m);
         let out = match mode {
             "L" if inherent => format!("{path}::{rest}"),
-            "S" if !inherent && own.split('\u{1}').any(|o| o == m) => format!("{leaf}::{rest}"),
+            "S" if !inherent && (own.split('\u{1}').any(|o| o == m) || self.r1860_sibling_declares(leaf, m)) => format!("{leaf}::{rest}"),
             _ => return None,
         };
         if candor_report::env::trace("CANDOR_R1832_INSTR") {
@@ -12626,6 +12727,34 @@ impl<'a> CallCollector<'a> {
         }
         Some(out)
     }
+    /// SOUNDNESS R1860 — does ANOTHER trait impl the crate wrote for this std type (keyed by its leaf) declare member `m`?
+    /// `impl Sb for File { fn sib() }` beside `impl Sa for File { fn s3() { Self::sib() } }`: Rust resolves `Self::sib` (no
+    /// inherent `sib`) to that impl's member, and mode S's own-member list held only THIS impl's names, so the std path alone
+    /// was read and a sibling's `Env` was lost behind the classifier's `std::fs` prefix. `CANDOR_R1860_OFF=1`.
+    fn r1860_sibling_declares(&self, leaf: &str, m: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1860_OFF") {
+            return false;
+        }
+        let tail = format!("\u{1f}{leaf}\u{1f}{m}");
+        self.impl_members.iter().any(|k| k.ends_with(&tail) && k.matches('\u{1f}').count() == 2)
+    }
+
+    /// SOUNDNESS R1902 — `Self::m` where `Self` binds a std PATH (mode S) and the reading is the crate's OWN trait member: std
+    /// has no inherent `m` for the type, no public std trait declares a fn `m`, and an impl of the type here declares it. Rust
+    /// then runs that member and nothing of std's, so the std path (`std::fs::File::own_h`, which the classifier's prefix rule
+    /// charges `Fs`) is not a reading at all: the caller replaces it with the leaf reading instead of adding it beside. A
+    /// name a std trait also declares (`write`, `from`) keeps both, as before. `CANDOR_R1902_OFF=1`.
+    fn self_std_own_only(&self, written: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1902_OFF") {
+            return false;
+        }
+        let Some(rest) = written.strip_prefix("Self::") else { return false };
+        let Some((head, _)) = self.uses.get(crate::decls::IMPL_SELF_STD_KEY).and_then(|v| v.split_once('\u{2}')) else { return false };
+        let Some(("S", _)) = head.split_once('\u{3}') else { return false };
+        let m = rest.split("::").next().unwrap_or(rest);
+        !crate::std_assoc::is_std_trait_fn(m) && self.self_std_reading(written).is_some()
+    }
+
     /// Whether a bare NAME in this body refers to a LOCAL binding rather than to a module-level
     /// `static`/`const` of the same name. The ONE definition of that question: a same-named param, `let`,
     /// loop var or closure param shadows the static, and a consumer that skips this test charges the
@@ -13332,6 +13461,9 @@ impl<'a> CallCollector<'a> {
                         let mut targets = vec![written.clone()];
                         // R1832 — `let f = Self::create;` keeps the std reading beside the leaf one.
                         targets.extend(s.self_std_reading(&crate::lang::path_to_string_lc(&p.path)));
+                        if targets.len() == 2 && s.self_std_own_only(&crate::lang::path_to_string_lc(&p.path)) {
+                            targets.remove(0); // R1902 — the own member replaces the std path
+                        }
                         let head = p.path.segments.first().map(|x| x.ident.to_string());
                         let rest: Vec<String> =
                             p.path.segments.iter().skip(1).map(|x| x.ident.to_string()).collect();
@@ -14306,13 +14438,33 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                 } else {
                                     let written = crate::lang::path_to_string_lc(&p.path);
                                     let mut extras = self.glob_extra_candidates(&written);
-                                    let e = self.expand_scoped(&written);
+                                    let mut e = self.expand_scoped(&written);
                                     let unfollowed = crate::lang::expand_noalias(&written, &self.uses);
                                     if unfollowed != e && unfollowed.starts_with("crate::") {
                                         extras.push(unfollowed);
                                     }
+                                    // SOUNDNESS R1850 — `Self` bound to a module path only a glob supplies, where the globs do
+                                    // not single out one origin (two external globs; one beside `use super::*`): `impl_self_binding`
+                                    // keeps the written path, so `Self::m` is `d::Lone::m`, and it gets the same candidates the
+                                    // written spelling `d::Lone::m(..)` gets here; where only a crate-local glob can supply the
+                                    // head, the site is disclosed. Before, every such `Self::m` read pure over a write.
+                                    if written.starts_with("Self::") && extras.is_empty() && !candor_report::env::switch("CANDOR_R1850_OFF") {
+                                        let g = self.glob_extra_candidates(&e);
+                                        if !g.is_empty() {
+                                            extras.extend(g);
+                                        } else if expand(&e, &self.uses) == e
+                                            && crate::lang::only_local_glob_supplies(&e.split("::").collect::<Vec<_>>(), &self.uses)
+                                        {
+                                            let ty = e.rsplit_once("::").map(|(h, _)| h).unwrap_or(&e).to_string();
+                                            self.mark_unresolved(format!("ambiguous:self type `{ty}` is reached only through a crate-local glob"));
+                                        }
+                                    }
                                     if let Some(x) = self.self_std_reading(&written) {
-                                        extras.push(x);
+                                        if self.self_std_own_only(&written) {
+                                            e = x; // R1902 — the own member replaces the std path
+                                        } else {
+                                            extras.push(x);
+                                        }
                                     }
                                     for extra in extras {
                                         let leaf2 = extra.rsplit("::").next().unwrap_or(&extra).to_string();
@@ -14340,15 +14492,22 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                         if p.qself.is_some() && !path.contains("::") {
                             // R1832 — `<Self>::create(..)` keeps the std reading beside the leaf one, as `Self::create` does.
                             let self_qself = p.qself.as_ref().is_some_and(|q| matches!(&*q.ty, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self")));
+                            let own_only = self_qself && self.self_std_own_only(&format!("Self::{path}"));
                             if let Some(extra) = self_qself.then(|| self.self_std_reading(&format!("Self::{path}"))).flatten() {
-                                let leaf2 = extra.rsplit("::").next().unwrap_or(&extra).to_string();
-                                self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: extra,
-                                    leaf: leaf2, str_arg: None, typed: false, method: false,
-                                    is_macro: false, path_lits_partial: false, path_lit2: None });
+                                if own_only {
+                                    path = extra.clone(); // R1902 — the own member replaces the std path
+                                } else {
+                                    let leaf2 = extra.rsplit("::").next().unwrap_or(&extra).to_string();
+                                    self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: extra,
+                                        leaf: leaf2, str_arg: None, typed: false, method: false,
+                                        is_macro: false, path_lits_partial: false, path_lit2: None });
+                                }
                             }
-                            match p.qself.as_ref().and_then(|q| type_path(&q.ty, &self.uses)) {
-                                Some(ty) => path = format!("{ty}::{path}"),
-                                None => method = true,
+                            if !own_only {
+                                match p.qself.as_ref().and_then(|q| type_path(&q.ty, &self.uses)) {
+                                    Some(ty) => path = format!("{ty}::{path}"),
+                                    None => method = true,
+                                }
                             }
                         }
                         let leaf = path.rsplit("::").next().unwrap_or(&path).to_string();
@@ -16155,8 +16314,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                             let name = path_to_string(&p.path);
                             // R271 — every target of a fan-out alias, for the same reason the direct-call
                             // site edges to each: the adapter invokes ONE of them and the row is a union.
+                            let aliased = self.fn_alias.contains_key(&name);
                             let mut paths = self.fn_alias.get(&name).cloned().unwrap_or_else(|| vec![expand(&name, &self.uses)]);
                             paths.extend(self.self_std_reading(&name)); // R1832 — `map(Self::create)` beside `File::create`
+                            if !aliased && paths.len() == 2 && self.self_std_own_only(&name) {
+                                paths.remove(0); // R1902 — the own member replaces the std path
+                            }
                             for path in paths {
                                 let leaf2 = path.rsplit("::").next().unwrap_or(&path).to_string();
                                 self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: true, argc: 0, entropy_arg: false, path, leaf: leaf2, str_arg: None, typed: false, method: false, is_macro: false, path_lits_partial: false, path_lit2: None });

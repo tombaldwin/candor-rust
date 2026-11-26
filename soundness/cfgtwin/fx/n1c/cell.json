@@ -1,0 +1,19 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_n1c"
+ ],
+ "id": "n1c",
+ "lib": false,
+ "note": "R1906: inline hand-written twins, hidden text a dependency macro (+ an unrelated local macro_rules!)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n1c_e"
+  },
+  {
+   "kind": "q",
+   "name": "n1c_q"
+  }
+ ]
+}
