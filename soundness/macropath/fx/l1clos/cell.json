@@ -1,0 +1,25 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1clos",
+ "lib": false,
+ "note": "X4: the hidden name called in a closure / taken as a fn pointer.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1clos_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1clos_q"
+  },
+  {
+   "kind": "e",
+   "name": "l1fnref_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1fnref_q"
+  }
+ ]
+}

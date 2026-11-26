@@ -1,0 +1,18 @@
+{
+ "chain": {
+  "dep_dir": "fxdepl1collide",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepl1collide"
+ ],
+ "id": "l1collide",
+ "lib": false,
+ "note": "X7: a dependency macro whose leaf equals a local macro (defs.rs): the local body must NOT be read for it (L1(b2), not this lane).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1collide_e"
+  }
+ ]
+}

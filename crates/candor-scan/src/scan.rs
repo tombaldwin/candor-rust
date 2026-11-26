@@ -2653,6 +2653,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     let trait_decls = &merged.trait_decls;
     // SOUNDNESS R145 — every module whose namespace an unreadable `include!` may be supplying names to.
     let opaque_scope = crate::lang::opaque_include_scope(&merged.opaque_include_modules, &merged.local_globs);
+    // SOUNDNESS R1853 (rust-macropath L1(a)) — the names unexpanded LOCAL item text may be supplying to each module (own and globbed).
+    let minted_scope = crate::lang::minted_scope(&merged.macro_minted_free, &merged.local_globs);
     let trait_fields = &merged.trait_fields;
     // SOUNDNESS R1246 — each trait's implementor BLOCKS with the qual their units are minted under (`model::impl_owner_key`).
     let mut impl_owners = crate::model::impl_owners_by_trait(&merged.impl_members);
@@ -8660,6 +8662,22 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if dep_join_hit && candor_report::env::trace("CANDOR_R501_INSTR") {
                             eprintln!("R501MARK\tMACRO\t{}\t{}", f.qual, c.path);
                         }
+                    } else if claimants == 0 && minted_member_hit(&ty, &c.leaf, &merged.macro_minted_members, type_to_traits.get(&ty)) {
+                        // SOUNDNESS R1853 (rust-macropath L1(a)) — A TYPED METHOD CALL THE TYPE'S OWN UNEXPANDED LOCAL TEXT MAY BE
+                        // DECLARING. `S`'s INHERENT impl holds an impl-item invocation this engine left unexpanded (`impl S {
+                        // self::mkm!{ go } }`), or a trait `S` implements holds a trait-item one (`trait T { self::mktr!{ go } }`),
+                        // and the name the call spells is one that text provably declares (`mbe::minted_marker`). No unit exists
+                        // for it, so the call read ABSENT over an executed write (R452 (b) needs the TYPE in a macro-hidden MODULE
+                        // and the name written as `fn <name>`; neither holds for a minted name). A trait IMPL's hidden members are
+                        // R1245's, not this arm's.
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert("macro:impl members hidden by an unexpanded macro".to_string());
+                        if candor_report::env::trace("CANDOR_R1853L1_INSTR") {
+                            eprintln!("R1853MEMBER\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
                     }
                 }
             }
@@ -9103,6 +9121,41 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 unknown_why.entry(f.qual.clone()).or_default()
                     .insert("macro:items hidden by an include! this scan could not read".to_string());
+            }
+            // §4 HONESTY — SOUNDNESS R1853 (rust-macropath L1(a)), THE CALLER SIDE OF TEXT THIS ENGINE LEFT UNEXPANDED. R128 discloses
+            // only the caller that spells the hidden module's `crate::` path; rustc resolves a BARE name against the caller's module and
+            // a `use`d one against the module the `use` names, so a bare, `use`-imported (named, renamed or glob) call of a name that
+            // module's unexpanded item text declares has no unit, no edge and no disclosure. EXECUTED (`soundness/macropath`, l1bare /
+            // l1use / l1ren / l1glob): every one wrote the file and read ABSENT on v0.43.0.
+            //
+            // THE NAME IS THE EVIDENCE, as R452's: only a name the text provably declares (`mbe::minted_marker`, read from the LOCAL
+            // macro's own bodies; opaque and foreign text is not recorded here) — so this stays off R128's flood. Same denylist as
+            // R145 above: a local type's constructor and a std-prelude function are not calls into hidden code.
+            if !r128_fired
+                && !c.is_macro
+                && !c.method
+                && !c.typed
+                && !already_handled
+                && !minted_scope.is_empty()
+                && !c.path.starts_with('<')
+                && !local_types.contains(&c.leaf)
+                && !matches!(c.leaf.as_str(), "Some" | "Ok" | "Err" | "drop" | "size_of" | "size_of_val" | "align_of" | "align_of_val")
+                && minted_scope_names(&f.qual, &c.path, &c.leaf, &local_types, trait_decls, &minted_scope)
+            {
+                if candor_report::env::trace("CANDOR_R1853L1_INSTR") {
+                    eprintln!("R1853FREE\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                }
+                direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                // A path whose owner segment names a local TYPE or TRAIT (`inner::S::go(&s)`, `<S as T>::go`) is looked up in that
+                // owner's members, not in a module's items: the reason says which, so it stays TRUE.
+                let owner_is_type = c.path.rsplit_once("::").is_some_and(|(o, _)| {
+                    let l = o.rsplit("::").next().unwrap_or(o);
+                    local_types.contains(l) || trait_decls.contains_key(l)
+                });
+                unknown_why.entry(f.qual.clone()).or_default().insert(
+                    if owner_is_type { "macro:impl members hidden by an unexpanded macro" } else { "macro:module items hidden by an unexpanded macro" }
+                        .to_string(),
+                );
             }
         }
         sc_step!();
@@ -13363,6 +13416,45 @@ fn opaque_scope_names(
     }
 }
 
+
+/// SOUNDNESS R1853 (rust-macropath L1(a)) — does an unexpanded LOCAL impl-item / trait-item invocation declare `leaf` for the
+/// receiver's type `ty`, or for a trait that type implements (`traits`)? `members` holds `"<Owner>\u{1}<name>"`.
+fn minted_member_hit(
+    ty: &str,
+    leaf: &str,
+    members: &std::collections::HashSet<String>,
+    traits: Option<&Vec<String>>,
+) -> bool {
+    !members.is_empty()
+        && (members.contains(&format!("{ty}\u{1}{leaf}"))
+            || traits.is_some_and(|trs| trs.iter().any(|tr| members.contains(&format!("{tr}\u{1}{leaf}")))))
+}
+
+/// SOUNDNESS R1853 (rust-macropath L1(a)) — does this call's callee get looked up in a module whose unexpanded local item text
+/// declares `leaf`? The module is chosen exactly as `opaque_scope_names` chooses it (the caller's, or the one the path names read
+/// crate-rooted and relative to the caller), and the glob closure is already inside `scope`.
+fn minted_scope_names(
+    caller: &str,
+    path: &str,
+    leaf: &str,
+    local_types: &std::collections::HashSet<String>,
+    trait_decls: &HashMap<String, crate::model::LocalTrait>,
+    scope: &HashMap<String, std::collections::HashSet<String>>,
+) -> bool {
+    let segs: Vec<&str> = caller.split("::").collect();
+    let n = segs.len();
+    let module = if n >= 2 && (local_types.contains(segs[n - 2]) || trait_decls.contains_key(segs[n - 2])) {
+        segs[..n - 2].join("::")
+    } else {
+        segs[..n.saturating_sub(1)].join("::")
+    };
+    let has = |m: &str| scope.get(m).is_some_and(|names| names.contains(leaf));
+    let p = path.strip_prefix("crate::").unwrap_or(path);
+    match p.rsplit_once("::") {
+        None => has(&module),
+        Some((owner, _)) => has(owner) || (!module.is_empty() && has(&format!("{module}::{owner}"))),
+    }
+}
 
 /// EXACT-FIRST (Track A step 2) — whether the module a held qual names (`sys` in `sys::R::fmt`) settles that name in
 /// EVERY configuration this scanner reads, so the claimant whose qual equals it is the one the program runs. It does

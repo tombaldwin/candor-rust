@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1path",
+ "lib": false,
+ "note": "B1: path-qualified caller (R128).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1path_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1path_q"
+  }
+ ]
+}

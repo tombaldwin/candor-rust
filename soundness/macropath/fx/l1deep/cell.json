@@ -1,0 +1,25 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1deep",
+ "lib": false,
+ "note": "X3: hidden text in a nested module; relative and absolute path callers.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1deep_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1deep_q"
+  },
+  {
+   "kind": "e",
+   "name": "l1deepabs_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1deepabs_q"
+  }
+ ]
+}

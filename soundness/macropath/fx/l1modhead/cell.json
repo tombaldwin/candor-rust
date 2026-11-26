@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1modhead",
+ "lib": false,
+ "note": "X2: invocation headed by a module of the same item list.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1modhead_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1modhead_q"
+  }
+ ]
+}

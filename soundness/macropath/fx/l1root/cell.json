@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1root",
+ "lib": false,
+ "note": "X1: hidden text at the crate root, bare caller in the root.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1root_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1root_q"
+  }
+ ]
+}

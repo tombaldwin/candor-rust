@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1glob",
+ "lib": false,
+ "note": "B5: `use inner::*; go()`.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1glob_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1glob_q"
+  }
+ ]
+}

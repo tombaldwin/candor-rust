@@ -180,7 +180,10 @@ fn r1636_a_receiver_type_declared_only_in_macro_text_discloses() {
     assert!(why(&on, "drv::Driver::drv_park_zq").iter().any(|w| w.starts_with("macro:")));
     assert!(inferred(&on, "drv::Other::other_zq").is_empty(), "a type candor read stays pure (twin)");
     let off = scan(&d, None, &["CANDOR_I1S2_XCFG_OFF", "CANDOR_R1636_OFF"]);
-    assert!(inferred(&off, "drv::Driver::drv_park_zq").is_empty(), "the switch restores the silence");
+    // R1853 (rust-macropath L1(a)): with the cross-file pair left unexpanded and R1636 off, the unexpanded LOCAL text provably declares
+    // `park` for `Stack`, so the typed caller is now disclosed (`Unknown`) rather than silent. What the switch still removes is R1636's
+    // own answer, and the concrete effect: the OFF arm must carry no `Net`.
+    assert!(!inferred(&off, "drv::Driver::drv_park_zq").contains(&"Net".to_string()), "the switch restores the unresolved reading");
     let _ = std::fs::remove_dir_all(&d);
 }
 

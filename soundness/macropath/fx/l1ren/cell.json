@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1ren",
+ "lib": false,
+ "note": "B4: `use inner::go as g; g()`.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1ren_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1ren_q"
+  }
+ ]
+}

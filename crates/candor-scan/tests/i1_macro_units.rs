@@ -157,7 +157,10 @@ fn i1_step2_macro_made_trait_impl_is_a_unit_in_crate() {
     assert!(units.contains("AtomicU32::load_it") && units.contains("Loc::load_it"), "{units:?}");
     // OFF arm (stage 2 deleted the allowlist and its switch): the oracle seed leaves `impl_load!` unexpanded.
     let (off, _) = scan(&d, None, &[("CANDOR_I1_SEED_DROP", "impl_load")]);
-    assert!(eff(&off, "s_ufcs").is_empty(), "OFF: s_ufcs is the R1541 silence again");
+    // R1853 (rust-macropath L1(a)): the seed leaves `impl_load!(AtomicU32)` as unexpanded LOCAL text that provably declares
+    // `AtomicU32::load_it`, so the caller of that name is now disclosed instead of reading silent. The R1541 silence this arm used
+    // to pin is gone for a LOCAL macro; the OFF arm still shows the expansion is what resolves it (Unknown, not the write).
+    assert_eq!(eff(&off, "s_ufcs"), vec!["Unknown".to_string()], "OFF: s_ufcs is disclosed (R1853), not charged the write");
     assert_eq!(eff(&off, "s_dyn"), vec!["Unknown".to_string()], "OFF: the R828 hedge is back");
 }
 

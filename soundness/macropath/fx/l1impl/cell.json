@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1impl",
+ "lib": false,
+ "note": "B7: method on a type whose inherent impl holds an unexpanded impl-item invocation (design fx2 call_m_crate).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1impl_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1impl_q"
+  }
+ ]
+}

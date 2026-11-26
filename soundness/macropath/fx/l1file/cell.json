@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1file",
+ "lib": false,
+ "note": "B6: caller in another file.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1file_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1file_q"
+  }
+ ]
+}

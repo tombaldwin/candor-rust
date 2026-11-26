@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1trait",
+ "lib": false,
+ "note": "B9: UFCS call of a trait-item-minted default method (design fx2 call_t_crate).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1trait_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1trait_q"
+  }
+ ]
+}

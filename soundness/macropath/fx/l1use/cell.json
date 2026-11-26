@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1use",
+ "lib": false,
+ "note": "B3: `use inner::go; go()` (design i2).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1use_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1use_q"
+  }
+ ]
+}

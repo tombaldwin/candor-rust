@@ -1,0 +1,4 @@
+l1bare_e
+l1bare_q
+l1bare_d
+l1bare_dq

@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Lane rust-macropath-l1a: the CALLER side of unexpanded local item / impl-item / trait-item text (SOUNDNESS R1853, adds `Unknown`).**
+  A local macro invocation the scanner leaves unexpanded (a path invocation such as `self::mkfn! { go }` is never bound) was
+  disclosed only to the caller that spelled the hidden module's `crate::` path. Every other caller of a name that text declares read
+  ABSENT over an executed write on v0.43.0: a bare same-module call, a `use`-imported one (named, renamed, glob, from another
+  file), a method (or UFCS call) on a type whose INHERENT impl holds an unexpanded impl-item invocation, and a method on a trait
+  holding an unexpanded trait-item invocation. They now read `Unknown` (`macro:module items hidden by an unexpanded macro`, or
+  `macro:impl members hidden by an unexpanded macro` for a member), keyed on the NAME the local macro's own bodies declare, so the
+  hedge stays off R128's flood. Only invocations the engine can read are recorded: a dependency's macro, a `$m!` or an unreadable
+  body is opaque and is NOT hedged here (the foreign arm is a separate lane). Additive; no kill switch. Cache rev 224. The attack
+  matrix's group B is checked in as `soundness/macropath/` (generator, runner, expectations, executed ground truth).
 - ⚠ **Lane residue-C: small-reach rows from the `Self`/std binding and cfg-twin areas (SOUNDNESS R1846, R1850, R1859, R1860,
   R1902, R1906).** Each was an executed silence or fabrication on v0.43.0 and main.
   - R1846 (a resolution, plus one disclosure): `Self::m(..)` in a trait's DEFAULT body naming a SUPERTRAIT's member read ABSENT

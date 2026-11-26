@@ -1,0 +1,25 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1bare",
+ "lib": false,
+ "note": "B2: bare same-module caller (design i1); l1bare_d is the direct caller inside the module.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1bare_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1bare_q"
+  },
+  {
+   "kind": "e",
+   "name": "l1bare_d"
+  },
+  {
+   "kind": "q",
+   "name": "l1bare_dq"
+  }
+ ]
+}

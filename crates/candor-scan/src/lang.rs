@@ -15258,6 +15258,38 @@ pub(crate) fn collect_local_globs(
     }
 }
 
+/// SOUNDNESS R1853 (rust-macropath L1(a)) — the names each module's namespace may hold that an unexpanded LOCAL item invocation
+/// declares: its own (`macro_minted_free`, `"<module>\u{1}<name>"`), closed under crate-local glob imports exactly as
+/// `opaque_include_scope` closes R145's modules (`use inner::*;` brings `inner`'s minted names into the importer).
+pub(crate) fn minted_scope(
+    free: &std::collections::HashSet<String>,
+    globs: &std::collections::HashSet<String>,
+) -> HashMap<String, std::collections::HashSet<String>> {
+    let mut scope: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    for e in free {
+        if let Some((m, n)) = e.split_once('\u{1}') {
+            scope.entry(m.to_string()).or_default().insert(n.to_string());
+        }
+    }
+    if scope.is_empty() {
+        return scope;
+    }
+    let edges: Vec<(&str, &str)> = globs.iter().filter_map(|g| g.split_once('\u{1}')).collect();
+    loop {
+        let mut grew = false;
+        for (from, to) in &edges {
+            let Some(src) = scope.get(*to).cloned() else { continue };
+            let dst = scope.entry(from.to_string()).or_default();
+            for n in src {
+                grew |= dst.insert(n);
+            }
+        }
+        if !grew {
+            return scope;
+        }
+    }
+}
+
 /// SOUNDNESS R145 — the closure of `opaque` under crate-local glob imports: every module whose namespace
 /// may hold a name an unreadable `include!` supplied.
 pub(crate) fn opaque_include_scope(

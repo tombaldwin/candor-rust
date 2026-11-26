@@ -1,0 +1,22 @@
+{
+ "chain": {
+  "dep_dir": "fxdepl1dep",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepl1dep"
+ ],
+ "id": "l1dep",
+ "lib": false,
+ "note": "B11: dependency item macro by path; its minted name is unknowable (L1(b2): NOT this lane).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1dep_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1dep_q"
+  }
+ ]
+}

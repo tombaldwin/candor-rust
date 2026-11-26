@@ -1,0 +1,22 @@
+{
+ "chain": {
+  "dep_dir": "fxdeptlpath",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdeptlpath"
+ ],
+ "id": "tlpath",
+ "lib": false,
+ "note": "B10: a glob-supplied DEPENDENCY macro minting the callee (R1908 vein; foreign-opaque arm, not L1(a)).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "tlpath_e"
+  },
+  {
+   "kind": "q",
+   "name": "tlpath_q"
+  }
+ ]
+}

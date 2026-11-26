@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1ufcs",
+ "lib": false,
+ "note": "B8: UFCS call over the B7 impl.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1ufcs_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1ufcs_q"
+  }
+ ]
+}

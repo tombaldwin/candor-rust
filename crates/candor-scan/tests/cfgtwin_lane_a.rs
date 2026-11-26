@@ -156,6 +156,12 @@ fn a_claim_from_another_file_follows_an_edit_on_a_warm_cache() {
     let copy = |from: &Path, to: &Path| {
         for e in walk(from) {
             let rel = e.strip_prefix(from).unwrap();
+            // `edit/` holds the state-B replacement the test copies in by hand below. Left inside the crate directory it is a file no
+            // `mod` places, which the scanner still analyses as an orphan module: its unexpanded trait-item text would then be state
+            // A's hidden text (R1853's member evidence is keyed on the owner's leaf), and the assertion is about THIS file's claim.
+            if rel.starts_with("edit") {
+                continue;
+            }
             let t = to.join(rel);
             std::fs::create_dir_all(t.parent().unwrap()).unwrap();
             std::fs::copy(&e, &t).unwrap();

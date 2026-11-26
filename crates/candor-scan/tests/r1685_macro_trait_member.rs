@@ -97,6 +97,9 @@ fn r1685_a_path_call_to_a_macro_declared_trait_member_dispatches_over_the_impls(
     // call dispatches without R1685's reading; the calibration therefore turns BOTH off to show the fixture reaches R1685.
     let (_, off) = scan(&d, None, &["CANDOR_R1685_OFF", "CANDOR_I1S3_TRAITITEM_OFF"]);
     for f in ["Stamp::period", "stamp_period_untyped", "typed_ufcs"] {
-        assert!(field(&off, f, "inferred").is_empty(), "the switch restores the silence on `{f}` (proves the fixture reaches the code)");
+        // R1853 (rust-macropath L1(a)): the trait-item invocation left unexpanded by the second switch is LOCAL text that provably
+        // declares `period`, so the typed caller is now DISCLOSED (`Unknown`) instead of silent. The switches still remove the
+        // dispatch itself: the OFF arm must carry no `Fs`.
+        assert!(!field(&off, f, "inferred").contains(&"Fs".to_string()), "the switches remove the dispatch on `{f}` (proves the fixture reaches the code)");
     }
 }

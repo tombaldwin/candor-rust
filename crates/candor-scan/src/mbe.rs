@@ -2073,8 +2073,184 @@ impl Ctx<'_> {
                 }
             }
         }
+        // SOUNDNESS R1853 (rust-macropath L1(a)) — the names this module's unexpanded, LOCAL-READABLE item / impl-item / trait-item
+        // text declares, exported for the CALLER-side hedge (`minted_facts`, `scan.rs`). Additive: a marker nothing else reads.
+        if let Some(mk) = self.minted_marker(&out) {
+            out.push(mk);
+        }
         *items = out;
     }
+
+    /// SOUNDNESS R1853 (rust-macropath L1(a)) — WHAT THE UNEXPANDED LOCAL TEXT OF THIS MODULE DECLARES.
+    ///
+    /// R128 discloses only the PATH-qualified caller of a module holding unexpanded item text. A bare same-module call, a
+    /// `use`-imported one (named, renamed, glob), a method on a type whose INHERENT impl holds an unexpanded impl-item
+    /// invocation, and a method on a trait holding an unexpanded trait-item invocation read ABSENT over an executed write. The
+    /// names such text can declare are readable when the invocation is of a LOCAL macro (`read_hidden`, the one reader), which
+    /// is the whole of this arm: an invocation of another crate's macro, a `$m!`, a token-paster or an unreadable body reads
+    /// OPAQUE and is NOT recorded (its names are unknowable; that is the foreign arm, a separate question).
+    ///
+    /// LOCAL means the path proves it. A single-segment name this file does not import; or a path headed `crate`/`self`/`super`
+    /// or by a module declared in this same item list (an in-scope item shadows the extern prelude). `dep::mk!` whose leaf
+    /// happens to equal a local macro's name binds the DEPENDENCY, and reading the local body for it would record wrong names:
+    /// refused, not guessed.
+    ///
+    /// ENTRIES (string literals after the marker ident): `F\u{1}<rel path>::<name>` (a free name, relative to this module) and
+    /// `M\u{1}<Owner>\u{1}<name>` (a member of an inherent impl's self type, or of a trait). Trait impls are R1245's.
+    fn minted_marker(&self, out: &[syn::Item]) -> Option<syn::Item> {
+        let table = BodyTable { scoped: None, bodies: Some(&self.bodies), xdefs: Some(self.xdefs) };
+        let local = |mac: &syn::Macro| -> bool {
+            let leaf = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+            if mac.path.leading_colon.is_some() || table.get(&leaf).is_none() {
+                return false;
+            }
+            if mac.path.segments.len() == 1 {
+                return !self.imported.contains(&leaf) && !self.imported.contains("*");
+            }
+            let head = mac.path.segments.first().map(|s| s.ident.to_string()).unwrap_or_default();
+            matches!(head.as_str(), "crate" | "self" | "super") || out.iter().any(|it| matches!(it, syn::Item::Mod(m) if m.ident == head))
+        };
+        let mut ents: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut absorb = |h: &Hidden, owner: Option<&str>| {
+            if h.opaque {
+                return;
+            }
+            for k in h.keys.iter().chain(h.xkeys.iter()) {
+                if k.starts_with('=') || k.starts_with('*') || k.starts_with("p:") {
+                    continue;
+                }
+                // `S as Tr` / `S as Tr::m`: a trait impl the text writes; its member `m` is the type's.
+                if let Some((o, rest)) = k.split_once(" as ") {
+                    if let Some((_, m)) = rest.rsplit_once("::") {
+                        ents.insert(format!("M\u{1}{o}\u{1}{m}"));
+                    }
+                    continue;
+                }
+                match k.rsplit_once("::") {
+                    // `Owner::m` (an impl member, or a trait's) AND `module::name` (a path item in a module the text declares):
+                    // both readings recorded, the over-approximation direction.
+                    Some((o, m)) => {
+                        let o_leaf = o.rsplit("::").next().unwrap_or(o);
+                        ents.insert(format!("M\u{1}{o_leaf}\u{1}{m}"));
+                        ents.insert(format!("F\u{1}{k}"));
+                    }
+                    None => {
+                        ents.insert(format!("F\u{1}{k}"));
+                    }
+                }
+            }
+            for l in &h.loose {
+                match owner {
+                    Some(o) => {
+                        ents.insert(format!("M\u{1}{o}\u{1}{l}"));
+                    }
+                    None => {
+                        ents.insert(format!("F\u{1}{l}"));
+                    }
+                }
+            }
+        };
+        for it in out {
+            match it {
+                syn::Item::Macro(m) if is_hidden_text(m, &self.partial, &self.tc_shadow) && local(&m.mac) => {
+                    let mut h = Hidden::default();
+                    self.read_hidden(&m.mac, None, out, &mut h, 0);
+                    absorb(&h, None);
+                }
+                syn::Item::Impl(im) if im.trait_.is_none() => {
+                    let owner = ty_key(&im.self_ty);
+                    for ii in &im.items {
+                        if let syn::ImplItem::Macro(m) = ii {
+                            if local(&m.mac) {
+                                let mut h = Hidden::default();
+                                self.read_hidden(&m.mac, Some(&owner), out, &mut h, 0);
+                                absorb(&h, Some(&owner));
+                            }
+                        }
+                    }
+                }
+                syn::Item::Trait(t) => {
+                    let owner = t.ident.to_string();
+                    for ti in &t.items {
+                        if let syn::TraitItem::Macro(m) = ti {
+                            if local(&m.mac) {
+                                let mut h = Hidden::default();
+                                self.read_hidden(&m.mac, Some(&owner), out, &mut h, 0);
+                                absorb(&h, Some(&owner));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if ents.is_empty() {
+            return None;
+        }
+        if candor_report::env::trace("CANDOR_R1853L1_INSTR") {
+            eprintln!("R1853MINTED\t{ents:?}"); // §E1 REACH COUNTER
+        }
+        let mut ts = TokenStream::new();
+        ts.extend([TokenTree::Ident(Ident::new(MINTED_MARK, proc_macro2::Span::call_site()))]);
+        for e in ents {
+            ts.extend([TokenTree::Literal(proc_macro2::Literal::string(&e))]);
+        }
+        Some(syn::Item::Verbatim(ts))
+    }
+}
+
+/// SOUNDNESS R1853 (rust-macropath L1(a)) — the marker `Ctx::minted_marker` writes.
+const MINTED_MARK: &str = "__candor_macro_minted";
+
+/// SOUNDNESS R1853 (rust-macropath L1(a)) — what a file's unexpanded local text declares, crate-wide keyed: `(free, members)`,
+/// `free` = `"<module qual>\u{1}<name>"` and `members` = `"<Owner>\u{1}<name>"`. Walked over the SPLICED items, so a marker an
+/// expansion wrote into a module it emitted is read at that module's qual. A `#[cfg(test)]` module is skipped as every other
+/// collector skips it.
+pub(crate) fn minted_facts(items: &[syn::Item], modpath: &str, include_tests: bool) -> (Vec<String>, Vec<String>) {
+    fn walk(items: &[syn::Item], modpath: &str, include_tests: bool, free: &mut Vec<String>, mem: &mut Vec<String>) {
+        for it in items {
+            match it {
+                syn::Item::Verbatim(ts) => {
+                    let mut toks = ts.clone().into_iter();
+                    if matches!(toks.next(), Some(TokenTree::Ident(a)) if a == MINTED_MARK) {
+                        for t in toks {
+                            let TokenTree::Literal(l) = t else { continue };
+                            let Ok(syn::Lit::Str(s)) = syn::parse2::<syn::Lit>(TokenTree::Literal(l).into()) else { continue };
+                            let v = s.value();
+                            if let Some(rest) = v.strip_prefix("F\u{1}") {
+                                let (rel_mod, name) = match rest.rsplit_once("::") {
+                                    Some((m, n)) => (m.to_string(), n.to_string()),
+                                    None => (String::new(), rest.to_string()),
+                                };
+                                let q = match (modpath.is_empty(), rel_mod.is_empty()) {
+                                    (true, _) => rel_mod,
+                                    (false, true) => modpath.to_string(),
+                                    (false, false) => format!("{modpath}::{rel_mod}"),
+                                };
+                                free.push(format!("{q}\u{1}{name}"));
+                            } else if let Some(rest) = v.strip_prefix("M\u{1}") {
+                                mem.push(rest.to_string());
+                            }
+                        }
+                    }
+                }
+                syn::Item::Mod(m) if include_tests || !crate::lang::is_cfg_test(&m.attrs) => {
+                    if let Some((_, inner)) = &m.content {
+                        let sub = if modpath.is_empty() { m.ident.to_string() } else { format!("{modpath}::{}", m.ident) };
+                        walk(inner, &sub, include_tests, free, mem);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (mut f, mut m) = (Vec::new(), Vec::new());
+    walk(items, modpath, include_tests, &mut f, &mut m);
+    for v in [&mut f, &mut m] {
+        v.sort();
+        v.dedup();
+    }
+    (f, m)
 }
 
 /// I1 stage 3 (R1813) — one body-position invocation's expansion, read: the impls it emits (at any block depth of the

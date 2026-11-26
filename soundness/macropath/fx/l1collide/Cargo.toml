@@ -1,0 +1,9 @@
+[package]
+name = "cf_l1collide"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdepl1collide = { path = "fxdepl1collide" }
+
+[workspace]

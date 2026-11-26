@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1other",
+ "lib": false,
+ "note": "X8: a VISIBLE fn named like a hidden one in ANOTHER module; the caller there is CHARGED, not hedged.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1other_e"
+  }
+ ]
+}

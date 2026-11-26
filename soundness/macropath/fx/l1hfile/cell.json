@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1hfile",
+ "lib": false,
+ "note": "X6: hidden text in another file, `use`d by the root.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1hfile_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1hfile_q"
+  }
+ ]
+}

@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1let",
+ "lib": false,
+ "note": "B12: a let-bound closure named like the hidden fn; PURE (executed).",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "l1let_q"
+  }
+ ]
+}

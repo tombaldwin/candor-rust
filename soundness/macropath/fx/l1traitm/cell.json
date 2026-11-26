@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1traitm",
+ "lib": false,
+ "note": "B9: method-call spelling of the trait-item-minted default method.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1traitm_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1traitm_q"
+  }
+ ]
+}

@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1timpl",
+ "lib": false,
+ "note": "X5: trait IMPL whose member is minted by hidden impl-item text (R1245).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1timpl_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1timpl_q"
+  }
+ ]
+}

@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "l1expanded",
+ "lib": false,
+ "note": "B13 (design i3): bare `mkfn!{ go }` is expanded; CHARGED on every arm, no hedge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l1expanded_e"
+  },
+  {
+   "kind": "q",
+   "name": "l1expanded_q"
+  }
+ ]
+}
