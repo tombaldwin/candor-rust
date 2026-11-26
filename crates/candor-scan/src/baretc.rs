@@ -59,6 +59,10 @@ pub(crate) struct TcFile {
     /// the inline module paths of this file (`""` = the file's own list, `"a::b"` an inline module) whose own globs may supply a
     /// name a dependency exports
     pub supply: HashSet<String>,
+    /// design revision 2 (D1): `(inline module path, toolchain name)` for each explicit `use` leaf of this file that is rooted at
+    /// `crate` / `self` / `super` and LANDS on a re-export that may be a dependency's (a foreign glob or name, an unplaced module,
+    /// unreadable text, or nothing the engine can place), at any cfg twin
+    pub uses: HashSet<(String, String)>,
 }
 
 impl TcFile {
@@ -69,6 +73,14 @@ impl TcFile {
     /// May a glob of the module at inline path `modkey` rebind the bare toolchain name `name`?
     pub(crate) fn glob_rebinds(&self, name: &str, modkey: &str) -> bool {
         self.supply.contains(modkey) && !self.immune(name)
+    }
+
+    /// Does an explicit `use` of `name` in the module at `modkey` (`None`: any module of the file) land on a dependency's macro?
+    pub(crate) fn use_lands_foreign(&self, name: &str, modkey: Option<&str>) -> bool {
+        match modkey {
+            Some(k) => self.uses.contains(&(k.to_string(), name.to_string())),
+            None => self.uses.iter().any(|(_, n)| n == name),
+        }
     }
 
     /// May a glob of ANY module of this file? (a reading that stands for every nested module at once)
@@ -82,9 +94,12 @@ impl TcFile {
         use std::hash::{Hash, Hasher};
         let mut v: Vec<&str> = self.supply.iter().map(String::as_str).collect();
         v.sort_unstable();
+        let mut u: Vec<(&str, &str)> = self.uses.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        u.sort_unstable();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         v.hash(&mut h);
-        format!("{}|{}|{:x}", u8::from(self.f3), v.len(), h.finish())
+        u.hash(&mut h);
+        format!("{}|{}|{}|{:x}", u8::from(self.f3), v.len(), u.len(), h.finish())
     }
 }
 
@@ -184,17 +199,146 @@ pub(crate) fn build(summaries: &HashMap<String, FileSummary>, edition2018: &dyn 
         if summaries.get(&p.root).is_some_and(|s| s.root_macro_use_dep) {
             continue;
         }
-        let mut t = TcFile { f3: f3_of(&p.root), supply: HashSet::new() };
+        let mut t = TcFile { f3: f3_of(&p.root), ..Default::default() };
+        let ed = edition2018(&p.root);
         for m in &summaries[file].mods {
             let mut full = p.modpath.clone();
             full.extend(m.inline.iter().cloned());
-            if ix.get(&(p.root.clone(), full)).is_some_and(|&i| supplies[i]) {
+            if ix.get(&(p.root.clone(), full.clone())).is_some_and(|&i| supplies[i]) {
                 t.supply.insert(m.inline.join("::"));
+            }
+            // D1: this module's explicit `use` leaves of a toolchain name, rooted at crate / self / super, by where they LAND
+            for (bound, segs, leaf, abs) in &m.full_uses {
+                if *abs || !crate::mbe::TOOLCHAIN_BANG_MACROS.contains(&bound.as_str()) {
+                    continue;
+                }
+                if !matches!(segs.first().map(String::as_str), Some("crate" | "self" | "super")) {
+                    continue; // a dependency or bare head: arm 2's head test (`non_toolchain_imports_in`) answers
+                }
+                let mut seen = HashSet::new();
+                let land = lands(&p.root, &full, segs, leaf, ed, &module_all, &unplaced, summaries, &mut seen);
+                if !matches!(land, Prov::Safe) {
+                    t.uses.insert((m.inline.join("::"), bound.clone()));
+                }
             }
         }
         facts.files.insert(file.clone(), t);
     }
     facts
+}
+
+/// What a name resolves to: provably the toolchain's or a local `macro_rules!`; may be a dependency's (or unreadable); or nothing found.
+#[derive(Clone, Copy, PartialEq)]
+enum Prov {
+    Safe,
+    Foreign,
+    Nothing,
+}
+
+fn join(a: Prov, b: Prov) -> Prov {
+    match (a, b) {
+        (Prov::Foreign, _) | (_, Prov::Foreign) => Prov::Foreign,
+        (Prov::Safe, _) | (_, Prov::Safe) => Prov::Safe,
+        _ => Prov::Nothing,
+    }
+}
+
+/// Where does the explicit `use <segs>::<leaf>;` written in module `(root, mp)` land? `segs` starts with `crate`/`self`/`super`.
+/// A target module that is not placed, a foreign path or glob on the way, unreadable item text, and a name nothing provides are all
+/// "may be a dependency's" (`Foreign`); every cfg twin of a module is read.
+#[allow(clippy::too_many_arguments)]
+fn lands(
+    root: &str,
+    mp: &[String],
+    segs: &[String],
+    leaf: &str,
+    ed2018: bool,
+    modules: &HashMap<(String, Vec<String>), Vec<(String, usize)>>,
+    unplaced: &HashSet<(String, Vec<String>)>,
+    summaries: &HashMap<String, FileSummary>,
+    seen: &mut HashSet<(String, Vec<String>, String)>,
+) -> Prov {
+    // the module the path names: resolve `segs` as a glob path would be, but require a MODULE
+    let target = match resolve(root, mp, segs, false, ed2018, modules, unplaced, summaries) {
+        Target::Module((_, p)) => p,
+        _ => return Prov::Foreign,
+    };
+    provides(root, &target, leaf, ed2018, modules, unplaced, summaries, seen)
+}
+
+/// Does module `(root, mp)` provide `name`, and is it the toolchain's / local, or possibly a dependency's?
+#[allow(clippy::too_many_arguments)]
+fn provides(
+    root: &str,
+    mp: &[String],
+    name: &str,
+    ed2018: bool,
+    modules: &HashMap<(String, Vec<String>), Vec<(String, usize)>>,
+    unplaced: &HashSet<(String, Vec<String>)>,
+    summaries: &HashMap<String, FileSummary>,
+    seen: &mut HashSet<(String, Vec<String>, String)>,
+) -> Prov {
+    let key = (root.to_string(), mp.to_vec());
+    if unplaced.contains(&key) {
+        return Prov::Foreign;
+    }
+    let Some(defs) = modules.get(&key) else { return Prov::Foreign };
+    if !seen.insert((root.to_string(), mp.to_vec(), name.to_string())) {
+        return Prov::Nothing; // a cycle adds nothing
+    }
+    let mut acc = Prov::Nothing;
+    for (file, ix) in defs {
+        let m = &summaries[file].mods[*ix];
+        if m.unread {
+            return Prov::Foreign;
+        }
+        if m.rules.iter().any(|r| r == name) {
+            acc = join(acc, Prov::Safe);
+        }
+        for (bound, segs, leaf, abs) in &m.full_uses {
+            if bound != name {
+                continue;
+            }
+            let head = segs.first().map(String::as_str);
+            let one = if *abs {
+                if matches!(head.or(Some(leaf.as_str())), Some("std" | "core" | "alloc")) { Prov::Safe } else { Prov::Foreign }
+            } else {
+                match head {
+                    Some("std" | "core" | "alloc") if !modules.contains_key(&(root.to_string(), vec![head.unwrap().to_string()])) => Prov::Safe,
+                    None => {
+                        // `use name;` / `use name as other;`: a macro of this module's textual scope (a local definition), else unknown
+                        if m.rules.iter().any(|r| r == leaf) { Prov::Safe } else { Prov::Foreign }
+                    }
+                    Some("crate" | "self" | "super") => lands(root, mp, segs, leaf, ed2018, modules, unplaced, summaries, seen),
+                    // a bare head: a child module of this one (2018) or of the root (2015) is a local path; anything else a dependency
+                    Some(h) => {
+                        let local = if ed2018 { mp.iter().cloned().chain([h.to_string()]).collect::<Vec<_>>() } else { vec![h.to_string()] };
+                        if modules.contains_key(&(root.to_string(), local)) {
+                            let mut full = vec!["self".to_string()];
+                            full.extend(segs.iter().cloned());
+                            let full = if ed2018 { full } else { std::iter::once("crate".to_string()).chain(segs.iter().cloned()).collect() };
+                            lands(root, mp, &full, leaf, ed2018, modules, unplaced, summaries, seen)
+                        } else {
+                            Prov::Foreign
+                        }
+                    }
+                }
+            };
+            acc = join(acc, one);
+        }
+        for (g, abs) in &m.globs {
+            let one = match resolve(root, mp, g, *abs, ed2018, modules, unplaced, summaries) {
+                Target::Supplies => Prov::Foreign,
+                Target::Nothing => {
+                    // a glob of the toolchain's own crate supplies the toolchain's macro of the name; an enum supplies nothing
+                    if matches!(g.first().map(String::as_str), Some("std" | "core" | "alloc")) { Prov::Safe } else { Prov::Nothing }
+                }
+                Target::Module((_, t)) => provides(root, &t, name, ed2018, modules, unplaced, summaries, seen),
+            };
+            acc = join(acc, one);
+        }
+    }
+    acc
 }
 
 /// Follow a glob's path from the module `(root, mp)`.
@@ -375,10 +519,56 @@ mod tests {
     }
 
     #[test]
+    fn explicit_uses_are_classified_by_where_they_land() {
+        let uses = |f: &TcFacts, file: &str, m: &str| f.files[file].uses.contains(&(m.to_string(), "thread_local".to_string()));
+        // g5 / g5c: a same-file prelude holding a dependency glob; g5n: by name; g5x: another file; g7: super::
+        let f = facts(&[
+            ("src/lib.rs", "mod inner; mod prelude; mod p2; mod x;"),
+            ("src/inner.rs", "mod pre { pub use dep::*; } use self::pre::thread_local; use crate::inner::pre::thread_local as tl2;"),
+            ("src/prelude.rs", "pub use dep::*;"),
+            ("src/p2.rs", "pub use dep::thread_local;"),
+            ("src/x.rs", "use crate::prelude::thread_local; use super::p2::thread_local as t3;"),
+        ]);
+        assert!(uses(&f, "src/inner.rs", ""), "g5, self::");
+        assert!(uses(&f, "src/x.rs", ""), "g5x / g5n, crate:: and super::");
+        // controls: a std re-export, a local macro, a std glob
+        let f = facts(&[
+            ("src/lib.rs", "mod inner; mod prelude; mod loc; mod sg; mod a;"),
+            ("src/inner.rs", "mod pre { pub use std::thread_local; } use self::pre::thread_local;"),
+            ("src/prelude.rs", "pub use std::thread_local;"),
+            ("src/loc.rs", "macro_rules! thread_local { () => {} } pub(crate) use thread_local;"),
+            ("src/sg.rs", "pub use std::*;"),
+            ("src/a.rs", "use crate::prelude::thread_local; use crate::loc::thread_local as t2; use crate::sg::thread_local as t3;"),
+        ]);
+        assert!(!uses(&f, "src/inner.rs", "") && !uses(&f, "src/a.rs", ""), "toolchain and local landings do not hold");
+        // cfg twins: one twin foreign holds; an unplaced or unknown module holds
+        let f = facts(&[
+            ("src/lib.rs", "mod prelude; mod a; mod b;"),
+            ("src/prelude.rs", "#[cfg(feature = \"loom\")] pub use dep::thread_local; #[cfg(not(feature = \"loom\"))] pub use std::thread_local;"),
+            ("src/a.rs", "use crate::prelude::thread_local;"),
+            ("src/b.rs", "use crate::nosuch::thread_local;"),
+        ]);
+        assert!(uses(&f, "src/a.rs", "") && uses(&f, "src/b.rs", ""), "twins and unplaced modules hold");
+    }
+
+    #[test]
+    fn macro_use_is_read_through_cfg_attr() {
+        for (root, kept) in [
+            ("#[cfg_attr(feature = \"m\", macro_use)] extern crate dep; mod a;", true),
+            ("#[cfg_attr(unix, cfg_attr(feature = \"m\", macro_use))] extern crate dep; mod a;", true),
+            ("#[macro_use] extern crate dep as d; mod a;", true),
+            ("#[cfg_attr(feature = \"m\", macro_use)] extern crate std; mod a;", false),
+        ] {
+            let f = facts(&[("src/lib.rs", root), ("src/a.rs", "")]);
+            assert_eq!(!f.files.contains_key("src/a.rs"), kept, "{root}");
+        }
+    }
+
+    #[test]
     fn immunity_tables() {
-        let t = TcFile { f3: true, supply: ["".to_string()].into_iter().collect() };
+        let t = TcFile { f3: true, supply: ["".to_string()].into_iter().collect(), ..Default::default() };
         assert!(!t.glob_rebinds("thread_local", "") && !t.glob_rebinds("write", "") && t.glob_rebinds("asm", ""));
-        let t = TcFile { f3: false, supply: ["".to_string()].into_iter().collect() };
+        let t = TcFile { f3: false, supply: ["".to_string()].into_iter().collect(), ..Default::default() };
         assert!(t.glob_rebinds("thread_local", "") && !t.glob_rebinds("write", "") && !t.glob_rebinds("thread_local", "x"));
         for n in GLOB_IMMUNE_CORE {
             assert!(GLOB_IMMUNE_STD.contains(n), "{n}: a core-prelude name is a std-prelude name");

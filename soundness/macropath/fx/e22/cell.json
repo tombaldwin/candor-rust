@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe22",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe22"
+ ],
+ "id": "e22",
+ "lib": true,
+ "nocompile_ok": true,
+ "note": "E: K2 (#![no_std]) x the g5 spelling (g5k).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "p_go_e22"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e22"
+  }
+ ]
+}

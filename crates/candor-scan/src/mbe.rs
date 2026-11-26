@@ -858,7 +858,7 @@ fn non_toolchain_imports_in(items: &[syn::Item], deep: bool) -> std::collections
 fn has_macro_use_extern(items: &[syn::Item]) -> bool {
     items.iter().any(|it| match it {
         syn::Item::ExternCrate(e) => {
-            e.attrs.iter().any(|a| a.path().is_ident("macro_use")) && !matches!(e.ident.to_string().as_str(), "std" | "core" | "alloc")
+            crate::rroot::attrs_mention_macro_use(&e.attrs) && !matches!(e.ident.to_string().as_str(), "std" | "core" | "alloc")
         }
         syn::Item::Mod(m) => m.content.as_ref().is_some_and(|(_, inner)| has_macro_use_extern(inner)),
         _ => false,
@@ -1913,8 +1913,8 @@ impl Ctx<'_> {
                     || imports.contains(**n)
                     || self.tc_mu
                     || match (&self.tc, modkey) {
-                        (Some(t), Some(k)) => t.glob_rebinds(n, k),
-                        (Some(t), None) => t.glob_rebinds_anywhere(n),
+                        (Some(t), Some(k)) => t.glob_rebinds(n, k) || t.use_lands_foreign(n, Some(k)),
+                        (Some(t), None) => t.glob_rebinds_anywhere(n) || t.use_lands_foreign(n, None),
                         (None, _) => self.imported.contains("*"),
                     }
             })

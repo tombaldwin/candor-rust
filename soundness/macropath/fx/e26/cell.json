@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe26",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe26"
+ ],
+ "id": "e26",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: CONTROL: prelude.rs `pub use std::thread_local;` + `use crate::prelude::thread_local;`: std's binds, pure, no hold (g5s).",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "e26_q"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e26"
+  }
+ ]
+}

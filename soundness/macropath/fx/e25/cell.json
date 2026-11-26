@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe25",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe25"
+ ],
+ "id": "e25",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: K1 x `use super::prelude::thread_local;`, prelude an inline module of the root (g7).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e25_e"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e25"
+  }
+ ]
+}

@@ -1,0 +1,26 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe28",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe28"
+ ],
+ "features": [
+  "loom"
+ ],
+ "id": "e28",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: cfg TWIN re-export (the crossbeam-epoch shape): `#[cfg(feature = \"loom\")] pub use dep::thread_local;` / `#[cfg(not(..))] pub use std::thread_local;` (g5w): default pure, `--features loom` the dependency's binds, so a hold is due.",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "e28_q"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e28"
+  }
+ ]
+}

@@ -26,6 +26,11 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   missed (`use crate::prelude::*;` over a root prelude module, a glob a local macro emits). Explicit `use dep::thread_local;` is read
   per module. A crate whose root holds a non-toolchain `#[macro_use] extern crate dep;` keeps R1899's reading (the dependency's macro
   outranks std's there, so the old hold was right by accident). Acceptance: `soundness/macropath` group E (cells e1..e19, e18/e19 new).
+  Design revision 2 (Fable's merge review): an explicit `use` rooted at `crate`/`self`/`super` is classified by where it LANDS through
+  the module tree (a dependency glob or name re-export, an unplaced module, unreadable text or a cfg twin that is not the toolchain's
+  holds; a std re-export or a local `macro_rules!` does not), which closes the introduced 1 -> 0 the dropped glob mask exposed
+  (cells e20 e21 e22) and the same-mechanism silences already on main (cross-file `pub use dep::*`, `use super::prelude::...`, a
+  cfg-twin re-export: e23 e24 e25 e28); and `macro_use` is read through `cfg_attr` in the root-guard (e29).
   `CANDOR_R_BARE_TC_OFF=1` restores R1899's reading. Cache rev 227.
 
 - ⚠ **Lane rust-macropath-l2: R-ROOT — a macro path whose module is the crate ROOT binds the crate's one root macro of that name

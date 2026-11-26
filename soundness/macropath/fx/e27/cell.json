@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe27",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe27"
+ ],
+ "id": "e27",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: CONTROL: same-file `mod prelude { pub use std::thread_local; } use self::prelude::thread_local;`: pure, no hold (g5t).",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "e27_q"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e27"
+  }
+ ]
+}

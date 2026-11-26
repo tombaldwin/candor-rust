@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe30",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe30"
+ ],
+ "id": "e30",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: K1 x root `#[cfg(unix)] #[macro_use] extern crate dep;` + local glob (g2b, kept).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e30_e"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e30"
+  }
+ ]
+}

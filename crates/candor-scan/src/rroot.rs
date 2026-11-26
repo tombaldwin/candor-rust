@@ -114,6 +114,11 @@ pub(crate) struct ModScope {
     /// R-BARE-TC — the names of the enums, structs, unions, traits and type aliases this list declares (`use Kind::*;` is a
     /// glob of an ENUM, which supplies no macro)
     pub types: Vec<String>,
+    /// R-BARE-TC design revision 2 — every explicit `use` LEAF of this list, as written: (bound name, path segments before the leaf
+    /// INCLUDING a `crate`/`self`/`super`/dependency head, the leaf, leading `::`). `uses` above has the head stripped.
+    pub full_uses: Vec<(String, Vec<String>, String, bool)>,
+    /// R-BARE-TC design revision 2 — the `macro_rules!` names this list defines
+    pub rules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -259,13 +264,20 @@ pub(crate) fn summarize(items: &[syn::Item], file_attrs: &[syn::Attribute], spli
     });
     s.root_macro_use_dep = items.iter().any(|it| {
         matches!(it, syn::Item::ExternCrate(e) if !matches!(e.ident.to_string().as_str(), "std" | "core" | "alloc")
-            && e.attrs.iter().any(|a| a.path().is_ident("macro_use")))
+            && attrs_mention_macro_use(&e.attrs))
     });
     s.no_implicit_prelude = file_attrs.iter().any(|a| a.path().is_ident("no_implicit_prelude")) || has_no_implicit_prelude(items);
     let mut clean: HashMap<String, bool> = HashMap::new();
     clean_rules(items, &mut clean);
     mods(items, Vec::new(), false, &clean, &mut s.mods);
     s
+}
+
+/// R-BARE-TC design revision 2 — does an attribute list name `macro_use` anywhere in its tokens (`#[macro_use]`,
+/// `#[cfg_attr(feature = "m", macro_use)]`, nested `cfg_attr`)? The same instrument `root_no_std` uses for `no_std`; a false
+/// positive (a doc string) only keeps R1899's reading.
+pub(crate) fn attrs_mention_macro_use(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| quote::ToTokens::to_token_stream(a).to_string().contains("macro_use"))
 }
 
 /// R-BARE-TC — `#[no_implicit_prelude]` on any module below `items`.
@@ -380,6 +392,7 @@ fn mods(items: &[syn::Item], inline: Vec<String>, gated_above: bool, clean: &Has
             }
             syn::Item::Macro(mm) if mm.mac.path.is_ident("macro_rules") => {
                 if let Some(id) = &mm.ident {
+                    m.rules.push(id.to_string());
                     defs.push((ix, id.to_string(), mm.mac.tokens.to_string(), gated(&mm.attrs)));
                 }
             }
@@ -465,12 +478,18 @@ fn tc_use(t: &syn::UseTree, pre: &mut Vec<String>, abs: bool, m: &mut ModScope) 
         syn::UseTree::Glob(_) => m.globs.push((pre.clone(), abs)),
         syn::UseTree::Name(n) => {
             let l = n.ident.to_string();
+            if l != "self" {
+                m.full_uses.push((l.clone(), pre.clone(), l.clone(), abs));
+            }
             if l != "self" && crate::mbe::TOOLCHAIN_BANG_MACROS.contains(&l.as_str()) && non_toolchain(pre, &l) {
                 m.tc_names = true;
             }
         }
         syn::UseTree::Rename(r) => {
             let l = r.ident.to_string();
+            if l != "self" {
+                m.full_uses.push((r.rename.to_string(), pre.clone(), l.clone(), abs));
+            }
             if l != "self" && crate::mbe::TOOLCHAIN_BANG_MACROS.contains(&r.rename.to_string().as_str()) && non_toolchain(pre, &l) {
                 m.tc_names = true;
             }

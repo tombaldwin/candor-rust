@@ -1,0 +1,9 @@
+[package]
+name = "cf_e23"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdepe23 = { path = "fxdepe23" }
+
+[workspace]

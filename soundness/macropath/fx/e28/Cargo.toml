@@ -1,0 +1,12 @@
+[package]
+name = "cf_e28"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdepe28 = { path = "fxdepe28" }
+
+[features]
+loom = []
+
+[workspace]

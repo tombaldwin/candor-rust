@@ -99,3 +99,28 @@ fn cells_this_lane_does_not_move() {
         assert_eq!(on, off, "{cell}: the switch moved a cell L3 does not touch");
     }
 }
+
+// Design revision 2 (Fable's merge review): an explicit `use` is classified by where it LANDS, and `macro_use` is read through
+// `cfg_attr`. E20..E31 are the executed cells (g5 g5c g5k g5x g5n g7 g5s g5t g5w g2 g2b g1).
+#[test]
+fn an_explicit_use_that_lands_on_a_dependency_re_export_holds() {
+    // e20/e21/e22 (same-file prelude, three spellings, a no_std lib) and e29 (cfg_attr macro_use) hold on main too: they must not be lost.
+    for cell in ["e20", "e21", "e22", "e29", "e30", "e31"] {
+        assert!(held(cell, &[("CANDOR_R_BARE_TC_OFF", "1")]), "{cell}: main's reading did not hold, the cell proves nothing");
+        assert!(held(cell, &[]), "{cell}: a hold main had was lost (an introduced 1 -> 0)");
+    }
+    // e23/e24/e25/e28 are silent on main (cross-file / `super::` / cfg twin) and now hold; the switch restores main's silence.
+    for cell in ["e23", "e24", "e25", "e28"] {
+        assert!(held(cell, &[]), "{cell}: the dependency's macro may bind; no hold is a silence");
+        assert!(!held(cell, &[("CANDOR_R_BARE_TC_OFF", "1")]), "{cell}: main did not hold");
+    }
+}
+
+#[test]
+fn an_explicit_use_that_lands_on_the_toolchain_does_not_hold() {
+    // e26: prelude.rs re-exports std's; e27: the same inside the file. std's binds, so a hold would carry a false reason.
+    for cell in ["e26", "e27"] {
+        assert!(!held(cell, &[]), "{cell}: a false-reason hold");
+        assert_eq!(scan(cell, &[]), scan(cell, &[("CANDOR_R_BARE_TC_OFF", "1")]), "{cell}: the switch moved a control");
+    }
+}

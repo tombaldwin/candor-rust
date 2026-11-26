@@ -473,6 +473,37 @@ ecell('e18', 'K1 x G5 + a LOCAL glob in the invoking module: the root macro_use 
 ecell('e19', 'K1 x explicit `use dep::thread_local;` inside an inline `mod x {}` of the invoking FILE (imports do not leak out of x): std\'s binds, pure.', kind='bin',
       inner='mod x { use fxdep@ID@::thread_local; }\n', pgo='std')
 
+# Lane rust-macropath-l3, design revision 2 (Fable's merge review): arm 2 classifies an explicit `use` by where it LANDS, and the e18 guard
+# reads `macro_use` through `cfg_attr`. Fixtures are Fable's g5*/g2*/g1/g7 (executed), E20..E31; the controls (e26, e27) and the cfg twin (e28)
+# were written and recorded BEFORE the change.
+PRE_DEP = 'mod prelude { pub use fxdep@ID@::*; }\n'
+LOCGLOB = 'mod helpers { pub fn h_@ID@() {} }\nuse helpers::*;\n'
+ecell('e20', 'K1 x explicit `use self::prelude::thread_local;` landing on a dependency glob re-export in the same file (g5).', kind='bin',
+      inner=PRE_DEP + 'use self::prelude::thread_local;\n')
+ecell('e21', 'K1 x `use crate::inner::prelude::thread_local;` landing on the same (g5c).', kind='bin',
+      inner=PRE_DEP + 'use crate::inner::prelude::thread_local;\n')
+ecell('e22', 'K2 (#![no_std]) x the g5 spelling (g5k).', kind='lib', root='#![no_std]', inner=PRE_DEP + 'use self::prelude::thread_local;\n')
+ecell('e23', 'K1 x CROSS-FILE: prelude.rs `pub use dep::*;`, inner `use crate::prelude::thread_local;` (g5x; the crossbeam-epoch shape).', kind='bin',
+      inner='use crate::prelude::thread_local;\n', mods='mod prelude;\nmod inner;', files={'prelude.rs': 'pub use fxdep@ID@::*;\n'})
+ecell('e24', 'K1 x CROSS-FILE re-export BY NAME `pub use dep::thread_local;` (g5n).', kind='bin',
+      inner='use crate::prelude::thread_local;\n', mods='mod prelude;\nmod inner;', files={'prelude.rs': 'pub use fxdep@ID@::thread_local;\n'})
+ecell('e25', 'K1 x `use super::prelude::thread_local;`, prelude an inline module of the root (g7).', kind='bin', root='mod prelude { pub use fxdep@ID@::*; }',
+      inner='use super::prelude::thread_local;\n')
+ecell('e26', 'CONTROL: prelude.rs `pub use std::thread_local;` + `use crate::prelude::thread_local;`: std\'s binds, pure, no hold (g5s).', kind='bin', pgo='std',
+      inner='use crate::prelude::thread_local;\n', mods='mod prelude;\nmod inner;', files={'prelude.rs': 'pub use std::thread_local;\n'})
+ecell('e27', 'CONTROL: same-file `mod prelude { pub use std::thread_local; } use self::prelude::thread_local;`: pure, no hold (g5t).', kind='bin', pgo='std',
+      inner='mod prelude { pub use std::thread_local; }\nuse self::prelude::thread_local;\n')
+ecell('e28', 'cfg TWIN re-export (the crossbeam-epoch shape): `#[cfg(feature = "loom")] pub use dep::thread_local;` / `#[cfg(not(..))] pub use std::thread_local;` (g5w): '
+      'default pure, `--features loom` the dependency\'s binds, so a hold is due.', kind='bin', pgo='std', inner='use crate::prelude::thread_local;\n',
+      mods='mod prelude;\nmod inner;', features=['loom'],
+      files={'prelude.rs': '#[cfg(feature = "loom")] pub use fxdep@ID@::thread_local;\n#[cfg(not(feature = "loom"))] pub use std::thread_local;\n'})
+ecell('e29', 'K1 x root `#[cfg_attr(unix, macro_use)] extern crate dep;` + a LOCAL glob in the invoking module: the e18 shape with macro_use under cfg_attr (g2).',
+      kind='bin', inner=LOCGLOB, root='#[cfg_attr(unix, macro_use)] extern crate fxdep@ID@;')
+ecell('e30', 'K1 x root `#[cfg(unix)] #[macro_use] extern crate dep;` + local glob (g2b, kept).', kind='bin', inner=LOCGLOB,
+      root='#[cfg(unix)] #[macro_use] extern crate fxdep@ID@;')
+ecell('e31', 'K1 x root `#[macro_use] extern crate dep as d;` + local glob (g1, kept).', kind='bin', inner=LOCGLOB,
+      root='#[macro_use] extern crate fxdep@ID@ as d;')
+
 # ---------------------------------------------------------------------------------------------------- N: L2's second fixtures
 # Lane rust-macropath-l2 (R-ROOT), written BEFORE the binding: the NON-export and non-root shapes R-ROOT must REFUSE, each with a
 # reversed twin cell whose executed truth is the opposite, so a rule that binds what rustc does not (lane residue-C's D1/E1) fails
