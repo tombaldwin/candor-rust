@@ -7618,6 +7618,13 @@ pub(crate) fn cfg_arm_key(name: &str) -> String {
 }
 
 /// SOUNDNESS R1682 — the kill switch for every cross-scope route of a `#[cfg]`-duplicated binding's arm set.
+/// SOUNDNESS R1919 — the falsification switch for the visible cfg-arm resolutions (a crate-root alias arm, a gated
+/// override's inherited default, module-gated `macro_rules!` twins, same-leaf default claimants). Never a user setting.
+pub(crate) fn r1919_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1919_OFF"))
+}
+
 pub(crate) fn r1682_off() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| candor_report::env::switch("CANDOR_R1682_OFF"))

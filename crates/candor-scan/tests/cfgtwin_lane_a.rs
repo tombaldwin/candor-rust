@@ -100,7 +100,9 @@ fn every_closed_cell_reads_unknown_over_its_write() {
     let mut bad = Vec::new();
     for (cell, probe) in cells {
         let r = reading(cell);
-        if !unknown(&r, probe) {
+        // R1919 (lane rust-r1919): R-ROOT now expands the `crate::w*!` hidden text inside a cfg arm, so a cell whose arm was
+        // hedged may now read the write itself (a resolution: the effect, with or without the hedge). Silent is the failure.
+        if !unknown(&r, probe) && !effect(&r, probe) {
             bad.push(format!("{cell}/{probe}: {:?}", row(&r, probe)));
         }
     }
@@ -141,10 +143,14 @@ fn the_controls_stay_pure() {
 fn the_floor_v043_held_is_kept() {
     // S2: R1857's stand-in covers a PRODUCED inline arm beside an out-of-line sibling whole; it is kept where v0.43.0 applies
     // it (D3/D5/D5p `_q`, and D5·V5, the seeded C3 for its queued removal).
-    for (cell, probe) in [("d3v2", "d3v2_q"), ("d5v5", "d5v5_q"), ("d5v5", "d5v5_e"), ("d5pv2", "d5pv2_q"), ("d1v1", "d1v1_e"), ("d12pv1", "d12pv1_e")] {
+    // R1919 (lane rust-r1919): `d5v5_q` and the two `_e` probes whose hidden text was `crate::w*!` are expanded by R-ROOT now:
+    // the `_e`s read their write (a resolution), and `d5v5_q`, executed pure, resolves to its pure arms (removal partition C1).
+    for (cell, probe) in [("d3v2", "d3v2_q"), ("d5v5", "d5v5_e"), ("d5pv2", "d5pv2_q"), ("d1v1", "d1v1_e"), ("d12pv1", "d12pv1_e")] {
         let r = reading(cell);
-        assert!(unknown(&r, probe), "{cell}/{probe} lost the v0.43.0 hedge: {:?}", row(&r, probe));
+        assert!(unknown(&r, probe) || (probe.ends_with("_e") && effect(&r, probe)), "{cell}/{probe} lost the v0.43.0 hedge: {:?}", row(&r, probe));
     }
+    let r = reading("d5v5");
+    assert!(!effect(&r, "d5v5_q"), "d5v5_q is executed pure: {:?}", row(&r, "d5v5_q"));
 }
 
 #[test]
@@ -208,8 +214,8 @@ fn a_hand_written_macro_arm_keeps_expanding_beside_the_disclosure() {
     std::fs::write(
         d.join("crate/src/lib.rs"),
         format!(
-            "#[macro_export] macro_rules! wmdef {{ ($n:ident) => {{ macro_rules! $n {{ () => {{ {w} }} }} }} }}\n\
-             #[cfg(unix)] crate::wmdef! {{ kh }}\n\
+            "mod mm {{ macro_rules! wmdef_ {{ ($n:ident) => {{ macro_rules! $n {{ () => {{ {w} }} }} }} }} pub(crate) use wmdef_ as wmdef; }}\n\
+             #[cfg(unix)] crate::mm::wmdef! {{ kh }}\n\
              #[cfg(not(unix))] macro_rules! kh {{ () => {{ {w} }} }}\n\
              pub fn via_kh() {{ kh!() }}\n"
         ),

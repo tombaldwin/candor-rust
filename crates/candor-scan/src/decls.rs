@@ -6510,7 +6510,11 @@ pub(crate) fn collect_decls(
                     // The `cfg\u{1f}` entries are this file's own bookkeeping (which names it has seen
                     // gated); `file_decls` strips them, so `FileDecls::macro_twins` carries names only.
                     let gate_key = format!("cfg\u{1f}{name}");
-                    let gated = crate::lang::has_cfg(&m.attrs);
+                    // SOUNDNESS R1919 — …and a definition inside a `#[cfg]`-gated inline module is gated through it, exactly as an impl
+                    // there is an arm (R1897, `GatedModScope`): `#[cfg(unix)] mod a { macro_rules! k { W } }` beside `#[cfg(not(unix))]
+                    // mod a { macro_rules! k {} }` with `#[macro_use]` and a bare `k!()` read the LAST arm alone, ABSENT over an executed
+                    // write (cfgtwin `d1v7`, hand-written or produced). The pair now discloses as R208's own-attribute pair does.
+                    let gated = crate::lang::has_cfg(&m.attrs) || (GatedModScope::active() && !crate::lang::r1919_off());
                     // I1 stage 3 (R1784) — a produced arm whose twin may be in hidden text (`mbe::cover_arm`) is a twin already.
                     if m.attrs.iter().any(|a| a.path().is_ident(crate::model::MBE_TWIN_DEF_ATTR)) {
                         macro_twins.insert(name.clone());
@@ -7806,6 +7810,8 @@ pub(crate) fn collect_decls(
                     // SOUNDNESS R977 — the same scope `scan_items` opens, so Pass A's decl indexes read an
                     // inline module the default build does not have with the same `use` arms Pass B does.
                     let _cfg_off = crate::lang::CfgOffScope::enter_if(&m.attrs);
+                    // SOUNDNESS R1919 — a `macro_rules!` inside a gated inline module is a cfg arm (see the R208 arm above).
+                    let _gm = GatedModScope::enter_if(crate::mbe::is_gated(&m.attrs) && !crate::lang::r1919_off());
                     // Same shadowing rule as `scan_items` — the DECL indexes (field types, return types)
                     // are built through this map too, so leaving it un-shadowed would type a submodule's
                     // own `Command` FIELD as std's even after Pass B stopped doing it for parameters.

@@ -1,0 +1,37 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r3",
+ "lib": false,
+ "note": "R1919 r3: macro_rules! twins gated through their module; p = a definition a bare wmdef! emits (d1v7)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "r3_inline_e"
+  },
+  {
+   "kind": "e",
+   "name": "r3_rev_e"
+  },
+  {
+   "kind": "e",
+   "name": "r3_nested_e"
+  },
+  {
+   "kind": "e",
+   "name": "r3_p_e"
+  },
+  {
+   "kind": "e",
+   "name": "r3_child_e"
+  },
+  {
+   "kind": "e",
+   "name": "r3_export_e"
+  },
+  {
+   "kind": "q",
+   "name": "r3_same_q"
+  }
+ ]
+}

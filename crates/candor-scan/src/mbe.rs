@@ -1477,23 +1477,36 @@ impl Ctx<'_> {
                 // marked without removing a binding (`cover_any(.., hand)`), so it only adds `Unknown`.
                 let hand = depth == 0 && !spliced.get(b).copied().unwrap_or(false);
                 let mut h = Hidden::default();
+                // SOUNDNESS R1919 — whether anything beyond an out-of-line stand-in covers this arm: a sibling's real reading
+                // (inline, or the file's own through `xclaim`).
+                let mut real = false;
                 for (ai, r) in readings.iter().enumerate() {
                     if ai == bi || (hand && standin[ai]) {
                         continue;
                     }
                     if let Some(r) = r {
+                        real |= !standin[ai];
                         h.absorb(r.clone());
                     }
                 }
                 let own_target = matches!(&out[b], syn::Item::Mod(m) if m.content.is_none());
                 if !own_target {
                     if let Some(x) = xclaim {
+                        real = true;
                         h.absorb(x.clone());
                     }
                 }
                 if h.is_empty() {
                     continue;
                 }
+                // SOUNDNESS R1919 — A PRODUCED ARM COVERED ONLY BY AN OUT-OF-LINE STAND-IN KEEPS ITS BINDINGS. The stand-in
+                // says "that file may define anything"; the claim table (`xclaim`) says what it really holds, and it holds no
+                // unexpanded text here. Putting this arm's `use`/`type` back as hidden text then DELETES the binding: once the
+                // arm's own text is expanded (a bare local macro, or R-ROOT's `crate::wuse!` now that its cfg-arm refusal is
+                // lifted), the call resolved through the out-of-line arm's binding ALONE, ABSENT over an executed write (cfgtwin
+                // `d3v5`, `d5pv5`). Every unit is still marked from the stand-in (the v0.43.0 floor); only the binding stays, as
+                // on a hand-written arm (`cover_any(.., hand)`).
+                let hand = hand || (!real && !crate::lang::r1919_off());
                 if let syn::Item::Mod(m) = &mut out[b] {
                     if candor_report::env::trace("CANDOR_I1_INSTR") {
                         let tag = if hand { "R1862HAND" } else { "R1857MODTWIN" };
@@ -1594,8 +1607,12 @@ impl Ctx<'_> {
         // PRODUCED cfg arm, whose union with the sibling arm the cfg-twin cover does not compute for every item kind — the
         // bare spellings `wuse!`/`wov!`/`wt!` read silent there on main (lane residue-C's unnumbered findings 1-3, the
         // cfg-twin design queue), and binding the path would carry that silence to it (soundness/cfgtwin d*v5, d*v7, d12*,
-        // e1/e4/e9/e13/e15 measured 1->0). Refused, the path keeps main's hidden-text hold. Lift this when that cover is.
-        if self.f1_gated > 0 || sc.gated {
+        // e1/e4/e9/e13/e15 measured 1->0). Refused, the path keeps main's hidden-text hold.
+        // SOUNDNESS R1919 — LIFTED. Those silences were not the cover's: the same arms written by hand read silent too, and the
+        // resolvers that read two VISIBLE arms now union them (root-fn alias arms, a gated override's inherited default,
+        // module-gated `macro_rules!` twins, same-leaf defaults, a produced arm's bindings beside an out-of-line stand-in).
+        // soundness/cfgtwin reads 0 WRITES lower and 0 pure charged with the path expanded. `CANDOR_R1919_OFF=1` refuses again.
+        if (self.f1_gated > 0 || sc.gated) && crate::lang::r1919_off() {
             if candor_report::env::trace("CANDOR_I1_INSTR") {
                 eprintln!("RROOTCFGREFUSE\t{}", crate::lang::path_to_string(&mac.path)); // §E1 REACH COUNTER
             }
@@ -1723,7 +1740,7 @@ impl Ctx<'_> {
         self.budget -= 1;
         self.splice(&mut file.items, depth + 1);
         // R-ROOT — and one whose NESTED expansions wrote one (a bare local macro inside it): refused the same way.
-        if mac.path.get_ident().is_none() && mentions_cfg(&file.items) {
+        if mac.path.get_ident().is_none() && crate::lang::r1919_off() && mentions_cfg(&file.items) {
             return None;
         }
         if ambig {
@@ -1760,7 +1777,7 @@ impl Ctx<'_> {
         }
         self.budget -= 1;
         self.splice_impl_items(&mut gen, depth + 1);
-        if mac.path.get_ident().is_none() && mentions_cfg(&gen) {
+        if mac.path.get_ident().is_none() && crate::lang::r1919_off() && mentions_cfg(&gen) {
             return None; // R-ROOT, as at item position
         }
         if ambig {
@@ -1852,7 +1869,7 @@ impl Ctx<'_> {
         }
         self.budget -= 1;
         self.splice_trait_items(&mut gen, depth + 1);
-        if mac.path.get_ident().is_none() && mentions_cfg(&gen) {
+        if mac.path.get_ident().is_none() && crate::lang::r1919_off() && mentions_cfg(&gen) {
             return None; // R-ROOT, as at item position
         }
         if ambig {

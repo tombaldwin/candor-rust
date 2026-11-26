@@ -4262,9 +4262,23 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 continue;
             }
             let aq = crate::decls::qualify(&r.module, &r.alias);
-            if real.contains_key(aq.as_str()) || !seen.insert(aq.clone()) {
+            // SOUNDNESS R1919 — a SECOND re-export of the name at the same module path is a `#[cfg]` twin module's arm
+            // (`#[cfg(unix)] mod tw { pub use crate::eff as g; }` beside `#[cfg(not(unix))] mod tw { pub use crate::pur as g; }`):
+            // its targets are added to the unit the first arm made, instead of the first arm standing for both. Taken
+            // alone, the first-written arm decided every caller that reached the unit (`use tw::g; g()`, a root `pub use
+            // tw::g;` then `g()`): ABSENT over an executed write when it was the pure arm.
+            let twin_of = if real.contains_key(aq.as_str()) {
                 continue;
-            }
+            } else if seen.insert(aq.clone()) {
+                None
+            } else if crate::lang::r1919_off() {
+                continue;
+            } else {
+                match add.iter().position(|u| u.qual == aq) {
+                    Some(i) => Some(i),
+                    None => continue,
+                }
+            };
             let mut targets: Vec<&FnInfo> =
                 r.from.iter().filter_map(|m| real.get(crate::decls::qualify(m, &r.name).as_str()).copied()).collect();
             // SOUNDNESS R1642 (R1657 stage 2) — a rename of a RE-EXPORT (`pub use io::w as root_w;` where `io::w` is
@@ -4282,6 +4296,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
             }
             let Some(first) = targets.first() else { continue };
+            if let Some(i) = twin_of {
+                for t in &targets {
+                    let p = format!("crate::{}", t.qual);
+                    if add[i].calls.iter().any(|c| c.path == p) {
+                        continue;
+                    }
+                    if let Ok(c) = serde_json::from_value::<crate::model::Call>(serde_json::json!({ "p": p, "l": t.leaf })) {
+                        if candor_report::env::trace("CANDOR_R1919_INSTR") {
+                            eprintln!("R1919ALIASUNIT\t{aq}\t{}", t.qual); // §E1 REACH COUNTER
+                        }
+                        add[i].calls.push(c);
+                    }
+                }
+                continue;
+            }
             let mut u = (*first).clone();
             u.qual = aq;
             u.leaf = r.alias.clone();
@@ -4662,6 +4691,38 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             eprintln!("CFGTWINQ3D\t{d}"); // §E1 REACH COUNTER (non-shipping, Fable G7, default leg)
         }
     }
+    // SOUNDNESS R1919 — A GATED OVERRIDE WHOSE TWIN ARM INHERITS THE DEFAULT. `#[cfg(not(unix))] impl Tr for S { fn m(&self) {} }`
+    // beside `#[cfg(unix)] impl Tr for S {}`: on unix `<S as Tr>::m` IS the trait's default body. The override is a unit (`S::m`)
+    // and a method call on `S` binds it and stops, so the default's effect was ABSENT from every caller over an executed write
+    // (cfgtwin `e15`/`e1` in their bare spelling, and the hand-written pair with no macro at all). The unit is one arm's body;
+    // its cfg union is that body AND the default, so the unit is edged to the default, exactly as two gated overrides of one
+    // member merge into one unit's union. The arm set is `mbe::twin_facts`'s record of every gated impl block (own `#[cfg]` or a
+    // gated inline module), keyed `S as Tr` by last segment: a block of `S as Tr` that does not write `m` is the inheriting arm.
+    // One local default unit is edged; two or more (two traits of one leaf, or cfg twins of the trait) are DISCLOSED, never
+    // picked between.
+    let r1919_gated: HashMap<String, Vec<HashSet<String>>> = if crate::lang::r1919_off() {
+        HashMap::new()
+    } else {
+        let mut m: HashMap<String, Vec<HashSet<String>>> = HashMap::new();
+        for g in &merged.i1_gated_impls {
+            let Some((ik, ms)) = g.split_once('|') else { continue };
+            m.entry(ik.to_string()).or_default().push(ms.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect());
+        }
+        m
+    };
+    let r1919_kind: HashMap<&str, u8> = if crate::lang::r1919_off() {
+        HashMap::new()
+    } else {
+        fns.iter().map(|f| (f.qual.as_str(), f.impl_kind)).collect()
+    };
+    // how many gated trait-impl member units share each qual (two = two arms of one member, neither inheriting)
+    let r1919_same: HashMap<&str, usize> = {
+        let mut m: HashMap<&str, usize> = HashMap::new();
+        for f in fns.iter().filter(|f| f.impl_kind == 2 && f.i1_cand.is_some()) {
+            *m.entry(f.qual.as_str()).or_default() += 1;
+        }
+        m
+    };
     for f in &fns {
         if i1c_on && !f.refusals.iter().any(|w| w == crate::model::MBE_TWIN_WHY) {
             let hit = f.i1_cand.as_deref().is_some_and(|c| {
@@ -4696,6 +4757,45 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
+        if let Some((tr, rest)) = f.i1_cand.as_deref().filter(|_| f.impl_kind == 2 && !r1919_kind.is_empty()).and_then(|c| c.split_once('|')) {
+            let (s_ty, m) = rest.split_once('|').unwrap_or((rest, ""));
+            // Two ways a configuration inherits: (1) a recorded gated block of `S as Tr` does not write `m`; (2) no recorded
+            // gated block writes `m` at all, so this unit's own gate is on the MEMBER (`impl Tr for S { #[cfg(x)] fn m() {} }`),
+            // and unless a second gated member of the name sits beside it (one unit per arm, same qual) the other
+            // configuration has no `m` in the block and runs the default.
+            let arms = r1919_gated.get(&format!("{s_ty} as {tr}"));
+            let block_arm = arms.is_some_and(|a| a.iter().any(|ms| !ms.contains(m)));
+            let member_arm = !arms.is_some_and(|a| a.iter().any(|ms| ms.contains(m)))
+                && r1919_same.get(f.qual.as_str()).copied().unwrap_or(0) == 1;
+            let inherits = !tr.is_empty()
+                && !m.is_empty()
+                && (block_arm || member_arm)
+                && trait_decls.get(tr).is_some_and(|lt| lt.methods.contains(m));
+            if inherits {
+                let dflts: Vec<&String> = by_tail2
+                    .get(&format!("{tr}::{m}"))
+                    .into_iter()
+                    .flatten()
+                    .filter(|q| **q != f.qual && r1919_kind.get(q.as_str()) == Some(&0))
+                    .collect();
+                if candor_report::env::trace("CANDOR_R1919_INSTR") {
+                    eprintln!("R1919OVERRIDE\t{}\t{}", f.qual, dflts.iter().map(|d| d.as_str()).collect::<Vec<_>>().join("|")); // §E1 REACH COUNTER
+                }
+                match dflts.as_slice() {
+                    [] => {}
+                    [d] => {
+                        calls.entry(f.qual.clone()).or_default().insert((*d).clone());
+                    }
+                    _ => {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert(format!("ambiguous:cfg arm inherits {tr}::{m}, a default {} traits of that name declare", dflts.len()));
+                    }
+                }
+            }
+        }
         // The body invoked a callable the scan can't see through (closure / fn-pointer value): it could
         // perform any effect, so record an honest `Unknown` (propagated like any effect, surfaced in the
         // receipt's unresolved count) instead of silently certifying the function pure.
@@ -5352,6 +5452,28 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     eprintln!("R440ARM");
                                 }
                                 Some(vec![t.clone()])
+                            })
+                            // SOUNDNESS R1919 — an arm naming a crate-ROOT free fn (`crate::eff`, or R1682's crate-relative
+                            // `eff`), the arm-set twin of R1154 below. Its one-segment remainder has no tail2 key and is not
+                            // the call's leaf (the call's leaf is the ALIAS, `g`), so none of the routes above placed it and
+                            // the branch `continue`d with no edge: `#[cfg(unix)] mod m { pub use crate::eff as g; }` beside
+                            // `#[cfg(not(unix))] mod m { pub use crate::pur as g; }` then `m::g()` read ABSENT over an
+                            // executed write, hand-written or produced by a macro (cfgtwin `d1v5`, and every `*v5` cell R-ROOT
+                            // expands). The lookup is the EXACT root qual, as R1154's: never a leaf guess. An `extern` root
+                            // declaration is left to the `native:extern fn` disclosure, as there.
+                            .or_else(|| {
+                                if c.method || crate::lang::r1919_off() {
+                                    return None;
+                                }
+                                let r = alt.strip_prefix("crate::").unwrap_or(alt);
+                                if r.is_empty() || r.contains("::") || merged.extern_fns.contains(r) {
+                                    return None;
+                                }
+                                let hit = by_root.get(r).cloned();
+                                if hit.is_some() && candor_report::env::trace("CANDOR_R1919_INSTR") {
+                                    eprintln!("R1919ROOTARM\t{}\t{alt}", f.qual); // §E1 REACH COUNTER
+                                }
+                                hit
                             });
                     // SOUNDNESS R1682 — a LOCAL arm none of the three routes placed. R1682 makes a `#[cfg]` arm set reach
                     // other modules, and its arms name the item where the arm's `use` names it — `sys::unix::TcpListener`
@@ -6679,6 +6801,21 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                                     eprintln!("CT3EDGE\t{}\t{}\t{target}\t{}", f.qual, c.path, f.loc); // §E1 REACH COUNTER (+ the caller's loc, for the edge audit)
                                 }
                                 calls.entry(f.qual.clone()).or_default().insert(target.clone());
+                            }
+                            // SOUNDNESS R1919 — TWO OR MORE DEFAULT BODIES ANSWER, AND THE SKIP ABOVE WAS SILENT. A trait's
+                            // `#[cfg]` twins (`#[cfg(unix)] mod m { .. trait T { fn go(&self) { W } } }` beside a pure arm whose `T`
+                            // sits one module up and is glob-re-exported, or two `#[path]` arms of one `mod`) put two `T::go`
+                            // defaults in the crate, so `Q.go()` on `impl m::..::T for Q {}` matched both, the route took neither
+                            // and recorded nothing: ABSENT over an executed write (cfgtwin `d12v2`/`d12pv2`, `d6v2` hand-written).
+                            // Picking one is the guess this route refuses, and two traits that merely share a leaf make a union a
+                            // fabrication, so the claimants go to VEIN A's contest, judged after the fixpoint: the call is
+                            // DISCLOSED (`ambiguous:same-name local defs`) where a claimant carries an effect the caller lacks,
+                            // and costs nothing where every claimant is pure (cfgtwin `g5` state A, two pure `#[path]` arms).
+                            if hits.len() >= 2 && !hits.contains(&&f.qual) && !crate::lang::r1919_off() {
+                                veina_contested.push((f.qual.clone(), hits.iter().map(|h| (*h).clone()).collect()));
+                                if candor_report::env::trace("CANDOR_R1919_INSTR") {
+                                    eprintln!("R1919DFLTS\t{}\t{}", f.qual, hits.iter().map(|h| h.as_str()).collect::<Vec<_>>().join("|")); // §E1 REACH COUNTER
+                                }
                             }
                             // SOUNDNESS R1245 (the REFUSED half) — T's impl of a trait that declares `leaf` holds a
                             // macro item `mbe` could not expand (another crate's macro, an unreadable matcher), so

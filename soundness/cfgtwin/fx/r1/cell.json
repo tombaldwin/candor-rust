@@ -1,0 +1,65 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r1",
+ "lib": false,
+ "note": "R1919 r1: alias arms naming a crate-ROOT fn, hand-written (tw/tr/in/t3/rx/sole) and produced by a bare wuse! (pw)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "r1_tw_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_rev_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_in_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_three_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_crate_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_bodyuse_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_bodyrel_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_moduse_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_fnptr_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_reexp_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_reexp2_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_sole_e"
+  },
+  {
+   "kind": "e",
+   "name": "r1_p_e"
+  },
+  {
+   "kind": "q",
+   "name": "r1_p_q"
+  }
+ ]
+}

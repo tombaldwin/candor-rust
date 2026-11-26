@@ -1,0 +1,15 @@
+r2_meth_e
+r2_path_e
+r2_trpath_e
+r2_ufcs_e
+r2_dyn_e
+r2_gen_e
+r2_ref_e
+r2_rev_e
+r2_gmod_e
+r2_member_e
+r2_gentr_e
+r2_p_e
+r2_pure_q
+r2_bothov_q
+r2_bothmem_q

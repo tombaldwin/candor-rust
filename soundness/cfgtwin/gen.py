@@ -676,6 +676,167 @@ cell('n3d', {'main.rs': sub(_N3.replace('{G}', 'fxdep_{id}'), id='n3d')},
 pred('n3d', 'n3d_e', 'E', 'E+U', 'record'); pred('n3d', 'n3d_tl', 'E', 'E', 'E')
 
 
+# ----------------------------------------------------------------------------------------------- R. R1919: the VISIBLE arms
+# SOUNDNESS R1919 (lane rust-r1919). The row read the produced-arm spellings (a bare `wuse!` / `wov!{}` / `wt!` arm) as a cover gap.
+# Measured: the SAME silences read on HAND-WRITTEN arms with no macro at all, so they are not the hidden-text cover's: once an arm is
+# expanded (or written by hand) both arms are visible and the defect is in the resolver that reads two visible arms. Four resolvers:
+#   r1  an alias arm naming a crate-ROOT fn (`pub use crate::eff as g` in each arm): R105's arm loop and the re-export index never placed it;
+#   r2  a gated override beside an impl that INHERITS the default: a method call bound the override unit alone;
+#   r3  `macro_rules!` twins gated through their enclosing MODULE: R208 read only the definition's own `#[cfg]`;
+#   r4  two default bodies of one trait leaf (nested / `#[path]` twins of the trait): the default route skipped silently.
+# Each cell: hand-written arms (`h`), the row's produced spelling (`p`, a BARE local macro, which the engine expands), pure controls.
+_R1 = '''pub fn eff_{id}() { EFF } pub fn pur_{id}() {}
+#[cfg(unix)] pub mod tw_{id} { pub use crate::eff_{id} as g; }
+#[cfg(not(unix))] pub mod tw_{id} { pub use crate::pur_{id} as g; }
+#[cfg(not(unix))] pub mod tr_{id} { pub use crate::pur_{id} as g; }
+#[cfg(unix)] pub mod tr_{id} { pub use crate::eff_{id} as g; }
+pub mod in_{id} { #[cfg(unix)] pub use crate::eff_{id} as g; #[cfg(not(unix))] pub use crate::pur_{id} as g; }
+#[cfg(unix)] pub mod t3_{id} { pub use crate::eff_{id} as g; }
+#[cfg(all(not(unix), windows))] pub mod t3_{id} { pub use crate::pur_{id} as g; }
+#[cfg(all(not(unix), not(windows)))] pub mod t3_{id} { pub use crate::pur_{id} as g; }
+#[cfg(unix)] pub mod rx_{id} { pub use crate::eff_{id} as gx_{id}; }
+#[cfg(not(unix))] pub mod rx_{id} { pub use crate::pur_{id} as gx_{id}; }
+pub use rx_{id}::gx_{id};
+pub mod user_{id} { use crate::tw_{id}::g; pub fn run() { g() } }
+pub mod sole_{id} { pub use crate::eff_{id} as g; }
+cfg_x! {
+#[cfg(unix)] pub mod pw_{id} { wuse! { g, crate::eff_{id} } pub use crate::pur_{id} as keep; }
+#[cfg(not(unix))] pub mod pw_{id} { pub use crate::pur_{id} as g; pub use crate::pur_{id} as keep; }
+}
+'''
+cell('r1', {'main.rs': sub(_R1, id='r1')},
+     [('r1_tw_e', 'e', 'tw_r1::g()'), ('r1_rev_e', 'e', 'tr_r1::g()'), ('r1_in_e', 'e', 'in_r1::g()'), ('r1_three_e', 'e', 't3_r1::g()'),
+      ('r1_crate_e', 'e', 'crate::tw_r1::g()'), ('r1_bodyuse_e', 'e', 'use crate::tw_r1::g; g()'), ('r1_bodyrel_e', 'e', 'use tw_r1::g; g()'),
+      ('r1_moduse_e', 'e', 'user_r1::run()'), ('r1_fnptr_e', 'e', 'let f = tw_r1::g; f()'), ('r1_reexp_e', 'e', 'gx_r1()'),
+      ('r1_reexp2_e', 'e', 'crate::gx_r1()'), ('r1_sole_e', 'e', 'use sole_r1::g; g()'), ('r1_p_e', 'e', 'pw_r1::g()'),
+      ('r1_p_q', 'q', 'pw_r1::keep()')],
+     note='R1919 r1: alias arms naming a crate-ROOT fn, hand-written (tw/tr/in/t3/rx/sole) and produced by a bare wuse! (pw)')
+for _p in ('tw', 'rev', 'in', 'three', 'crate', 'bodyuse', 'bodyrel', 'moduse', 'fnptr', 'reexp', 'reexp2', 'sole', 'p'):
+    pred('r1', 'r1_%s_e' % _p, 'record', 'record', 'E')
+pred('r1', 'r1_p_q', 'record', 'record', '-')
+_R2 = '''pub fn eff_{id}() { EFF }
+pub struct S_{id}; pub trait T_{id} { fn t(&self) { eff_{id}() } }
+#[cfg(not(unix))] impl T_{id} for S_{id} { fn t(&self) {} }
+#[cfg(unix)] impl T_{id} for S_{id} {}
+fn gen_{id}<X: T_{id}>(x: &X) { x.t() }
+pub struct S2_{id}; pub trait T2_{id} { fn t2(&self) { eff_{id}() } }
+#[cfg(unix)] impl T2_{id} for S2_{id} {}
+#[cfg(not(unix))] impl T2_{id} for S2_{id} { fn t2(&self) {} }
+pub struct S3_{id}; pub trait T3_{id} { fn t3(&self) { eff_{id}() } }
+#[cfg(not(unix))] mod gm_{id} { impl crate::T3_{id} for crate::S3_{id} { fn t3(&self) {} } }
+#[cfg(unix)] mod gm_{id} { impl crate::T3_{id} for crate::S3_{id} {} }
+pub struct S4_{id}; pub trait T4_{id} { fn t4(&self) { eff_{id}() } }
+impl T4_{id} for S4_{id} { #[cfg(not(unix))] fn t4(&self) {} }
+pub struct S5_{id}; pub trait T5_{id}<A> { fn t5(&self) { eff_{id}() } }
+#[cfg(not(unix))] impl T5_{id}<u8> for S5_{id} { fn t5(&self) {} }
+#[cfg(unix)] impl T5_{id}<u8> for S5_{id} {}
+pub struct S6_{id}; pub trait T6_{id} { fn t6(&self) { eff_{id}() } }
+#[macro_export] macro_rules! wov_{id} { () => { #[cfg(not(unix))] impl T6_{id} for S6_{id} { fn t6(&self) {} } } }
+wov_{id}! {}
+#[cfg(unix)] pub mod vis_{id} { impl crate::T6_{id} for crate::S6_{id} {} }
+#[cfg(not(unix))] pub mod vis_{id} {}
+pub struct Pq_{id}; pub trait Tq_{id} { fn tq(&self) {} }
+#[cfg(not(unix))] impl Tq_{id} for Pq_{id} { fn tq(&self) {} }
+#[cfg(unix)] impl Tq_{id} for Pq_{id} {}
+pub struct Bo_{id}; pub trait Tb_{id} { fn tb(&self) { eff_{id}() } }
+#[cfg(not(unix))] impl Tb_{id} for Bo_{id} { fn tb(&self) {} }
+#[cfg(unix)] impl Tb_{id} for Bo_{id} { fn tb(&self) {} }
+pub struct Bm_{id}; pub trait Tm_{id} { fn tm(&self) { eff_{id}() } }
+impl Tm_{id} for Bm_{id} { #[cfg(unix)] fn tm(&self) {} #[cfg(not(unix))] fn tm(&self) {} }
+'''
+cell('r2', {'main.rs': sub(_R2, id='r2')},
+     [('r2_meth_e', 'e', 'S_r2.t()'), ('r2_path_e', 'e', 'S_r2::t(&S_r2)'), ('r2_trpath_e', 'e', 'T_r2::t(&S_r2)'),
+      ('r2_ufcs_e', 'e', '<S_r2 as T_r2>::t(&S_r2)'), ('r2_dyn_e', 'e', 'let d: &dyn T_r2 = &S_r2; d.t()'), ('r2_gen_e', 'e', 'gen_r2(&S_r2)'),
+      ('r2_ref_e', 'e', 'let r = &S_r2; r.t()'), ('r2_rev_e', 'e', 'S2_r2.t2()'), ('r2_gmod_e', 'e', 'S3_r2.t3()'),
+      ('r2_member_e', 'e', 'S4_r2.t4()'), ('r2_gentr_e', 'e', 'S5_r2.t5()'), ('r2_p_e', 'e', 'S6_r2.t6()'),
+      ('r2_pure_q', 'q', 'Pq_r2.tq()'), ('r2_bothov_q', 'q', 'Bo_r2.tb()'), ('r2_bothmem_q', 'q', 'Bm_r2.tm()')],
+     note='R1919 r2: a gated override beside an impl that inherits the default; p = the bare wov! spelling (e15)')
+for _p in ('meth', 'path', 'trpath', 'ufcs', 'dyn', 'gen', 'ref', 'rev', 'gmod', 'member', 'gentr', 'p'):
+    pred('r2', 'r2_%s_e' % _p, 'record', 'record', 'E')
+for _p in ('pure', 'bothov', 'bothmem'):
+    pred('r2', 'r2_%s_q' % _p, 'record', 'record', '-')
+_W = '{ () => { ::std::fs::write(::std::env::var("MARK").unwrap(), b"x").unwrap() } }'
+_R3 = ('#[cfg(unix)] #[macro_use] mod a1_{id} { macro_rules! k1_{id} W } }\n'
+       '#[cfg(not(unix))] #[macro_use] mod a1_{id} { macro_rules! k1_{id} { () => {} } }\n'
+       '#[cfg(not(unix))] #[macro_use] mod a2_{id} { macro_rules! k2_{id} { () => {} } }\n'
+       '#[cfg(unix)] #[macro_use] mod a2_{id} { macro_rules! k2_{id} W } }\n'
+       '#[cfg(unix)] #[macro_use] mod a3_{id} { #[macro_use] mod n { macro_rules! k3_{id} W } } }\n'
+       '#[cfg(not(unix))] #[macro_use] mod a3_{id} { #[macro_use] mod n { macro_rules! k3_{id} { () => {} } } }\n'
+       '#[cfg(unix)] #[macro_use] mod a4_{id} { wmdef! { k4_{id} } }\n'
+       '#[cfg(not(unix))] #[macro_use] mod a4_{id} { macro_rules! k4_{id} { () => {} } }\n'
+       '#[cfg(unix)] mod a6_{id} { #[macro_export] macro_rules! k6_{id} W } }\n'
+       '#[cfg(not(unix))] mod a6_{id} { #[macro_export] macro_rules! k6_{id} { () => {} } }\n'
+       'pub fn pk7_{id}() {}\n'
+       '#[cfg(unix)] #[macro_use] mod a7_{id} { macro_rules! k7_{id} { () => { crate::pk7_{id}() } } }\n'
+       '#[cfg(not(unix))] #[macro_use] mod a7_{id} { macro_rules! k7_{id} { () => { crate::pk7_{id}() } } }\n'
+       'pub mod user_{id} { pub fn run() { k1_{id}!(); } }\n').replace(' W }', ' ' + _W)
+cell('r3', {'main.rs': sub(_R3, id='r3')},
+     [('r3_inline_e', 'e', 'k1_r3!();'), ('r3_rev_e', 'e', 'k2_r3!();'), ('r3_nested_e', 'e', 'k3_r3!();'), ('r3_p_e', 'e', 'k4_r3!();'),
+      ('r3_child_e', 'e', 'user_r3::run()'), ('r3_export_e', 'e', 'crate::k6_r3!();'), ('r3_same_q', 'q', 'k7_r3!();')],
+     note='R1919 r3: macro_rules! twins gated through their module; p = a definition a bare wmdef! emits (d1v7)')
+for _p in ('inline', 'rev', 'nested', 'p', 'child', 'export'):
+    pred('r3', 'r3_%s_e' % _p, 'record', 'record', 'U|E+U')
+pred('r3', 'r3_same_q', 'record', 'record', '-')
+_R4 = '''pub fn eff_{id}() { EFF }
+pub struct S_{id};
+#[cfg(unix)] pub mod m_{id} { pub mod a { pub mod b { pub trait T { fn go(&self) { crate::eff_{id}() } } } } }
+#[cfg(not(unix))] pub mod m_{id} { pub mod a { pub trait T { fn go(&self) {} } pub mod b { pub use super::*; } } }
+impl m_{id}::a::b::T for S_{id} {}
+fn gen_{id}<X: m_{id}::a::b::T>(x: &X) { x.go() }
+pub struct P_{id};
+#[cfg(unix)] #[path = "live_{id}.rs"] pub mod pm_{id};
+#[cfg(not(unix))] #[path = "pure_{id}.rs"] pub mod pm_{id};
+impl pm_{id}::TP for P_{id} {}
+pub struct W_{id};
+cfg_x! {
+#[cfg(unix)] #[path = "plive_{id}.rs"] pub mod wm_{id};
+#[cfg(not(unix))] #[path = "ppure_{id}.rs"] pub mod wm_{id};
+}
+impl wm_{id}::TW for W_{id} {}
+pub struct R_{id};
+pub mod u1_{id} { pub trait TU { fn gu(&self) {} } }
+pub mod u2_{id} { pub trait TU { fn gu(&self) {} } }
+impl u1_{id}::TU for R_{id} {}
+pub struct R2_{id};
+pub mod v1_{id} { pub trait TV { fn gv(&self) {} } }
+pub mod v2_{id} { pub trait TV { fn gv(&self) { crate::eff_{id}() } } }
+impl v1_{id}::TV for R2_{id} {}
+'''
+cell('r4', {'main.rs': sub(_R4, id='r4')},
+     [('r4_meth_e', 'e', 'use m_r4::a::b::T; S_r4.go()'), ('r4_path_e', 'e', 'use m_r4::a::b::T; S_r4::go(&S_r4)'),
+      ('r4_ufcs_e', 'e', '<S_r4 as m_r4::a::b::T>::go(&S_r4)'), ('r4_gen_e', 'e', 'gen_r4(&S_r4)'),
+      ('r4_pmeth_e', 'e', 'use pm_r4::TP; P_r4.gp()'), ('r4_p_e', 'e', 'use wm_r4::TW; W_r4.gw()'),
+      ('r4_unrel_q', 'q', 'use u1_r4::TU; R_r4.gu()'), ('r4_unrel2_q', 'q', 'use v1_r4::TV; R2_r4.gv()')],
+     extra={'live_r4.rs': 'pub trait TP { fn gp(&self) { crate::eff_r4() } }\n', 'pure_r4.rs': 'pub trait TP { fn gp(&self) {} }\n',
+            'plive_r4.rs': 'pub trait TW { wt! { fn gw(&self); } }\n', 'ppure_r4.rs': 'pub trait TW { fn gw(&self) {} }\n'},
+     note='R1919 r4: two default bodies of one trait leaf (nested twins, #[path] twins; p = a bare wt! arm, d6v2). DISCLOSED, not '
+          'resolved: unrel2_q is the priced over-disclosure (an unrelated same-leaf trait, effectful default)')
+for _p in ('meth', 'path', 'ufcs', 'gen', 'pmeth', 'p'):
+    pred('r4', 'r4_%s_e' % _p, 'record', 'record', 'U|E|E+U')
+pred('r4', 'r4_unrel_q', 'record', 'record', '-'); pred('r4', 'r4_unrel2_q', 'record', 'record', 'U')
+# r5: the inline-produced arm beside an OUT-OF-LINE arm (d3v5's shape, hand-written and produced): the produced arm's `use` is kept
+cell('r5', {'main.rs': sub('''pub fn eff_{id}() { EFF } pub fn pur_{id}() {}
+#[cfg(unix)] pub mod h_{id} { pub use crate::eff_{id} as g; }
+#[cfg(not(unix))] pub mod h_{id};
+cfg_x! {
+#[cfg(unix)] pub mod p_{id} { wuse! { g, crate::eff_{id} } pub use crate::pur_{id} as keep; }
+#[cfg(not(unix))] pub mod p_{id};
+}
+''', id='r5')}, [('r5_h_e', 'e', 'h_r5::g()'), ('r5_p_e', 'e', 'p_r5::g()'), ('r5_p_q', 'q', 'p_r5::keep()')],
+     extra={'h_r5.rs': 'pub use crate::pur_r5 as g;\n', 'p_r5.rs': 'pub use crate::pur_r5 as g; pub use crate::pur_r5 as keep;\n'},
+     note='R1919 r5: an inline arm beside an out-of-line arm; the out-of-line stand-in must not delete the binding of the produced arm')
+pred('r5', 'r5_h_e', 'record', 'record', 'E'); pred('r5', 'r5_p_e', 'record', 'record', 'E'); pred('r5', 'r5_p_q', 'record', 'record', '-')
+# r6: RESIDUAL (recorded, no acceptance): a def/alias twin read through a BODY-local `use` (pre-existing; the module-level and path
+# spellings resolve)
+cell('r6', {'main.rs': sub('''pub mod imp_{id} { pub fn eff() { EFF } }
+#[cfg(unix)] pub mod tw_{id} { pub use crate::imp_{id}::eff as g; }
+#[cfg(not(unix))] pub mod tw_{id} { pub fn g() {} }
+pub mod user_{id} { use crate::tw_{id}::g; pub fn run() { g() } }
+''', id='r6')}, [('r6_body_e', 'e', 'use tw_r6::g; g()'), ('r6_mod_e', 'e', 'user_r6::run()'), ('r6_path_e', 'e', 'tw_r6::g()')],
+     note='R1919 r6: residual — the body-local `use` spelling of a def/alias twin reads one arm (pre-existing)')
+pred('r6', 'r6_body_e', 'record', 'record', 'record'); pred('r6', 'r6_mod_e', 'record', 'record', 'E'); pred('r6', 'r6_path_e', 'record', 'record', 'E')
+
+
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):
     arms = ''.join('        "%s" => %s%s(),\n' % (p, crate_ref, p) for p, _, _ in c['probes'])

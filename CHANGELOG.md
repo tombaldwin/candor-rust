@@ -11,6 +11,25 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Lane rust-r1919: cfg-twin arms read as VISIBLE are unioned, and R-ROOT expands inside a cfg arm (SOUNDNESS R1919).** The row
+  read its spellings (`wuse!` in a cfg module twin, a pure override `wov!{}` emits, `wt!` across `#[path]` twins) as a hidden-text
+  cover gap. Measured: the same silences read on HAND-WRITTEN arms with no macro at all, on 0.43.0 and main, so the defects are in
+  the resolvers that read two visible arms, and production only reaches them. Resolutions: (1) an alias arm naming a crate-ROOT fn
+  (`pub use crate::eff as g` in each arm, or one module's `#[cfg]` uses) is placed by its exact root qual, as R1154 places
+  `crate::f`; a root fn now keys a NAMED re-export in the re-export index (`use m::g; g()`, a root `pub use m::g as gg;`), and a
+  second arm's re-export joins the first arm's alias unit instead of being dropped; (2) a gated override beside an impl block of the
+  same `S as Tr` that does not write the member (or a member gated inside an ungated block) is edged to the trait's default: the
+  inheriting arm runs it. Disclosures: (3) a `macro_rules!` inside a `#[cfg]`-gated inline module is an R208 twin (it was only when
+  the definition carried the `#[cfg]` itself); (4) two or more default bodies of one trait leaf (nested or `#[path]` twins of the
+  trait) go to VEIN A's contest instead of being skipped silently: `Unknown` (`ambiguous:same-name local defs`) where a claimant
+  carries an effect the caller lacks, nothing where all are pure. (5) A produced arm covered ONLY by an out-of-line sibling's
+  stand-in keeps its `use`/`type` bindings (as a hand-written arm does); its units are still marked. With those, R-ROOT's refusal
+  of a root path inside a cfg-gated container (or whose expansion writes `cfg`) is LIFTED: soundness/cfgtwin reads 0 WRITES lower
+  and 0 pure charged against main (it was 16 probes 1→0 when L2 first tried it). Non-additive (the lift removes hedges on pure
+  probes; (5) keeps bindings the cover deleted): `CANDOR_R1919_OFF=1` restores main. Cache rev 228.
+  Acceptance: `soundness/cfgtwin` section R (cells r1–r6, 50 executed probes). Residual (recorded, r6): a def/alias twin read through
+  a BODY-local `use` still reads one arm (pre-existing on 0.43.0).
+
 - ⚠ **Lane rust-macropath-l3: R-BARE-TC — which bare toolchain macro names an item-position invocation may not bind to the toolchain,
   by crate kind and per module (SOUNDNESS R1908, R1914, R1899's rebinding rule; it REMOVES false-reason holds and ADDS true ones).**
   R1899 treated a bare `thread_local!` as hidden text whenever its FILE held any glob `use dep::*;` or `#[macro_use] extern crate`.

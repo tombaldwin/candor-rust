@@ -1,0 +1,21 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r6",
+ "lib": false,
+ "note": "R1919 r6: residual \u2014 the body-local `use` spelling of a def/alias twin reads one arm (pre-existing)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "r6_body_e"
+  },
+  {
+   "kind": "e",
+   "name": "r6_mod_e"
+  },
+  {
+   "kind": "e",
+   "name": "r6_path_e"
+  }
+ ]
+}

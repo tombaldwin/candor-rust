@@ -1675,6 +1675,8 @@ fn i1s2b_cfg_if_is_opaque_like_any_foreign_macro() {
 #[test]
 fn r1857_module_twin_arms_keep_a_hedge() {
     let d = tmpdir("r1857");
+    // R1919 (lane rust-r1919): the hidden text is invoked through a NON-root path (`crate::mac::w*!`), which R-ROOT refuses, so the
+    // cover keeps being what this measures; the root spelling `crate::w*!` is now expanded inside a cfg arm (soundness/cfgtwin).
     // One file per shape, the probes beside it: a hidden item left in one module's list is R128 module evidence for every
     // caller in that file, which would answer the probes of the others. Every method name is unique: two traits implemented
     // for one type with a same-named method lose the call, a separate reading that is the same on 0.42.0.
@@ -1689,33 +1691,34 @@ fn r1857_module_twin_arms_keep_a_hedge() {
          #[macro_export] macro_rules! wmod { () => { #[cfg(unix)] pub mod up { pub trait TU { fn go_u(&self) { EFF } } } } }\n\
          #[macro_export] macro_rules! wimpl { () => { impl TI for crate::Q { fn go_i(&self) { EFF } } } }\n\
          #[macro_export] macro_rules! wimpls { () => { impl TS for crate::Q { fn go_s(&self) {} } } }\n\
+         pub mod mac { pub use crate::{wt, wfn, wtrait, wmod, wimpl, wimpls}; }\n\
          pub struct Q;\npub mod fa;\npub mod fb;\npub mod fc;\npub mod fn_;\npub mod ft;\npub mod fh;\npub mod fu;\npub mod fv;\npub mod fi;\npub mod fs;\npub mod fo;\n",
     );
     let files: [(&str, &str); 12] = [
         ("fa", "cfg_x! {\n\
-                #[cfg(unix)] pub mod a { pub trait TA { crate::wt! { fn go_a(&self); } fn pure_go_a(&self) {} } }\n\
+                #[cfg(unix)] pub mod a { pub trait TA { crate::mac::wt! { fn go_a(&self); } fn pure_go_a(&self) {} } }\n\
                 #[cfg(not(unix))] pub mod a { pub trait TA { fn go_a(&self) {} fn pure_go_a(&self) {} } }\n}\n\
                 impl a::TA for crate::Q {}\n\
                 pub fn dflt_e(x: &crate::Q) { use a::TA; x.go_a() }\npub fn dflt_q(x: &crate::Q) { use a::TA; x.pure_go_a() }\n"),
         ("fb", "cfg_x! {\n\
-                #[cfg(unix)] pub mod b { crate::wtrait! { TB, go_b } }\n\
+                #[cfg(unix)] pub mod b { crate::mac::wtrait! { TB, go_b } }\n\
                 #[cfg(not(unix))] pub mod b { pub trait TB { fn go_b(&self) {} } }\n}\n\
                 impl b::TB for crate::Q {}\npub fn trait_e(x: &crate::Q) { use b::TB; x.go_b() }\n"),
         ("fc", "cfg_x! {\n\
-                #[cfg(unix)] pub mod c { crate::wfn! { pub fn go_c(); } pub fn pure_go_c() {} }\n\
+                #[cfg(unix)] pub mod c { crate::mac::wfn! { pub fn go_c(); } pub fn pure_go_c() {} }\n\
                 #[cfg(not(unix))] pub mod c { pub fn go_c() {} pub fn pure_go_c() {} }\n}\n\
                 pub fn fn_e() { c::go_c() }\npub fn fn_q() { c::pure_go_c() }\n"),
         ("fn_", "cfg_x! {\n\
-                #[cfg(unix)] pub mod n { pub mod m { pub trait TN { crate::wt! { fn go_n(&self); } } } }\n\
+                #[cfg(unix)] pub mod n { pub mod m { pub trait TN { crate::mac::wt! { fn go_n(&self); } } } }\n\
                 #[cfg(not(unix))] pub mod n { pub mod m { pub trait TN { fn go_n(&self) {} } } }\n}\n\
                 impl n::m::TN for crate::Q {}\npub fn deep_e(x: &crate::Q) { use n::m::TN; x.go_n() }\n"),
-        ("ft", "cfg_x! { #[cfg(unix)] pub mod t { pub trait TT { crate::wt! { fn go_t(&self); } } } }\n\
+        ("ft", "cfg_x! { #[cfg(unix)] pub mod t { pub trait TT { crate::mac::wt! { fn go_t(&self); } } } }\n\
                 cfg_x! { #[cfg(not(unix))] pub mod t { pub trait TT { fn go_t(&self) {} } } }\n\
                 impl t::TT for crate::Q {}\npub fn two_e(x: &crate::Q) { use t::TT; x.go_t() }\n"),
-        ("fh", "#[cfg(unix)] pub mod h { pub trait TH { crate::wt! { fn go_h(&self); } } }\n\
+        ("fh", "#[cfg(unix)] pub mod h { pub trait TH { crate::mac::wt! { fn go_h(&self); } } }\n\
                 cfg_x! { #[cfg(not(unix))] pub mod h { pub trait TH { fn go_h(&self) {} } } }\n\
                 impl h::TH for crate::Q {}\npub fn hand_e(x: &crate::Q) { use h::TH; x.go_h() }\n"),
-        ("fu", "crate::wmod! {}\n\
+        ("fu", "crate::mac::wmod! {}\n\
                 cfg_x! { #[cfg(not(unix))] pub mod up { pub trait TU { fn go_u(&self) {} } } }\n\
                 impl up::TU for crate::Q {}\npub fn up_e(x: &crate::Q) { use up::TU; x.go_u() }\n"),
         ("fv", "cfg_x! {\n\
@@ -1724,13 +1727,13 @@ fn r1857_module_twin_arms_keep_a_hedge() {
                 impl v::TV for crate::Q {}\n\
                 pub fn vis_e(x: &crate::Q) { use v::TV; x.go_v() }\npub fn vis_q(x: &crate::Q) { use v::TV; x.pure_go_v() }\n"),
         ("fi", "cfg_x! {\n\
-                #[cfg(unix)] pub mod i { pub trait TI { fn go_i(&self) {} } crate::wimpl! {} }\n\
+                #[cfg(unix)] pub mod i { pub trait TI { fn go_i(&self) {} } crate::mac::wimpl! {} }\n\
                 #[cfg(not(unix))] pub mod i { pub trait TI { fn go_i(&self) {} } impl TI for crate::Q {} }\n}\n\
                 pub fn ovr_e(x: &crate::Q) { use i::TI; x.go_i() }\n"),
         // The LIVE arm's default performs the effect and the hidden arm's impl overrides it: the default is marked, so the
         // call keeps `Fs` (a member stood on the live arm's empty impl would have taken the call from it).
         ("fs", "cfg_x! {\n\
-                #[cfg(not(unix))] pub mod s { pub trait TS { fn go_s(&self) {} } crate::wimpls! {} }\n\
+                #[cfg(not(unix))] pub mod s { pub trait TS { fn go_s(&self) {} } crate::mac::wimpls! {} }\n\
                 #[cfg(unix)] pub mod s { pub trait TS { fn go_s(&self) { EFF } } impl TS for crate::Q {} }\n}\n\
                 pub fn keep_e(x: &crate::Q) { use s::TS; x.go_s() }\n"),
         // Fable merge review C1 (`k_outline`): the LIVE arm is an out-of-line module the expansion emits; its file holds the
@@ -1739,7 +1742,7 @@ fn r1857_module_twin_arms_keep_a_hedge() {
                 #[cfg(unix)] pub mod so;\n\
                 #[cfg(not(unix))] pub mod so { pub trait TO { fn go_o(&self) {} } }\n}\n\
                 impl so::TO for crate::Q {}\npub fn outline_e(x: &crate::Q) { use so::TO; x.go_o() }\n"),
-        ("fo/so", "pub trait TO { crate::wt! { fn go_o(&self); } }\n"),
+        ("fo/so", "pub trait TO { crate::mac::wt! { fn go_o(&self); } }\n"),
     ];
     for (n, src) in files {
         write_file(&d, &format!("src/{n}.rs"), src);

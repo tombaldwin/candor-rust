@@ -1,0 +1,41 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r4",
+ "lib": false,
+ "note": "R1919 r4: two default bodies of one trait leaf (nested twins, #[path] twins; p = a bare wt! arm, d6v2). DISCLOSED, not resolved: unrel2_q is the priced over-disclosure (an unrelated same-leaf trait, effectful default)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "r4_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "r4_path_e"
+  },
+  {
+   "kind": "e",
+   "name": "r4_ufcs_e"
+  },
+  {
+   "kind": "e",
+   "name": "r4_gen_e"
+  },
+  {
+   "kind": "e",
+   "name": "r4_pmeth_e"
+  },
+  {
+   "kind": "e",
+   "name": "r4_p_e"
+  },
+  {
+   "kind": "q",
+   "name": "r4_unrel_q"
+  },
+  {
+   "kind": "q",
+   "name": "r4_unrel2_q"
+  }
+ ]
+}

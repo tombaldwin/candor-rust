@@ -1,0 +1,21 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r5",
+ "lib": false,
+ "note": "R1919 r5: an inline arm beside an out-of-line arm; the out-of-line stand-in must not delete the binding of the produced arm",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "r5_h_e"
+  },
+  {
+   "kind": "e",
+   "name": "r5_p_e"
+  },
+  {
+   "kind": "q",
+   "name": "r5_p_q"
+  }
+ ]
+}

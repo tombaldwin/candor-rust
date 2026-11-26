@@ -1,0 +1,69 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "r2",
+ "lib": false,
+ "note": "R1919 r2: a gated override beside an impl that inherits the default; p = the bare wov! spelling (e15)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "r2_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_path_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_trpath_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_ufcs_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_dyn_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_gen_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_ref_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_rev_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_gmod_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_member_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_gentr_e"
+  },
+  {
+   "kind": "e",
+   "name": "r2_p_e"
+  },
+  {
+   "kind": "q",
+   "name": "r2_pure_q"
+  },
+  {
+   "kind": "q",
+   "name": "r2_bothov_q"
+  },
+  {
+   "kind": "q",
+   "name": "r2_bothmem_q"
+  }
+ ]
+}

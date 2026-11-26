@@ -19742,7 +19742,16 @@ pub(crate) fn reexport_aliases(
         if f.qual.starts_with(LAZY_UNIT_PREFIX) {
             continue;
         }
-        let Some((m, n)) = f.qual.rsplit_once("::") else { continue };
+        // SOUNDNESS R1919 — a crate-ROOT free fn is filed under the root module (`""`), so a NAMED re-export of it
+        // (`pub mod sole { pub use crate::eff as g; }`, every arm of a `#[cfg]` twin module that does the same) keys
+        // `sole::g` like any other: before, the root fn was in no module here, the key did not exist, and `use sole::g;
+        // g()` / a root `pub use sole::g as gg;` then `gg()` named NOTHING: ABSENT over an executed write. A GLOB of the
+        // root is left as it was (below), so no key a glob used to leave unique gains a claimant.
+        let (m, n) = match f.qual.rsplit_once("::") {
+            Some(x) => x,
+            None if !f.assoc && f.qual == f.leaf && !crate::lang::r1919_off() => ("", f.qual.as_str()),
+            None => continue,
+        };
         let e = exported.entry(m.to_string()).or_default().entry(n.to_string()).or_default();
         e.0.insert(DECLARED_HERE);
         e.1.insert(f.qual.clone());
@@ -19760,7 +19769,10 @@ pub(crate) fn reexport_aliases(
                 let Some(names) = exported.get(src) else { continue };
                 if ed.name == "*" {
                     for (n, (_, quals, _, src_cfg)) in names {
-                        adds.extend(quals.iter().map(|q| (n.clone(), q.clone(), ed.cfg_gated || *src_cfg)));
+                        // R1919 — never a root fn through a glob (see above): only a NAMED edge reaches one.
+                        adds.extend(
+                            quals.iter().filter(|q| !src.is_empty() || q.contains("::")).map(|q| (n.clone(), q.clone(), ed.cfg_gated || *src_cfg)),
+                        );
                     }
                 } else if let Some((_, quals, _, src_cfg)) = names.get(&ed.name) {
                     let cfg = ed.cfg_gated || *src_cfg;
