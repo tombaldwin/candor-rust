@@ -6811,8 +6811,12 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                             // fabrication, so the claimants go to VEIN A's contest, judged after the fixpoint: the call is
                             // DISCLOSED (`ambiguous:same-name local defs`) where a claimant carries an effect the caller lacks,
                             // and costs nothing where every claimant is pure (cfgtwin `g5` state A, two pure `#[path]` arms).
-                            if hits.len() >= 2 && !hits.contains(&&f.qual) && !crate::lang::r1919_off() {
-                                veina_contested.push((f.qual.clone(), hits.iter().map(|h| (*h).clone()).collect()));
+                            // Only DEFAULT bodies contest: a same-tail inherent method of a TYPE that shares the trait's leaf
+                            // (`read::any::Section::name` beside trait `Section`'s `name`) is not one (measured: object 0.37.3).
+                            let dflt_hits: Vec<String> =
+                                hits.iter().filter(|h| r1919_kind.get(h.as_str()) == Some(&0)).map(|h| (*h).clone()).collect();
+                            if dflt_hits.len() >= 2 && !hits.contains(&&f.qual) && !crate::lang::r1919_off() {
+                                veina_contested.push((f.qual.clone(), dflt_hits));
                                 if candor_report::env::trace("CANDOR_R1919_INSTR") {
                                     eprintln!("R1919DFLTS\t{}\t{}", f.qual, hits.iter().map(|h| h.as_str()).collect::<Vec<_>>().join("|")); // §E1 REACH COUNTER
                                 }
