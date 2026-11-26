@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe1"
+ ],
+ "id": "e1",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: K1 x G1 glob x thread_local (t2): expected E0659.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "e1_e"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e1"
+  }
+ ]
+}

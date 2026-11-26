@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc15",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc15"
+ ],
+ "id": "c15",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: `use dep::mk` (writes) + a textual-only PURE mk in other.rs (b1): crate::mk! is the dependency's.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c15_e"
+  },
+  {
+   "kind": "q",
+   "name": "c15_q"
+  }
+ ]
+}

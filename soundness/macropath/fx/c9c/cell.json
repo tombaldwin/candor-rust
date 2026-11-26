@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc9c",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc9c"
+ ],
+ "id": "c9c",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: H7 WITHOUT local_inner_macros: mk! resolves at the call site to the dependency's pure mk (lim0).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c9c_e"
+  },
+  {
+   "kind": "q",
+   "name": "c9c_q"
+  }
+ ]
+}

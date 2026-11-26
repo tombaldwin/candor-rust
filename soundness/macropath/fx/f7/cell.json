@@ -1,0 +1,14 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "f7",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "F: an exported crate mk AND `pub(crate) use other::mk;` at the root (the export re-imported in-module): E0255 or compiles-as-one?",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f7_e"
+  }
+ ]
+}

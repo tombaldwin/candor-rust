@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc14",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc14"
+ ],
+ "id": "c14",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: exports defined INSIDE a fn body (fb).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c14_e"
+  },
+  {
+   "kind": "q",
+   "name": "c14_q"
+  }
+ ]
+}

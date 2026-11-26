@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc7",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc7"
+ ],
+ "id": "c7",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R1 x H3 (super::mk!) x EXP_W.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c7_e"
+  },
+  {
+   "kind": "q",
+   "name": "c7_q"
+  }
+ ]
+}

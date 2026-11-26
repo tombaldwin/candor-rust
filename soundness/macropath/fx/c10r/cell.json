@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc10r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc10r"
+ ],
+ "id": "c10r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R2w + R6: non-exported PURE mk shadows the dependency's writing glob.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c10r_e"
+  },
+  {
+   "kind": "q",
+   "name": "c10r_q"
+  }
+ ]
+}

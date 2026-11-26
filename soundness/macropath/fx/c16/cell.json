@@ -1,0 +1,24 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc16",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc16"
+ ],
+ "edition": "2015",
+ "id": "c16",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: edition 2015, `extern crate`, `::mk!()` (e15): control.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c16_e"
+  },
+  {
+   "kind": "q",
+   "name": "c16_q"
+  }
+ ]
+}

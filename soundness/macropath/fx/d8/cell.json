@@ -1,0 +1,26 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d8",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: trait-item, H1, R0.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d8_e"
+  },
+  {
+   "kind": "q",
+   "name": "d8_q"
+  },
+  {
+   "kind": "e",
+   "name": "d8_m_e"
+  },
+  {
+   "kind": "q",
+   "name": "d8_m_q"
+  }
+ ]
+}

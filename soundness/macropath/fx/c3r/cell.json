@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc3r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc3r"
+ ],
+ "id": "c3r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R2w (dep mk WRITES) x H1 x EXP_P (b4): export beats the glob, pure.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c3r_e"
+  },
+  {
+   "kind": "q",
+   "name": "c3r_q"
+  }
+ ]
+}

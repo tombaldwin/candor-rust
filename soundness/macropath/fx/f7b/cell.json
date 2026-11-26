@@ -1,0 +1,14 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "f7b",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "F: extra (not in the matrix): f7 WITHOUT the in-module `pub(crate) use mk;`: `other::mk` does not exist (export lives at the root).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f7b_e"
+  }
+ ]
+}

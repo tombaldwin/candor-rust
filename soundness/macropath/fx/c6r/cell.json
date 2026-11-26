@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc6r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc6r"
+ ],
+ "id": "c6r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R2w x H2 x EXP_P: pure.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c6r_e"
+  },
+  {
+   "kind": "q",
+   "name": "c6r_q"
+  }
+ ]
+}

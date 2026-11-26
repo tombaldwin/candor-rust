@@ -1,0 +1,34 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d1",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, H1, R0, MKFN_W (i1).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d1_e"
+  },
+  {
+   "kind": "q",
+   "name": "d1_q"
+  },
+  {
+   "kind": "e",
+   "name": "d1_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d1_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d1_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d1_use_q"
+  }
+ ]
+}

@@ -1,0 +1,39 @@
+{
+ "chain": {
+  "dep_dir": "fxdepd3",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepd3"
+ ],
+ "id": "d3",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, H1, R2w-shaped: the dependency's mkfn WRITES, the crate's same-named export is PURE (g6).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d3_e"
+  },
+  {
+   "kind": "q",
+   "name": "d3_q"
+  },
+  {
+   "kind": "e",
+   "name": "d3_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d3_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d3_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d3_use_q"
+  }
+ ]
+}

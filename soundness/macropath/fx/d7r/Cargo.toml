@@ -1,0 +1,9 @@
+[package]
+name = "cf_d7r"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdepd7r = { path = "fxdepd7r" }
+
+[workspace]

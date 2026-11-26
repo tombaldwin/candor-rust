@@ -1,0 +1,34 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d11",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: NONROOT control: `use crate::defs::mkfn; self::mkfn!{ go }` (= B2); L2 must NOT bind it.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d11_e"
+  },
+  {
+   "kind": "q",
+   "name": "d11_q"
+  },
+  {
+   "kind": "e",
+   "name": "d11_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d11_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d11_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d11_use_q"
+  }
+ ]
+}

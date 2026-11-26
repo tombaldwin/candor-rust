@@ -217,9 +217,281 @@ cell('s1fn', 'mod inner;\n',
      note='S3 (R1911 control): a pure dependency FN call is answered by the chained report and reads ABSENT; only the macro caller is disclosed.')
 
 
-def cargo_toml(name, deps, is_dep=False):
-    s = '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n' % name
+# ======================================================================================================================
+# Groups C-G (MATRIX.md, rust-macropath design): L2 body / item positions, L3 toolchain names x crate kind, the must-not-compile
+# cells. Same generator, same runner, same expect.tsv. Conventions of the design's section 0 are kept where this generator's
+# probe shape allows: every writer probe `<id>_e` has a twin `<id>_q` over a PURE definition, names are unique per cell
+# (`go_<id>`, `q_<id>_pure`), a cell's dependency is the nested path crate `fxdep<id>`.  The `cand` column stays empty.
+# ======================================================================================================================
+W0 = '::std::fs::write(::std::env::var("MARK").unwrap(), b"x").unwrap()'   # no trailing `;`: it is spliced into expression position
+
+
+def sb(t, cid):
+    return t.replace('@W@', W0).replace('@ID@', cid)
+
+
+EXP_W = '#[macro_export] macro_rules! mk { () => { @W@ } }\n'
+EXP_P = '#[macro_export] macro_rules! mk { () => { () } }\n'
+EXP_NOP = '#[macro_export] macro_rules! mknop { () => { () } }\n'
+WRAPS = ('#[macro_export] macro_rules! wrap { () => { $crate::mk!() } }\n'
+         '#[macro_export] macro_rules! wrapnop { () => { $crate::mknop!() } }\n')
+MKFN_W = '#[macro_export] macro_rules! mkfn { ($n:ident) => { pub fn $n() { @W@ } } }\n'
+MKFN_P = '#[macro_export] macro_rules! mkfnp { ($n:ident) => { pub fn $n() {} } }\n'
+MKFN_PN = '#[macro_export] macro_rules! mkfn { ($n:ident) => { pub fn $n() {} } }\n'      # a PURE macro named like the writer
+MKM_W = '#[macro_export] macro_rules! mkm { ($n:ident) => { pub fn $n(&self) { @W@ } } }\n'
+MKM_P = '#[macro_export] macro_rules! mkmp { ($n:ident) => { pub fn $n(&self) {} } }\n'
+MKM_PN = '#[macro_export] macro_rules! mkm { ($n:ident) => { pub fn $n(&self) {} } }\n'
+MKTR_W = '#[macro_export] macro_rules! mktr { ($n:ident) => { fn $n(&self) { @W@ } } }\n'
+MKTR_P = '#[macro_export] macro_rules! mktrp { ($n:ident) => { fn $n(&self) {} } }\n'
+DEP_BASE = 'pub fn emit() { @W@ }\n#[macro_export] macro_rules! nop { () => { () } }\n'
+DEP_MK_W = '#[macro_export] macro_rules! mk { () => { $crate::emit() } }\n'
+DEP_MK_P = '#[macro_export] macro_rules! mk { () => { () } }\n'
+DEP_MKFN_W = '#[macro_export] macro_rules! mkfn { ($n:ident) => { pub fn $n() { $crate::emit() } } }\n'
+DEP_MKM_W = '#[macro_export] macro_rules! mkm { ($n:ident) => { pub fn $n(&self) { $crate::emit() } } }\n'
+DEP_TL2 = ('#[macro_export] macro_rules! thread_local { (static $n:ident : $t:ty = $e:expr ;) => { pub fn tl_touch() { $crate::emit() } } }\n')
+DEP_WRITE = '#[macro_export] macro_rules! write { ($($t:tt)*) => { $crate::emit() } }\n'
+DEP_EMIT = 'pub fn emit() { @W@ }\n'
+
+
+def with_dep(cid, text):
+    """-> (extra-files, deps, chain) for a nested path dependency `fxdep<cid>` whose lib.rs is `text`."""
+    n = 'fxdep' + cid
+    return {'@dep/%s/src/lib.rs' % n: sb(text, cid)}, {n: '{ path = "%s" }' % n}, dict(kind='dep', dep_dir=n)
+
+
+def gcell(cid, root, files, probes, note, dep=None, lib=False, edition='2021', features=None):
+    """Register a cell. `files` = {relpath-in-src: text}; `dep` = dependency lib.rs text (or None)."""
+    extra = {k: sb(v, cid) for k, v in files.items()}
+    deps, chain = {}, None
+    if dep is not None:
+        e2, deps, chain = with_dep(cid, dep)
+        extra.update(e2)
+    cell(cid, sb(root, cid) + '\n', extra, probes, deps=deps, chain=chain, note=note)
+    CELLS[cid].update(lib=lib, edition=edition, features=features, nocompile_ok=True)
+
+
+# ---------------------------------------------------------------------------------------------------- C: body position
+def ccell(cid, note, *, imp='', defs=EXP_W + EXP_NOP, head='crate::mk!()', headq='crate::mknop!()', dep=DEP_BASE,
+          mods='mod other;\nmod inner;', inner_pre='', files=None, root_probe=False, edition='2021', defs_name='other.rs', probes=None):
+    f = {'inner.rs': inner_pre + ('' if root_probe else 'pub fn go_@ID@() { %s }\npub fn q_@ID@_pure() { %s }\n' % (head, headq))}
+    if root_probe:
+        f['inner.rs'] += 'pub fn unused_@ID@() {}\n'
+    if defs_name:
+        f[defs_name] = defs
+    f.update(files or {})
+    if probes is None:
+        probes = ([(cid + '_e', 'e', head), (cid + '_q', 'q', headq)] if root_probe else
+                  [(cid + '_e', 'e', 'inner::go_%s()' % cid), (cid + '_q', 'q', 'inner::q_%s_pure()' % cid)])
+    gcell(cid, imp + '\n' + mods, f, probes, note, dep=dep, edition=edition)
+
+
+R1 = 'use fxdep@ID@::*;'
+R4 = 'mod prelude { pub use fxdep@ID@::*; }\nuse prelude::*;'
+CD = 'C: '
+ccell('c1', CD + 'R0 x H1 x EXP_W (b7).', dep=None)
+ccell('c2', CD + 'R1 x H1 x EXP_W (b4x).', imp=R1)
+ccell('c3', CD + 'R2 (dep has a PURE mk) x H1 x EXP_W (b4w).', imp=R1, dep=DEP_BASE + DEP_MK_P)
+ccell('c3r', CD + 'R2w (dep mk WRITES) x H1 x EXP_P (b4): export beats the glob, pure.', imp=R1, defs=EXP_P + EXP_NOP, dep=DEP_BASE + DEP_MK_W)
+ccell('c4', CD + 'R3 `pub use other::*;` x H1 x EXP_W (b4z). Dep present only so the chained arm can be run.', imp='pub use other::*;')
+ccell('c5', CD + 'R4 prelude glob x H1 x EXP_W.', imp=R4)
+ccell('c6', CD + 'R1 x H2 (wrap!) x EXP_W (b4v).', imp=R1, defs=EXP_W + EXP_NOP + WRAPS, head='crate::wrap!()', headq='crate::wrapnop!()')
+ccell('c6r', CD + 'R2w x H2 x EXP_P: pure.', imp=R1, defs=EXP_P + EXP_NOP + WRAPS, head='crate::wrap!()', headq='crate::wrapnop!()', dep=DEP_BASE + DEP_MK_W)
+ccell('c7', CD + 'R1 x H3 (super::mk!) x EXP_W.', imp=R1, head='super::mk!()', headq='super::mknop!()')
+ccell('c7r', CD + 'R2w x H3 x EXP_P: pure.', imp=R1, defs=EXP_P + EXP_NOP, head='super::mk!()', headq='super::mknop!()', dep=DEP_BASE + DEP_MK_W)
+ccell('c8', CD + 'R1 x H4: the call sits in a ROOT fn of main.rs, no inner call.', imp=R1, head='self::mk!()', headq='self::mknop!()', root_probe=True)
+ccell('c8b', CD + 'R1 x H5 (super::super::mk! from inner::deep).', imp=R1, mods='mod other;\nmod inner;',
+      inner_pre='pub mod deep;\n', files={'inner/deep.rs': 'pub fn go_@ID@() { super::super::mk!() }\npub fn q_@ID@_pure() { super::super::mknop!() }\n'},
+      probes=[('c8b_e', 'e', 'inner::deep::go_c8b()'), ('c8b_q', 'q', 'inner::deep::q_c8b_pure()')])
+# the file for H5 replaces inner.rs's own fns
+CELLS['c8b']['extra']['inner.rs'] = 'pub mod deep;\n'
+
+LIM_DEFS_L = ('#[macro_export(local_inner_macros)] macro_rules! wrap { () => { mk!() } }\n'
+              '#[macro_export(local_inner_macros)] macro_rules! wrapnop { () => { mknop!() } }\n')
+LIM_DEFS_NL = ('#[macro_export] macro_rules! wrap { () => { mk!() } }\n'
+               '#[macro_export] macro_rules! wrapnop { () => { nop!() } }\n')
+H7_INNER = 'use fxdep@ID@::{mk, nop};\npub fn go_@ID@() { crate::wrap!() }\npub fn q_@ID@_pure() { crate::wrapnop!() }\n'
+
+
+def h7(cid, note, defs, dep):
+    gcell(cid, '', {'inner.rs': H7_INNER, 'defs.rs': defs}, [(cid + '_e', 'e', 'inner::go_%s()' % cid), (cid + '_q', 'q', 'inner::q_%s_pure()' % cid)],
+          note, dep=dep)
+    CELLS[cid]['main'] = 'mod inner;\nmod defs;\n'
+
+
+h7('c9', CD + 'H7: local_inner_macros wrap!{mk!()} -> the crate\'s writer export (lim1).', EXP_W + EXP_NOP + LIM_DEFS_L, DEP_BASE + DEP_MK_P)
+h7('c9c', CD + 'H7 WITHOUT local_inner_macros: mk! resolves at the call site to the dependency\'s pure mk (lim0).', EXP_W + EXP_NOP + LIM_DEFS_NL, DEP_BASE + DEP_MK_P)
+h7('c9r', CD + 'H7: local_inner_macros -> the crate\'s PURE export; the dependency\'s mk writes.', EXP_P + EXP_NOP + LIM_DEFS_L, DEP_BASE + DEP_MK_W)
+
+NX = ('macro_rules! mk { () => { @W@ } }\nmacro_rules! mknop { () => { () } }\npub(crate) use mk;\npub(crate) use mknop;\n')
+ccell('c10', CD + 'R1 + R6: NON-exported writer re-exported by `pub(crate) use` (ru).', imp=R1 + '\npub(crate) use other::{mk, mknop};', defs=NX)
+ccell('c10r', CD + 'R2w + R6: non-exported PURE mk shadows the dependency\'s writing glob.', imp=R1 + '\npub(crate) use other::{mk, mknop};',
+      defs=NX.replace('@W@', '()'), dep=DEP_BASE + DEP_MK_W)
+DEFMK = ('macro_rules! defmk { () => { #[macro_export] macro_rules! mk { () => { @W@ } } #[macro_export] macro_rules! mknop { () => { () } } } }\ndefmk!();\n')
+ALLOW = '#![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]'
+ccell('c11', CD + 'R1 + allow-lint: the exports are EMITTED by a local macro (e2g).', imp=ALLOW + '\n' + R1, defs=DEFMK)
+ccell('c11a', CD + 'R0 + allow-lint, emitted exports (e2a): must not regress.', imp=ALLOW, defs=DEFMK, dep=None)
+ccell('c12', CD + 'ANCESTOR cfg twins: `#[cfg(unix)] mod other` (writer) / `#[cfg(not(unix))] mod other_p` (pure export).', dep=None,
+      mods='#[cfg(unix)] mod other;\n#[cfg(not(unix))] mod other_p;\nmod inner;', files={'other_p.rs': EXP_P + EXP_NOP})
+ccell('c13', CD + 'item cfg twins on the export itself (e3).', dep=None,
+      defs='#[cfg(unix)]\n' + EXP_W + '#[cfg(not(unix))]\n' + EXP_P + EXP_NOP)
+ccell('c14', CD + 'exports defined INSIDE a fn body (fb).', dep=DEP_BASE,
+      defs='pub fn setup() { ' + EXP_W + EXP_NOP + '}\n')
+ccell('c14g', CD + 'as c14 with the R1 glob (fbg).', imp=R1, defs='pub fn setup() { ' + EXP_W + EXP_NOP + '}\n')
+ccell('c15', CD + '`use dep::mk` (writes) + a textual-only PURE mk in other.rs (b1): crate::mk! is the dependency\'s.', imp='use fxdep@ID@::mk;\nuse fxdep@ID@::nop as mknop;',
+      defs='macro_rules! mk { () => { () } }\nmacro_rules! mknop { () => { () } }\n', mods='#[macro_use]\nmod other;\nmod inner;', dep=DEP_BASE + DEP_MK_W)
+ccell('c15r', CD + 'bodies swapped (b1r): the dependency\'s mk is PURE, the textual-only local mk writes.', imp='use fxdep@ID@::mk;\nuse fxdep@ID@::nop as mknop;',
+      defs='macro_rules! mk { () => { @W@ } }\nmacro_rules! mknop { () => { () } }\n', mods='#[macro_use]\nmod other;\nmod inner;', dep=DEP_BASE + DEP_MK_P)
+ccell('c16', CD + 'edition 2015, `extern crate`, `::mk!()` (e15): control.', imp='extern crate fxdep@ID@;', head='::mk!()', headq='::mknop!()', edition='2015')
+ccell('c17', CD + 'R0; `dep::wrap!()` expands `$crate::mk!()` of the DEPENDENCY (pure) while a same-named local mk writes: must NOT charge.',
+      defs=EXP_W + EXP_NOP, head='fxdep@ID@::wrap!()', headq='fxdep@ID@::nopwrap!()',
+      dep=DEP_BASE + DEP_MK_P + '#[macro_export] macro_rules! wrap { () => { $crate::mk!() } }\n#[macro_export] macro_rules! nopwrap { () => { $crate::nop!() } }\n')
+ccell('c18', CD + 'R1 + `#[macro_use] extern crate dep` (pure mk) beside the crate\'s writer export: crate::mk is the export.',
+      imp='#[macro_use] extern crate fxdep@ID@;\n' + R1, dep=DEP_BASE + DEP_MK_P)
+# c16 needs the `extern crate` at the root BEFORE `mod`s in 2015 and `::mk!()`; nothing else differs.
+
+# ---------------------------------------------------------------------------------------------------- D: item / impl-item / trait-item
+DNX = ('macro_rules! mkfn { ($n:ident) => { pub fn $n() { @W@ } } }\nmacro_rules! mkfnp { ($n:ident) => { pub fn $n() {} } }\n'
+       'pub(crate) use mkfn;\npub(crate) use mkfnp;\n')
+
+
+def dcell(cid, note, *, pos='item', pfx='crate::', imp='', defs=MKFN_W + MKFN_P, dep=DEP_BASE, mods='mod other;\nmod inner;', inner_pre='',
+          wrap=None, files=None, defs_name='other.rs'):
+    if pos == 'item':
+        body = ('%smkfn!{ go_@ID@ }\n%smkfnp!{ qgo_@ID@ }\n' % (pfx, pfx)) if wrap is None else wrap
+        body += 'pub fn p_inner_@ID@() { go_@ID@() }\npub fn q_inner_@ID@() { qgo_@ID@() }\n'
+        probes = [('%s_e' % cid, 'e', 'inner::go_%s()' % cid), ('%s_q' % cid, 'q', 'inner::qgo_%s()' % cid),
+                  ('%s_in_e' % cid, 'e', 'inner::p_inner_%s()' % cid), ('%s_in_q' % cid, 'q', 'inner::q_inner_%s()' % cid),
+                  ('%s_use_e' % cid, 'e', 'g_%s()' % cid), ('%s_use_q' % cid, 'q', 'qg_%s()' % cid)]
+        imp = imp + '\nuse inner::go_@ID@ as g_@ID@;\nuse inner::qgo_@ID@ as qg_@ID@;'
+    elif pos == 'impl':
+        body = ('pub struct S_@ID@;\nimpl S_@ID@ { %smkm!{ go_@ID@ } }\npub struct SQ_@ID@;\nimpl SQ_@ID@ { %smkmp!{ qgo_@ID@ } }\n' % (pfx, pfx))
+        probes = [('%s_e' % cid, 'e', 'inner::S_%s.go_%s()' % (cid, cid)), ('%s_q' % cid, 'q', 'inner::SQ_%s.qgo_%s()' % (cid, cid)),
+                  ('%s_ufcs_e' % cid, 'e', 'inner::S_%s::go_%s(&inner::S_%s)' % (cid, cid, cid)),
+                  ('%s_ufcs_q' % cid, 'q', 'inner::SQ_%s::qgo_%s(&inner::SQ_%s)' % (cid, cid, cid))]
+    else:
+        body = ('pub struct S_@ID@;\npub struct SQ_@ID@;\npub trait T_@ID@ { %smktr!{ go_@ID@ } }\nimpl T_@ID@ for S_@ID@ {}\n'
+                'pub trait TQ_@ID@ { %smktrp!{ qgo_@ID@ } }\nimpl TQ_@ID@ for SQ_@ID@ {}\n' % (pfx, pfx))
+        probes = [('%s_e' % cid, 'e', '<inner::S_%s as inner::T_%s>::go_%s(&inner::S_%s)' % (cid, cid, cid, cid)),
+                  ('%s_q' % cid, 'q', '<inner::SQ_%s as inner::TQ_%s>::qgo_%s(&inner::SQ_%s)' % (cid, cid, cid, cid)),
+                  ('%s_m_e' % cid, 'e', '{ use inner::T_%s; inner::S_%s.go_%s() }' % (cid, cid, cid)),
+                  ('%s_m_q' % cid, 'q', '{ use inner::TQ_%s; inner::SQ_%s.qgo_%s() }' % (cid, cid, cid))]
+    f = {'inner.rs': inner_pre + body}
+    if defs_name:
+        f[defs_name] = defs
+    f.update(files or {})
+    gcell(cid, imp + '\n' + mods, f, probes, 'D: ' + note, dep=dep)
+
+
+dcell('d1', 'item, H1, R0, MKFN_W (i1).', dep=None)
+dcell('d2', 'item, H1, R1, MKFN_W.', imp=R1)
+dcell('d3', 'item, H1, R2w-shaped: the dependency\'s mkfn WRITES, the crate\'s same-named export is PURE (g6).', imp=R1, defs=MKFN_PN + MKFN_P,
+      dep=DEP_BASE + DEP_MKFN_W)
+dcell('d4', 'item, H3 (super::mkfn!), R0.', pfx='super::', dep=None)
+dcell('d5', 'item, H1, R3 `pub use other::*;`.', imp='pub use other::*;', dep=None)
+dcell('d6', 'item, H1, R6: non-exported macros re-exported by `pub(crate) use`.', imp='pub(crate) use other::{mkfn, mkfnp};', defs=DNX, dep=None)
+dcell('d7', 'impl-item, H1, R0: method + UFCS.', pos='impl', defs=MKM_W + MKM_P, dep=None)
+dcell('d7r', 'impl-item, H1, R2w-shaped: the dependency\'s mkm writes, the crate\'s same-named export is PURE.', pos='impl', imp=R1,
+      defs=MKM_PN + MKM_P, dep=DEP_BASE + DEP_MKM_W)
+dcell('d8', 'trait-item, H1, R0.', pos='trait', defs=MKTR_W + MKTR_P, dep=None)
+dcell('d9', 'item, H1, R0: ITEM cfg twins on the macro (writer on unix, pure otherwise).', dep=None,
+      defs='#[cfg(unix)]\n' + MKFN_W + '#[cfg(not(unix))]\n' + MKFN_PN + MKFN_P)
+dcell('d10', 'item, H1: the INVOCATION is cfg-gated, with a pure fn on the other arm.', dep=None,
+      wrap=('#[cfg(unix)]\ncrate::mkfn!{ go_@ID@ }\n#[cfg(not(unix))]\npub fn go_@ID@() {}\n'
+            '#[cfg(unix)]\ncrate::mkfnp!{ qgo_@ID@ }\n#[cfg(not(unix))]\npub fn qgo_@ID@() {}\n'))
+dcell('d11', 'NONROOT control: `use crate::defs::mkfn; self::mkfn!{ go }` (= B2); L2 must NOT bind it.', pfx='self::', dep=None, mods='mod inner;\nmod defs;',
+      defs=DNX, defs_name='defs.rs', inner_pre='use crate::defs::{mkfn, mkfnp};\n')
+# d12: the glob supplies the DEPENDENCY's item macro to `self::mk!`; the crate's own exported mk is pure and sits at the root.
+gcell('d12', 'mod prelude { pub use fxdepd12::*; }\n#[macro_export] macro_rules! mk { ($n:ident) => { pub fn $n() {} } }\n#[macro_export] macro_rules! mknop { ($n:ident) => { pub fn $n() {} } }\nmod inner;\n',
+      {'inner.rs': 'use crate::prelude::*;\nself::mk!{ go_d12 }\nself::mknop!{ qgo_d12 }\npub fn p_inner_d12() { go_d12() }\npub fn q_inner_d12() { qgo_d12() }\n'},
+      [('d12_e', 'e', 'inner::go_d12()'), ('d12_q', 'q', 'inner::qgo_d12()'),
+       ('d12_in_e', 'e', 'inner::p_inner_d12()'), ('d12_in_q', 'q', 'inner::q_inner_d12()')],
+      'D: item, `self::mk!` whose only binding is the glob chain to the DEPENDENCY (g1d); a pure root export of the same name sits elsewhere (and one for the twin\'s `mknop`, so both spellings have a same-leaf local macro).',
+      dep=DEP_EMIT + '#[macro_export] macro_rules! mk { ($n:ident) => { pub fn $n() { $crate::emit() } } }\n'
+                     '#[macro_export] macro_rules! mknop { ($n:ident) => { pub fn $n() {} } }\n')
+
+# ---------------------------------------------------------------------------------------------------- E: toolchain names x crate kind
+GATED = '#[cfg(unix)] pub fn gated_@ID@() {}\n#[cfg(not(unix))] pub fn gated_@ID@() {}\n'
+TLINV = 'thread_local! { static X_@ID@: u8 = 0; }\n'
+PGO_DEP = 'pub fn p_go_@ID@() { tl_touch() }\n'
+PGO_STD = 'pub fn p_go_@ID@() { X_@ID@.with(|_| ()) }\n'
+
+
+def ecell(cid, note, *, kind, inner, root='', dep=DEP_EMIT + DEP_TL2, files=None, pgo='dep', features=None, mods='mod inner;', ctr=''):
+    """kind 'bin' (K1) or 'lib' (K2/K3/K4). Probes: the writer/pure `p_go` and the cfg-pair `gated` (read as its own unit)."""
+    pg = PGO_DEP if pgo == 'dep' else PGO_STD if pgo == 'std' else pgo
+    f = {'inner.rs': inner + TLINV * (1 if ctr == '' else 0) + GATED + pg}
+    f.update(files or {})
+    islib = kind == 'lib'
+    if islib:
+        probes = [('p_go_' + cid, 'q' if pgo == 'std' else 'e', None), ('gated_' + cid, 'g', None)]
+    else:
+        probes = [(cid + ('_q' if pgo == 'std' else '_e'), 'q' if pgo == 'std' else 'e', 'inner::p_go_%s()' % cid), ('gated_' + cid, 'g', None)]
+        root = root + '\npub use inner::gated_@ID@;'
+    gcell(cid, root + '\n' + mods, f, probes, 'E: ' + note, dep=dep, lib=islib, features=features)
+
+
+E1 = 'use fxdep@ID@::*;\n'
+ecell('e1', 'K1 x G1 glob x thread_local (t2): expected E0659.', kind='bin', inner=E1)
+ecell('e2', 'K1 x G2 prelude glob x thread_local (t4): expected E0659.', kind='bin', inner='mod prelude { pub use fxdep@ID@::*; }\nuse prelude::*;\n')
+ecell('e3', 'K1 x G5 macro_use extern crate x thread_local (t1): the macro_use prelude beats std\'s.', kind='bin', inner='', root='#[macro_use] extern crate fxdep@ID@;')
+# e4: the core-prelude name `write`; p_go formats through it. The gated pair sits beside a STD thread_local (the dep supplies only `write`).
+ecell('e4', 'K1 x G5 x `write` (a CORE name, tcore): macro_use beats the std prelude; p_go calls write! in BODY position.', kind='bin', inner='',
+      root='#[macro_use] extern crate fxdep@ID@;', dep=DEP_EMIT + DEP_WRITE,
+      pgo='pub fn p_go_@ID@() { use std::fmt::Write as _; let mut s = String::new(); let _ = write!(s, "x"); }\n')
+ecell('e5', 'K1 x G6 explicit `use dep::thread_local` (t3).', kind='bin', inner='use fxdep@ID@::thread_local;\n')
+# e6/e7: std\'s thread_local binds; p_go is PURE; the glob is not in scope of the invocation
+ecell('e6', 'K1 x G8: `use dep::*;` in a module nobody globs (g4): std\'s binds, pure.', kind='bin', inner='', pgo='std', mods='mod other;\nmod inner;',
+      files={'other.rs': 'use fxdep@ID@::*;\npub fn unrelated_@ID@() {}\n'})
+ecell('e7', 'K1 x G9: `use dep::*;` inside an inline `mod x {}` of the invoking FILE (imports do not leak out of x): std\'s binds, pure.', kind='bin',
+      inner='mod x { use fxdep@ID@::*; }\n', pgo='std')
+ecell('e8', 'K2 (#![no_std] lib) x G2 (f4d).', kind='lib', root='#![no_std]', inner='mod prelude { pub use fxdep@ID@::*; }\nuse prelude::*;\n')
+ecell('e9', 'K2 x G3: `use crate::prelude::*;` from a child module, prelude at the root (f4e).', kind='lib',
+      root='#![no_std]\nmod prelude { pub use fxdep@ID@::*; }', inner='use crate::prelude::*;\n')
+ecell('e10', 'K2 x G4: the glob is EMITTED by a local macro in prelude.rs (g7).', kind='lib', root='#![no_std]\nmod prelude;', inner='use crate::prelude::*;\n',
+      files={'prelude.rs': 'macro_rules! reexp { () => { pub use fxdep@ID@::*; } }\nreexp!();\n'})
+ecell('e11', 'K2 x G5 macro_use extern crate, invocation in another file (g5).', kind='lib', root='#![no_std]\n#[macro_use] extern crate fxdep@ID@;', inner='')
+ecell('e12', 'K2 x G1 x `write` (gcore): expected E0659; no thread_local pair (no_std has none).', kind='lib', root='#![no_std]', dep=DEP_EMIT + DEP_WRITE,
+      inner='use fxdep@ID@::*;\n', pgo='pub fn p_go_@ID@() { write!(1) }\n', ctr='x')
+CELLS['e12']['extra']['inner.rs'] = CELLS['e12']['extra']['inner.rs'].replace(GATED.replace('@ID@', 'e12'), '')
+CELLS['e12']['probes'] = [('p_go_e12', 'e', None)]
+ecell('e13', 'K1 x G5 x `vec` at BODY position (neither L1 nor L3 reaches it).', kind='bin', inner='', root='#[macro_use] extern crate fxdep@ID@;',
+      dep=DEP_EMIT + '#[macro_export] macro_rules! vec { ($($t:tt)*) => { $crate::emit() } }\n',
+      pgo='pub fn p_go_@ID@() { let _ = vec![1]; }\n')
+ecell('e14', 'K3 (cfg_attr(not(feature = "std"), no_std)) x G1: default build compiles (dep\'s binds); --features std: E0659.', kind='lib',
+      root='#![cfg_attr(not(feature = "std"), no_std)]', inner=E1, features=['std'])
+ecell('e15', 'K4 (#![no_std] + #[macro_use] extern crate std;) x G1: a guess until built.', kind='lib',
+      root='#![no_std]\n#[macro_use] extern crate std;', inner=E1)
+ecell('e16', 'K2 x G7: a LOCAL thread_local macro defined above the invocation (its body is readable).', kind='lib', root='#![no_std]',
+      dep=DEP_EMIT, inner='macro_rules! thread_local { (static $n:ident : $t:ty = $e:expr ;) => { pub fn tl_touch() { fxdep@ID@::emit() } } }\n')
+ecell('e17', 'K1 x G1 of a crate that RE-EXPORTS std\'s own thread_local: same definition, no ambiguity, std\'s binds (pure).', kind='bin', inner=E1,
+      dep=DEP_EMIT + 'pub use std::thread_local;\n', pgo='std')
+
+# ---------------------------------------------------------------------------------------------------- F: cells that should NOT compile
+FD = 'F: '
+gcell('f1', 'use fxdepf1::mk;\nmod other;\nmod inner;\n', {'other.rs': EXP_P, 'inner.rs': 'pub fn go_f1() { crate::mk!() }\n'},
+      [('f1_e', 'e', 'inner::go_f1()')], FD + 'root `use dep::mk;` + an exported crate mk (e1): expected E0255.', dep=DEP_EMIT + DEP_MK_W)
+gcell('f2', 'mod other;\nmod inner;\n' + EXP_P, {'other.rs': 'macro_rules! defmk { () => { #[macro_export] macro_rules! mk { () => { @W@ } } } }\ndefmk!();\n',
+      'inner.rs': 'pub fn go_f2() { crate::mk!() }\n'}, [('f2_e', 'e', 'inner::go_f2()')],
+      FD + 'a source export beside an EMITTED export of the same name, lint allowed (e0428): expected E0428.')
+CELLS['f2']['main'] = '#![allow(macro_expanded_macro_exports_accessed_by_absolute_paths)]\n' + CELLS['f2']['main']
+gcell('f4', 'macro_rules! imp { () => { use fxdepf4::mk; } }\nimp!();\nmod other;\nmod inner;\n', {'other.rs': EXP_W, 'inner.rs': 'pub fn go_f4() { crate::mk!() }\n'},
+      [('f4_e', 'e', 'inner::go_f4()')], FD + 'LOCAL-macro-emitted root `use dep::mk;` beside an exported crate mk: expected E0255.', dep=DEP_EMIT + DEP_MK_P)
+gcell('f5', 'fxdepf5::imp!();\nmod other;\nmod inner;\n', {'other.rs': EXP_W, 'inner.rs': 'pub fn go_f5() { crate::mk!() }\n'},
+      [('f5_e', 'e', 'inner::go_f5()')], FD + 'DEPENDENCY-macro-emitted root `pub use $crate::mk;` beside an exported crate mk: expected E0255.',
+      dep=DEP_EMIT + DEP_MK_P + '#[macro_export] macro_rules! imp { () => { pub use $crate::mk; } }\n')
+gcell('f6', 'mod other;\nmod inner;\n', {'other.rs': EXP_W, 'inner.rs': '#[macro_use] extern crate fxdepf6;\npub fn go_f6() { crate::mk!() }\n'},
+      [('f6_e', 'e', 'inner::go_f6()')], FD + '`#[macro_use] extern crate dep;` inside a NON-root module: expected E0468.', dep=DEP_EMIT + DEP_MK_P)
+gcell('f7', 'pub(crate) use other::mk;\nmod other;\nmod inner;\n', {'other.rs': EXP_W + 'pub(crate) use mk;\n', 'inner.rs': 'pub fn go_f7() { crate::mk!() }\n'},
+      [('f7_e', 'e', 'inner::go_f7()')], FD + 'an exported crate mk AND `pub(crate) use other::mk;` at the root (the export re-imported in-module): E0255 or compiles-as-one?')
+gcell('f7b', 'pub(crate) use other::mk;\nmod other;\nmod inner;\n', {'other.rs': EXP_W, 'inner.rs': 'pub fn go_f7b() { crate::mk!() }\n'},
+      [('f7b_e', 'e', 'inner::go_f7b()')], FD + 'extra (not in the matrix): f7 WITHOUT the in-module `pub(crate) use mk;`: `other::mk` does not exist (export lives at the root).')
+
+
+def cargo_toml(name, deps, is_dep=False, edition='2021', features=None):
+    s = '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "%s"\n\n[dependencies]\n' % (name, edition)
     s += ''.join('%s = %s\n' % (k, v) for k, v in deps.items())
+    if features:
+        s += '\n[features]\n' + ''.join('%s = []\n' % f for f in features)
     if not is_dep:
         s += '\n[workspace]\n'
     return s
@@ -229,13 +501,18 @@ def render(out):
     for cid, c in sorted(CELLS.items()):
         d = os.path.join(out, 'fx', cid)
         os.makedirs(os.path.join(d, 'src'), exist_ok=True)
-        open(os.path.join(d, 'Cargo.toml'), 'w').write(cargo_toml('cf_' + cid, c['deps']))
+        open(os.path.join(d, 'Cargo.toml'), 'w').write(cargo_toml('cf_' + cid, c['deps'], edition=c.get('edition') or '2021', features=c.get('features')))
         decl = ''.join('pub fn %s() { %s; }\n' % (p, b if b.rstrip().endswith('}') and False else b) for p, k, b in c['probes'] if b is not None)
         arms = ''.join('        "%s" => %s(),\n' % (p, p) for p, _, _ in c['probes'])
         disp = 'fn main() {\n    match std::env::args().nth(1).unwrap().as_str() {\n%s        _ => panic!("unknown probe"),\n    }\n}\n' % arms
-        main = '#![allow(unused)]\n' + c['main'].replace('W;', W) + decl + disp
-        main = main.replace('{ W }', '{ ' + W + ' }')
-        open(os.path.join(d, 'src', 'main.rs'), 'w').write(main)
+        if c.get('lib'):
+            main = '#![allow(unused)]\n' + c['main'].replace('W;', W)
+            main = main.replace('{ W }', '{ ' + W + ' }')
+            open(os.path.join(d, 'src', 'lib.rs'), 'w').write(main)
+        else:
+            main = '#![allow(unused)]\n' + c['main'].replace('W;', W) + decl + disp
+            main = main.replace('{ W }', '{ ' + W + ' }')
+            open(os.path.join(d, 'src', 'main.rs'), 'w').write(main)
         for rel, txt in c['extra'].items():
             txt = txt.replace('{ W }', '{ ' + W + ' }')
             if rel.startswith('@dep/'):
@@ -246,9 +523,13 @@ def render(out):
                 open(os.path.join(d, dname, 'Cargo.toml'), 'w').write(cargo_toml(dname, {}, is_dep=True))
             else:
                 p = os.path.join(d, 'src', rel)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
                 open(p, 'w').write('#![allow(unused)]\n' + txt if rel.endswith('.rs') and False else txt)
         meta = dict(id=cid, lib=False, probes=[dict(name=p, kind=k) for p, k, _ in c['probes']], chain=c['chain'], note=c['note'],
                     deps=sorted(c['deps']))
+        for k in ('lib', 'edition', 'features', 'nocompile_ok'):
+            if c.get(k) and not (k == 'edition' and c[k] == '2021'):
+                meta[k] = c[k]
         open(os.path.join(d, 'cell.json'), 'w').write(json.dumps(meta, indent=1, sort_keys=True) + '\n')
         open(os.path.join(d, 'probes.txt'), 'w').write('\n'.join(p for p, _, _ in c['probes']) + '\n')
 

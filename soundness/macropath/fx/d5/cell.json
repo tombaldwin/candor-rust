@@ -1,0 +1,34 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d5",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, H1, R3 `pub use other::*;`.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d5_e"
+  },
+  {
+   "kind": "q",
+   "name": "d5_q"
+  },
+  {
+   "kind": "e",
+   "name": "d5_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d5_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d5_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d5_use_q"
+  }
+ ]
+}

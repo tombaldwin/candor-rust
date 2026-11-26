@@ -25,6 +25,7 @@ import fnmatch
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -182,9 +183,20 @@ def exec_truth(cs, scratch):
         w = os.path.join(scratch, 'work', cid)
         shutil.copytree(os.path.join(FX, cid), w)
 
-        def build(dirp, name):
-            p = subprocess.run(['cargo', 'build', '--offline', '-q'], cwd=dirp, capture_output=True, text=True, env=env)
+        def build(dirp, name, extra=()):
+            p = subprocess.run(['cargo', 'build', '--offline', '-q'] + list(extra), cwd=dirp, capture_output=True, text=True, env=env)
             return p
+
+        def failure(p):
+            """`NOCOMPILE(Exxxx)` for a cell whose meta says a rustc error is a RECORDED answer (macropath's must-not-compile cells), else
+            BUILD-FAIL (a broken fixture). A lint error has no code: the first `error:` line stands in."""
+            if not c.get('nocompile_ok'):
+                return 'BUILD-FAIL'
+            m = re.search(r'error\[(E\d+)\]', p.stderr)
+            if m:
+                return 'NOCOMPILE(%s)' % m.group(1)
+            m = re.search(r'^error: (.*)$', p.stderr, re.M)
+            return 'NOCOMPILE(%s)' % (m.group(1)[:60] if m else '?')
 
         runs = []   # (probe-name, binary-dir-name, bin crate name, argv probe)
         targets = [(w, 'cf_' + cid, [(p['name'], p['name']) for p in c['probes']])]
@@ -195,8 +207,23 @@ def exec_truth(cs, scratch):
             p = build(dirp, bname)
             if p.returncode != 0:
                 for pn, _ in probes:
-                    res[(cid, pn)] = 'BUILD-FAIL'
-                sys.stderr.write('BUILD FAIL %s\n%s\n' % (cid, p.stderr[-1500:]))
+                    res[(cid, pn)] = failure(p)
+                if not c.get('nocompile_ok'):
+                    sys.stderr.write('BUILD FAIL %s\n%s\n' % (cid, p.stderr[-1500:]))
+                else:
+                    sys.stderr.write('NOCOMPILE %s: %s\n' % (cid, res[(cid, probes[0][0])]))
+                if c.get('features'):
+                    for pn, _ in probes:
+                        res[(cid, pn + '+std')] = failure(p)
+                continue
+            if c.get('lib'):
+                # a lib cell is BUILD-ONLY: its ground truth is "compiles" (the dependency's binding minted the fn the probe calls)
+                for pn, _ in probes:
+                    res[(cid, pn)] = 'builds'
+                if c.get('features'):
+                    p2 = build(dirp, bname, ['--features', ','.join(c['features'])])
+                    for pn, _ in probes:
+                        res[(cid, pn + '+std')] = 'builds' if p2.returncode == 0 else failure(p2)
                 continue
             for pn, argv in probes:
                 mark = os.path.join(scratch, 'marks', '%s.%s' % (cid, pn))
@@ -209,7 +236,8 @@ def exec_truth(cs, scratch):
                 else:
                     res[(cid, pn)] = 'Fs' if os.path.exists(mark) else 'none'
         if ch and ch['kind'] == 'dep':
-            res[(cid, c['probes'][0]['name'] + '@chained')] = res.get((cid, c['probes'][0]['name']), '?')
+            for p_ in c['probes']:
+                res[(cid, p_['name'] + '@chained')] = res.get((cid, p_['name']), '?')
         if ch and ch['kind'] == 'cache-edit':
             # state A (pure, exec none) is the fixture as checked in; state B is the edit, built in a second copy
             w2 = w + '.B'
@@ -236,7 +264,7 @@ def load_expect():
     order = []
     if os.path.exists(EXPECT):
         for l in open(EXPECT):
-            if l.startswith('#') or not l.strip():
+            if l.startswith('#') or not l.strip() or l.startswith('cell\tprobe\t'):
                 continue
             p = l.rstrip('\n').split('\t')
             p += [''] * (len(COLS) - len(p))
@@ -279,7 +307,7 @@ def main():
                     r['exec'] = v
                 elif r.get('exec') and r['exec'] != v:
                     print('EXEC DIFF %s %s: expect %s, measured %s' % (cid, pn, r['exec'], v)); bad += 1
-                if v in ('BUILD-FAIL', 'RUN-FAIL'):
+                if v in ('BUILD-FAIL', 'RUN-FAIL'):  # NOCOMPILE(..) and `builds` are recorded answers
                     print('BROKEN FIXTURE %s %s: %s' % (cid, pn, v)); bad += 1
             if a.record:
                 save_expect(exp, order)

@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc2",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc2"
+ ],
+ "id": "c2",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R1 x H1 x EXP_W (b4x).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c2_e"
+  },
+  {
+   "kind": "q",
+   "name": "c2_q"
+  }
+ ]
+}

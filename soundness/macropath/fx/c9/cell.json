@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc9",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc9"
+ ],
+ "id": "c9",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: H7: local_inner_macros wrap!{mk!()} -> the crate's writer export (lim1).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c9_e"
+  },
+  {
+   "kind": "q",
+   "name": "c9_q"
+  }
+ ]
+}

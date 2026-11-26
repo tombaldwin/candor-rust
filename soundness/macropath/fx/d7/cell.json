@@ -1,0 +1,26 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d7",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: impl-item, H1, R0: method + UFCS.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d7_e"
+  },
+  {
+   "kind": "q",
+   "name": "d7_q"
+  },
+  {
+   "kind": "e",
+   "name": "d7_ufcs_e"
+  },
+  {
+   "kind": "q",
+   "name": "d7_ufcs_q"
+  }
+ ]
+}

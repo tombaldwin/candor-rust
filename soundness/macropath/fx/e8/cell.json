@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe8",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe8"
+ ],
+ "id": "e8",
+ "lib": true,
+ "nocompile_ok": true,
+ "note": "E: K2 (#![no_std] lib) x G2 (f4d).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "p_go_e8"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e8"
+  }
+ ]
+}

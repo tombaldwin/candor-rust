@@ -1,0 +1,6 @@
+d3_e
+d3_q
+d3_in_e
+d3_in_q
+d3_use_e
+d3_use_q

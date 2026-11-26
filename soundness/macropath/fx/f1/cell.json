@@ -1,0 +1,19 @@
+{
+ "chain": {
+  "dep_dir": "fxdepf1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepf1"
+ ],
+ "id": "f1",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "F: root `use dep::mk;` + an exported crate mk (e1): expected E0255.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f1_e"
+  }
+ ]
+}

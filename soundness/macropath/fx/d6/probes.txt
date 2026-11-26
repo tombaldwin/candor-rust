@@ -1,0 +1,6 @@
+d6_e
+d6_q
+d6_in_e
+d6_in_q
+d6_use_e
+d6_use_q

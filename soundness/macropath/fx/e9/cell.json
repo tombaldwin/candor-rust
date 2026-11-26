@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe9",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe9"
+ ],
+ "id": "e9",
+ "lib": true,
+ "nocompile_ok": true,
+ "note": "E: K2 x G3: `use crate::prelude::*;` from a child module, prelude at the root (f4e).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "p_go_e9"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e9"
+  }
+ ]
+}

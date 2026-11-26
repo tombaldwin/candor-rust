@@ -1,0 +1,18 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "c13",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: item cfg twins on the export itself (e3).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c13_e"
+  },
+  {
+   "kind": "q",
+   "name": "c13_q"
+  }
+ ]
+}

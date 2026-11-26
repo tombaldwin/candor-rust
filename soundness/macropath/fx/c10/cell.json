@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc10",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc10"
+ ],
+ "id": "c10",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R1 + R6: NON-exported writer re-exported by `pub(crate) use` (ru).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c10_e"
+  },
+  {
+   "kind": "q",
+   "name": "c10_q"
+  }
+ ]
+}

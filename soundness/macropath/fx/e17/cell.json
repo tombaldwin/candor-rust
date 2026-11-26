@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe17",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe17"
+ ],
+ "id": "e17",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: K1 x G1 of a crate that RE-EXPORTS std's own thread_local: same definition, no ambiguity, std's binds (pure).",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "e17_q"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e17"
+  }
+ ]
+}

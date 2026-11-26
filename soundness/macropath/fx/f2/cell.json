@@ -1,0 +1,14 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "f2",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "F: a source export beside an EMITTED export of the same name, lint allowed (e0428): expected E0428.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f2_e"
+  }
+ ]
+}

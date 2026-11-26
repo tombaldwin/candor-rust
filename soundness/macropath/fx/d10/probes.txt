@@ -1,0 +1,6 @@
+d10_e
+d10_q
+d10_in_e
+d10_in_q
+d10_use_e
+d10_use_q

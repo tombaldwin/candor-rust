@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc8",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc8"
+ ],
+ "id": "c8",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R1 x H4: the call sits in a ROOT fn of main.rs, no inner call.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c8_e"
+  },
+  {
+   "kind": "q",
+   "name": "c8_q"
+  }
+ ]
+}

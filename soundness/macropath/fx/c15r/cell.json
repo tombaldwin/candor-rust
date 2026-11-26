@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc15r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc15r"
+ ],
+ "id": "c15r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: bodies swapped (b1r): the dependency's mk is PURE, the textual-only local mk writes.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c15r_e"
+  },
+  {
+   "kind": "q",
+   "name": "c15r_q"
+  }
+ ]
+}

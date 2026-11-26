@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc3",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc3"
+ ],
+ "id": "c3",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R2 (dep has a PURE mk) x H1 x EXP_W (b4w).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c3_e"
+  },
+  {
+   "kind": "q",
+   "name": "c3_q"
+  }
+ ]
+}

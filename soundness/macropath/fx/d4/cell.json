@@ -1,0 +1,34 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d4",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, H3 (super::mkfn!), R0.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d4_e"
+  },
+  {
+   "kind": "q",
+   "name": "d4_q"
+  },
+  {
+   "kind": "e",
+   "name": "d4_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d4_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d4_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d4_use_q"
+  }
+ ]
+}

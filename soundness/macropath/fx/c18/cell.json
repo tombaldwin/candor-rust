@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc18",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc18"
+ ],
+ "id": "c18",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R1 + `#[macro_use] extern crate dep` (pure mk) beside the crate's writer export: crate::mk is the export.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c18_e"
+  },
+  {
+   "kind": "q",
+   "name": "c18_q"
+  }
+ ]
+}

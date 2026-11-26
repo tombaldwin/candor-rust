@@ -1,0 +1,8 @@
+[package]
+name = "cf_f2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[workspace]

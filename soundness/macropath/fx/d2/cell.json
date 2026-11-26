@@ -1,0 +1,39 @@
+{
+ "chain": {
+  "dep_dir": "fxdepd2",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepd2"
+ ],
+ "id": "d2",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, H1, R1, MKFN_W.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d2_e"
+  },
+  {
+   "kind": "q",
+   "name": "d2_q"
+  },
+  {
+   "kind": "e",
+   "name": "d2_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d2_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d2_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d2_use_q"
+  }
+ ]
+}

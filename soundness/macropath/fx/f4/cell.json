@@ -1,0 +1,19 @@
+{
+ "chain": {
+  "dep_dir": "fxdepf4",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepf4"
+ ],
+ "id": "f4",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "F: LOCAL-macro-emitted root `use dep::mk;` beside an exported crate mk: expected E0255.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f4_e"
+  }
+ ]
+}

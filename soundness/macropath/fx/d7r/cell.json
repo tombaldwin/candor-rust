@@ -1,0 +1,31 @@
+{
+ "chain": {
+  "dep_dir": "fxdepd7r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepd7r"
+ ],
+ "id": "d7r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: impl-item, H1, R2w-shaped: the dependency's mkm writes, the crate's same-named export is PURE.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d7r_e"
+  },
+  {
+   "kind": "q",
+   "name": "d7r_q"
+  },
+  {
+   "kind": "e",
+   "name": "d7r_ufcs_e"
+  },
+  {
+   "kind": "q",
+   "name": "d7r_ufcs_q"
+  }
+ ]
+}

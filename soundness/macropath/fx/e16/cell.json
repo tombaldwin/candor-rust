@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe16",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe16"
+ ],
+ "id": "e16",
+ "lib": true,
+ "nocompile_ok": true,
+ "note": "E: K2 x G7: a LOCAL thread_local macro defined above the invocation (its body is readable).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "p_go_e16"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e16"
+  }
+ ]
+}

@@ -1,0 +1,9 @@
+[package]
+name = "cf_c8"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdepc8 = { path = "fxdepc8" }
+
+[workspace]

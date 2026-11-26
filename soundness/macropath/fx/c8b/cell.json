@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc8b",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc8b"
+ ],
+ "id": "c8b",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R1 x H5 (super::super::mk! from inner::deep).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c8b_e"
+  },
+  {
+   "kind": "q",
+   "name": "c8b_q"
+  }
+ ]
+}

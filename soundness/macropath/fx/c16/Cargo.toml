@@ -1,0 +1,9 @@
+[package]
+name = "cf_c16"
+version = "0.1.0"
+edition = "2015"
+
+[dependencies]
+fxdepc16 = { path = "fxdepc16" }
+
+[workspace]

@@ -1,0 +1,19 @@
+{
+ "chain": {
+  "dep_dir": "fxdepf5",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepf5"
+ ],
+ "id": "f5",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "F: DEPENDENCY-macro-emitted root `pub use $crate::mk;` beside an exported crate mk: expected E0255.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f5_e"
+  }
+ ]
+}

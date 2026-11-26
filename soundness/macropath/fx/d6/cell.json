@@ -1,0 +1,34 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d6",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, H1, R6: non-exported macros re-exported by `pub(crate) use`.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d6_e"
+  },
+  {
+   "kind": "q",
+   "name": "d6_q"
+  },
+  {
+   "kind": "e",
+   "name": "d6_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d6_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d6_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d6_use_q"
+  }
+ ]
+}

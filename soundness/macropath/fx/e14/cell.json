@@ -1,0 +1,26 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe14",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe14"
+ ],
+ "features": [
+  "std"
+ ],
+ "id": "e14",
+ "lib": true,
+ "nocompile_ok": true,
+ "note": "E: K3 (cfg_attr(not(feature = \"std\"), no_std)) x G1: default build compiles (dep's binds); --features std: E0659.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "p_go_e14"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e14"
+  }
+ ]
+}

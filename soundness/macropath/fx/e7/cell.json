@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepe7",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepe7"
+ ],
+ "id": "e7",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "E: K1 x G9: `use dep::*;` inside an inline `mod x {}` of the invoking FILE (imports do not leak out of x): std's binds, pure.",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "e7_q"
+  },
+  {
+   "kind": "g",
+   "name": "gated_e7"
+  }
+ ]
+}

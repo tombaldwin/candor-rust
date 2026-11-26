@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc17",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc17"
+ ],
+ "id": "c17",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R0; `dep::wrap!()` expands `$crate::mk!()` of the DEPENDENCY (pure) while a same-named local mk writes: must NOT charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c17_e"
+  },
+  {
+   "kind": "q",
+   "name": "c17_q"
+  }
+ ]
+}

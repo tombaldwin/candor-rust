@@ -1,0 +1,9 @@
+[package]
+name = "cf_c9c"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdepc9c = { path = "fxdepc9c" }
+
+[workspace]

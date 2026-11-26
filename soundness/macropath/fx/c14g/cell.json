@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc14g",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc14g"
+ ],
+ "id": "c14g",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: as c14 with the R1 glob (fbg).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c14g_e"
+  },
+  {
+   "kind": "q",
+   "name": "c14g_q"
+  }
+ ]
+}

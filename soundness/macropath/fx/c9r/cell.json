@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc9r",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc9r"
+ ],
+ "id": "c9r",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: H7: local_inner_macros -> the crate's PURE export; the dependency's mk writes.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c9r_e"
+  },
+  {
+   "kind": "q",
+   "name": "c9r_q"
+  }
+ ]
+}

@@ -1,0 +1,19 @@
+{
+ "chain": {
+  "dep_dir": "fxdepf6",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepf6"
+ ],
+ "id": "f6",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "F: `#[macro_use] extern crate dep;` inside a NON-root module: expected E0468.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "f6_e"
+  }
+ ]
+}

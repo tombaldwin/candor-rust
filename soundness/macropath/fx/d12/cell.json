@@ -1,0 +1,31 @@
+{
+ "chain": {
+  "dep_dir": "fxdepd12",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepd12"
+ ],
+ "id": "d12",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, `self::mk!` whose only binding is the glob chain to the DEPENDENCY (g1d); a pure root export of the same name sits elsewhere (and one for the twin's `mknop`, so both spellings have a same-leaf local macro).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d12_e"
+  },
+  {
+   "kind": "q",
+   "name": "d12_q"
+  },
+  {
+   "kind": "e",
+   "name": "d12_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d12_in_q"
+  }
+ ]
+}

@@ -1,0 +1,34 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d9",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, H1, R0: ITEM cfg twins on the macro (writer on unix, pure otherwise).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d9_e"
+  },
+  {
+   "kind": "q",
+   "name": "d9_q"
+  },
+  {
+   "kind": "e",
+   "name": "d9_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d9_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d9_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d9_use_q"
+  }
+ ]
+}

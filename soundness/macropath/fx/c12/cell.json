@@ -1,0 +1,18 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "c12",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: ANCESTOR cfg twins: `#[cfg(unix)] mod other` (writer) / `#[cfg(not(unix))] mod other_p` (pure export).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c12_e"
+  },
+  {
+   "kind": "q",
+   "name": "c12_q"
+  }
+ ]
+}

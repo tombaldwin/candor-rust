@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc5",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc5"
+ ],
+ "id": "c5",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R4 prelude glob x H1 x EXP_W.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c5_e"
+  },
+  {
+   "kind": "q",
+   "name": "c5_q"
+  }
+ ]
+}

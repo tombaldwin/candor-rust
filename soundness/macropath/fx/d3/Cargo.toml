@@ -1,0 +1,9 @@
+[package]
+name = "cf_d3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdepd3 = { path = "fxdepd3" }
+
+[workspace]

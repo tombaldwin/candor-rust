@@ -1,0 +1,34 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "d10",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "D: item, H1: the INVOCATION is cfg-gated, with a pure fn on the other arm.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "d10_e"
+  },
+  {
+   "kind": "q",
+   "name": "d10_q"
+  },
+  {
+   "kind": "e",
+   "name": "d10_in_e"
+  },
+  {
+   "kind": "q",
+   "name": "d10_in_q"
+  },
+  {
+   "kind": "e",
+   "name": "d10_use_e"
+  },
+  {
+   "kind": "q",
+   "name": "d10_use_q"
+  }
+ ]
+}

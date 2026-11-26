@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc4",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc4"
+ ],
+ "id": "c4",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R3 `pub use other::*;` x H1 x EXP_W (b4z). Dep present only so the chained arm can be run.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c4_e"
+  },
+  {
+   "kind": "q",
+   "name": "c4_q"
+  }
+ ]
+}

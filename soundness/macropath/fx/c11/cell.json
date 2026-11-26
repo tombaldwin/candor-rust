@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepc11",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepc11"
+ ],
+ "id": "c11",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "C: R1 + allow-lint: the exports are EMITTED by a local macro (e2g).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "c11_e"
+  },
+  {
+   "kind": "q",
+   "name": "c11_q"
+  }
+ ]
+}

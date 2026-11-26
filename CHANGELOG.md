@@ -11,6 +11,7 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **Lane rust-macropath-matrix: the macro-path attack matrix groups C to F as executed fixtures (tests only, no engine change).** `soundness/macropath/gen.py` renders 65 more cells (C body position, D item / impl-item / trait-item, E toolchain names by crate kind, F must-not-compile) with executed ground truth and the readings of v0.43.0 and of main 56c3361a recorded in `expect.tsv` (`cand` empty). `run.py --live` shows whether each chained cell's join is live on an arm; the cfg-twin runner records a rustc error as `NOCOMPILE(Exxxx)` and a no_std lib as `builds`. The `main` column of the 29 earlier L1(a) / R1911 rows was refreshed from the pre-lane main to 56c3361a.
 - ⚠ **Lane rust-l1b-r1911: a dependency EXPRESSION macro keeps its `invisible` disclosure when the dependency's report is chained (SOUNDNESS R1911, adds a disclosure).**
   `D::mk!()` / `use D::mk; mk!()` whose `macro_rules!` expansion calls D's effectful fn read `[]` with `invisible:[D]` scanned alone and
   were ABSENT, with no `coverage.uncovered` and "nothing hidden", once D's real report was chained: a macro is not a unit of the report,
