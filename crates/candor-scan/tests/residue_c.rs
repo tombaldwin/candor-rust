@@ -54,8 +54,7 @@ fn scan_env(dir: &Path, env: &[(&str, &str)]) -> Rows {
     let out = work.join("out");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_candor-scan"));
     cmd.arg(dir.to_string_lossy().as_ref()).arg("--out").arg(out.join("r"));
-    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1846_OFF", "CANDOR_R1850_OFF", "CANDOR_R1853_OFF",
-              "CANDOR_R1860_OFF", "CANDOR_R1902_OFF", "CANDOR_R1906_OFF", "CANDOR_R1908_OFF"] {
+    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY", "CANDOR_R1853_OFF", "CANDOR_R1902_OFF", "CANDOR_R1908_OFF"] {
         cmd.env_remove(k);
     }
     for (k, v) in env {
@@ -145,9 +144,7 @@ fn r1846_self_member_of_a_supertrait_in_a_default_body() {
     // the reason is the default body's own (`unknownWhy` is per function and direct)
     assert!(r.get("Cl::cl_mk").is_some_and(|(_, w)| w.iter().any(|x| x == "dispatch:Cl.try_from")), "{:?}", r.get("Cl::cl_mk"));
     assert!(!has(&r, "q_qa_pure", "Fs") && !has(&r, "q_qa_pure", "Unknown"), "pure supertrait member: {:?}", r.get("q_qa_pure"));
-    // the switch restores the old (silent) reading — the fixture reaches the change
-    let off = scan_env(&crate_with("r1846-off", &[], &[("src/main.rs", R1846)]), &[("CANDOR_R1846_OFF", "1")]);
-    assert!(pure(&off, "p_qa_path") && pure(&off, "p_create_path"), "{:?} {:?}", off.get("p_qa_path"), off.get("p_create_path"));
+    // (additive: no kill switch; v0.43.0 and main read p_qa_path and p_create_path ABSENT on these bytes)
 }
 
 const R1853: &str = r#"#![allow(unused)]
@@ -289,8 +286,8 @@ fn r1859_r1860_r1902_self_on_a_std_type_reads_the_crates_member() {
     }
     assert!(has(&r, "p_c_go", "Fs"), "std's inherent File::create still runs: {:?}", r.get("p_c_go"));
     // second fixture written first: the switch restores the fabrication, so the fixture reaches the change
-    let off = scan_env(&crate_with("stdself-off", &[], &[("src/main.rs", STDSELF)]), &[("CANDOR_R1902_OFF", "1"), ("CANDOR_R1860_OFF", "1")]);
-    assert!(has(&off, "q_g_pure", "Fs") && !has(&off, "p_s3", "Env"), "{:?} {:?}", off.get("q_g_pure"), off.get("p_s3"));
+    let off = scan_env(&crate_with("stdself-off", &[], &[("src/main.rs", STDSELF)]), &[("CANDOR_R1902_OFF", "1")]);
+    assert!(has(&off, "q_g_pure", "Fs"), "{:?}", off.get("q_g_pure"));
 }
 
 fn cfgtwin(cell: &str) -> PathBuf {
@@ -305,8 +302,7 @@ fn r1906_arm_cover_runs_without_a_local_macro() {
     assert!(has(&r, "n1_e", "Unknown"), "{:?}", r.get("n1_e"));
     let r = scan(&cfgtwin("n2"));
     assert!(has(&r, "pure_n2::go_n2", "Unknown") || r.iter().any(|(k, v)| k.ends_with("go_n2") && v.0.iter().any(|e| e == "Unknown")), "{r:?}");
-    let off = scan_env(&cfgtwin("n1"), &[("CANDOR_R1906_OFF", "1")]);
-    assert!(!has(&off, "n1_e", "Unknown"), "{:?}", off.get("n1_e"));
+    // (additive: no kill switch; n1_e reads `-` on v0.43.0 and main, recorded in soundness/cfgtwin/expect.tsv)
 }
 
 /// R1908 — a glob of a module this file declares cannot rebind `thread_local!`, so the hand-written gated pair beside it is not
@@ -327,4 +323,52 @@ fn r1908_local_glob_does_not_rebind_a_toolchain_macro() {
     ]);
     let r = scan(&d);
     assert!(has(&r, "p_gated", "Unknown"), "re-exported through the globbed module: {:?}", r.get("p_gated"));
+}
+
+const MK_EFF: &str = "pub fn emit() { ::std::fs::write(::std::env::var(\"MARK\").unwrap(), b\"x\").unwrap(); }\n\
+    #[macro_export] macro_rules! mk { ($n:ident) => { pub fn $n() { $crate::emit() } } }\n";
+const MK_PURE: &str = "#[macro_export] macro_rules! mk { ($n:ident) => { pub fn $n() {} } }\n";
+
+/// R1853, Fable's merge review D1 — `crate::mk!` reaches what the crate ROOT's namespace holds: here a `use dep::mk;`, not the
+/// crate's textual-scope-only `macro_rules! mk` in another file. f3c2 (the dependency's `mk` writes; executed): main read
+/// `Unknown[macro:module items hidden …]`, the first cut read ABSENT. f3crev2 (bodies swapped; executed pure): the first cut
+/// charged `Env,Fs`. The path now binds only a `#[macro_export]` definition no `use` in the crate names.
+#[test]
+fn r1853_a_path_binds_only_what_rustc_reaches_through_it() {
+    let f = |dep: &str, local: &str, tag: &str| {
+        crate_with(tag, &[("fxdepmk", dep)], &[
+            ("src/main.rs", "#![allow(unused)]\nuse fxdepmk::mk;\nmod other;\nmod inner;\npub fn p_go() { inner::go() }\nfn main() {}\n"),
+            ("src/other.rs", &format!("macro_rules! mk {{ ($n:ident) => {{ pub fn $n() {{ {local} }} }} }}\nmk!{{ x_other }}\npub fn p_other() {{ x_other() }}\n")),
+            ("src/inner.rs", "crate::mk!{ go }\npub fn p_inner() { go() }\n"),
+        ])
+    };
+    let r = scan(&f(MK_EFF, "", "f3c2"));
+    assert!(has(&r, "p_go", "Unknown"), "f3c2 keeps main's hold over the dependency's write: {:?}", r.get("p_go"));
+    let r = scan(&f(MK_PURE, "::std::fs::write(\"m\", b\"x\").unwrap();", "f3crev2"));
+    assert!(!has(&r, "p_go", "Fs") && !has(&r, "inner::go", "Fs"), "f3crev2 must not charge the local body: {:?}", r.get("p_go"));
+}
+
+/// R1908, Fable's merge review D2 — a local glob of an OUT-OF-LINE module whose body is `pub use dep::*;` may bring the dependency's
+/// `thread_local!` (`#![no_std]`): the hand-written gated pair keeps main's hold (f4d). Controls: the inline module (f4c), and
+/// the `crate::`-rooted glob (f4e, never held before; held now by the same crate-wide record).
+#[test]
+fn r1908_a_dependency_glob_reexported_by_a_local_module_still_rebinds() {
+    let dep = "pub fn emit() { ::std::fs::write(::std::env::var(\"MARK\").unwrap(), b\"x\").unwrap(); }\n\
+        #[macro_export] macro_rules! thread_local { (static $n:ident : $t:ty = $e:expr ;) => { pub fn tl_touch() { $crate::emit() } } }\n";
+    let body = |decl: &str, glob: &str| format!("#![no_std]\n#![allow(unused)]\nmacro_rules! unrelated {{ () => {{}} }}\n{decl}\n{glob}\n\
+        thread_local! {{ static X: u8 = 0; }}\npub fn p_tl() {{ tl_touch() }}\n\
+        #[cfg(unix)] pub fn gated() {{ fxdepf4::emit() }}\n#[cfg(not(unix))] pub fn gated() {{}}\npub fn p_gated() {{ gated() }}\n");
+    for (tag, decl, glob, prelude) in [
+        ("f4d", "pub mod prelude;", "use prelude::*;", Some("pub use fxdepf4::*;\n")),
+        ("f4c", "pub mod prelude { pub use fxdepf4::*; }", "use prelude::*;", None),
+        ("f4e", "pub mod prelude;", "use crate::prelude::*;", Some("pub use fxdepf4::*;\n")),
+    ] {
+        let lib = body(decl, glob);
+        let mut files: Vec<(&str, &str)> = vec![("src/lib.rs", lib.as_str())];
+        if let Some(p) = prelude {
+            files.push(("src/prelude.rs", p));
+        }
+        let r = scan(&crate_with(tag, &[("fxdepf4", dep)], &files));
+        assert!(has(&r, "gated", "Unknown"), "{tag}: the cfg-arm hold stays: {:?}", r.get("gated"));
+    }
 }

@@ -19,7 +19,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
     every local implementor of the trait, disclosed `dispatch:<Trait>.<m>` when the trait is `pub` (a downstream implementor is
     out of sight). `<Self as Sup>::m` for a REQUIRED supertrait member, which also read ABSENT, now dispatches.
   - R1853 (a resolution): a PATH invocation of the crate's own macro (`crate::m!`, `self::m!`, `super::m!`, `$crate::m!`) at item,
-    impl-item and body position is expanded like the bare spelling, so the fns and impls it writes are units. It stays hidden text
+    impl-item and body position is expanded like the bare spelling, so the fns and impls it writes are units. It binds only what
+    rustc reaches through the path: the crate's one `#[macro_export]` definition of the name, where no `use` in the crate names it
+    (a root `use dep::m;` beside a textual-scope `macro_rules! m` elsewhere is the dependency's). It stays hidden text
     beside its expansion, and it is NOT expanded inside a `#[cfg]` arm (a gated module/impl, or a file declared as one), at
     trait-item position, or where the expansion is itself gated: there the produced twin reads silent on the bare spelling too.
   - R1850 (a resolution, plus one disclosure): `Self::m` in an impl whose self type is a dependency path that two globs, or a
@@ -31,9 +33,9 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
     path the classifier charged by prefix. A pure own member no longer reads `Fs`; a sibling's `Env` is no longer lost.
   - R1906 (adds `Unknown`): the hand-written cfg-arm cover now runs in a crate that defines no `macro_rules!`.
   - R1908 (removes an over-hold): a glob of a module or item the file declares no longer rebinds a toolchain macro name
-    (`thread_local!`) unless the crate re-exports a macro of that name; a dependency glob still does.
-  - Kill switches `CANDOR_R1846_OFF`, `CANDOR_R1850_OFF`, `CANDOR_R1853_OFF`, `CANDOR_R1860_OFF`, `CANDOR_R1902_OFF`,
-    `CANDOR_R1906_OFF`, `CANDOR_R1908_OFF`. Cache rev 223. The cfg-twin matrix gains section N (`n1`–`n3d`).
+    (`thread_local!`) unless the crate re-exports a macro of that name or holds a dependency glob anywhere (a `mod prelude;`
+    whose body is `pub use dep::*;`); a dependency glob still does. A `crate::`-rooted glob is held by the same record now.
+  - Kill switches for the non-additive pieces only: `CANDOR_R1853_OFF`, `CANDOR_R1902_OFF`, `CANDOR_R1908_OFF`. Cache rev 223. The cfg-twin matrix gains section N (`n1`–`n3d`).
 
 - ⚠ **cfg-twin cover, lane B (SOUNDNESS R1863, R1855, R1898).** Three one-rule closings of the same hidden-twin family.
   - R1863 (a resolution): where a hidden `#[cfg]` impl overrides a trait member that the visible own-cfg impl inherits, the

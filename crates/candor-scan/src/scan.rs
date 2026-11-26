@@ -1792,11 +1792,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // invocation of a macro defined in ANOTHER file (`#[macro_use] mod mac;`) is expanded like a same-file
     // one (`mbe::CrateMacros`). Read from every walked file that names `macro_rules`, cached or not: a warm
     // file's expansion depends on these bytes, so their digest joins every file's key below.
-    let xmacros: crate::mbe::CrateMacros = crate::mbe::merge_crate_macros(
-        paths
-            .par_iter()
-            .filter_map(|(p, _)| {
-                let text = std::fs::read_to_string(p).ok()?;
+    // SOUNDNESS R1853 — beside it, every identifier any file's `use` statement names (`mbe::use_words`), so a path invocation is
+    // never bound where a `use` may put another crate's macro under that name (Fable's merge review D1, f3c2/f3crev2).
+    type FileMacros = (Vec<(String, Option<String>)>, Vec<String>);
+    let per_file: Vec<FileMacros> = paths
+        .par_iter()
+        .filter_map(|(p, _)| {
+            let text = std::fs::read_to_string(p).ok()?;
+            let words = if candor_report::env::switch("CANDOR_R1853_OFF") { Vec::new() } else { crate::mbe::use_words(&text) };
+            let v = (|| {
                 // SOUNDNESS R1908 — and every toolchain macro name a `use` re-binds, so a crate-local glob of that module
                 // still shadows it (`mbe::tc_reexport_key`).
                 let defs = text.contains("macro_rules");
@@ -1810,9 +1814,13 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     v.extend(crate::mbe::file_tc_reexports(&file.items));
                 }
                 Some(v)
-            })
-            .collect::<Vec<_>>(),
-    );
+            })()
+            .unwrap_or_default();
+            Some((v, words))
+        })
+        .collect();
+    let mut xmacros: crate::mbe::CrateMacros = crate::mbe::merge_crate_macros(per_file.iter().map(|(v, _)| v.clone()));
+    crate::mbe::note_use_words(&mut xmacros, per_file.iter().flat_map(|(_, w)| w.iter()));
     let xmacros_key = (!xmacros.is_empty()).then(|| crate::mbe::crate_macros_digest(&xmacros));
     // SOUNDNESS R1154 — the package's own library name, as its bins/examples/tests spell it (`mylib::f()`). Not
     // when a manifest dependency carries the same name: then the head is ambiguous and today's reading stands.
@@ -1878,7 +1886,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         if text.contains("pin_project") || text.contains("link!") {
             crate::lang::splice_pin_project(&mut file.items); // R988, R960
         }
-        if splice_gate(&text, &xmacros, claims) {
+        if splice_gate(&text, claims) {
             let _arm = crate::mbe::ArmFileScope::enter(arm_files.contains(rel)); // R1853
             crate::mbe::splice_local_macros_with(&mut file.items, &xmacros, claims); // R1004
         }
@@ -3078,7 +3086,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         crate::lang::splice_pin_project(&mut f.items); // R988, R960 — the round-2 twin
                     }
                     let claims = claims_of(rel); // cfg-twin lane A — the claims its cached decls were derived under
-                    if splice_gate(&t, &xmacros, claims) {
+                    if splice_gate(&t, claims) {
                         let _arm = crate::mbe::ArmFileScope::enter(arm_files.contains(*rel)); // R1853 — the round-2 twin
                         crate::mbe::splice_local_macros_with(&mut f.items, &xmacros, claims); // R1004 — the round-2 twin
                     }
@@ -13500,13 +13508,10 @@ pub(crate) fn arm_set_off() -> bool {
 /// the cfg-arm cover (`mark_hidden_twins`, `mark_module_twins`, the out-of-line `F` record), so it must run wherever an arm can
 /// hide a twin. SOUNDNESS R1906 — that is any file with an invocation: before, a crate defining no `macro_rules!` never ran
 /// it, so `#[cfg(unix)] mod m { dep::wfn! { pub fn go(); } } #[cfg(not(unix))] mod m { pub fn go() {} }` read `m::go` pure
-/// over an executed write. `CANDOR_R1906_OFF=1` restores the old gate.
-fn splice_gate(text: &str, xmacros: &crate::mbe::CrateMacros, claims: &crate::mbe::ArmClaims) -> bool {
+/// over an executed write. Additive (it can only run the cover where it did not run), so no kill switch.
+fn splice_gate(text: &str, claims: &crate::mbe::ArmClaims) -> bool {
     if text.contains("macro_rules") || !claims.is_empty() {
         return true;
-    }
-    if candor_report::env::switch("CANDOR_R1906_OFF") {
-        return !xmacros.is_empty() && text.contains('!');
     }
     text.contains('!')
 }

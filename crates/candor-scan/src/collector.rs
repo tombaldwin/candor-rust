@@ -12117,7 +12117,7 @@ impl<'a> CallCollector<'a> {
     ///   std supertrait is in its closure (no key can name a std member, R1347), or the implementor set is empty or past the CHA
     ///   bound — the site is disclosed, `dispatch:<tr>.<m>`.
     ///
-    /// Returns false (nothing done) outside that shape. `CANDOR_R1846_OFF=1`.
+    /// Returns false (nothing done) outside that shape. Additive (an edge, a key or a disclosure), so no kill switch.
     fn r1846_super_member(
         &mut self,
         p: &syn::ExprPath,
@@ -12127,7 +12127,7 @@ impl<'a> CallCollector<'a> {
         args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
         targets: &mut Vec<(String, Option<String>)>,
     ) -> bool {
-        if candor_report::env::switch("CANDOR_R1846_OFF") || self.trait_self.as_deref() != Some(tr) || p.qself.is_some() {
+        if self.trait_self.as_deref() != Some(tr) || p.qself.is_some() {
             return false;
         }
         let Some(lt) = self.local_traits.get(tr) else { return false };
@@ -12243,10 +12243,9 @@ impl<'a> CallCollector<'a> {
             // SOUNDNESS R1846 — `<Self as Sup>::m` in a trait's DEFAULT body names the unknown implementor through ANY trait it
             // implements (a supertrait here), not only the enclosing one: read as a concrete type, it formed `Tr::m` and a
             // REQUIRED supertrait member (`<Self as VTab>::connect`) read ABSENT over an executed write.
-            let r1846 = !candor_report::env::switch("CANDOR_R1846_OFF");
             let unnamed = projection || qid.as_deref().is_some_and(|i| {
                 generic(self, i).is_some()
-                    || (i == "Self" && (self.trait_self.as_deref() == Some(tr.as_str()) || (r1846 && self.trait_self.is_some())))
+                    || (i == "Self" && (self.trait_self.as_deref() == Some(tr.as_str()) || self.trait_self.is_some()))
             });
             let concrete = if unnamed {
                 None
@@ -12730,11 +12729,8 @@ impl<'a> CallCollector<'a> {
     /// SOUNDNESS R1860 — does ANOTHER trait impl the crate wrote for this std type (keyed by its leaf) declare member `m`?
     /// `impl Sb for File { fn sib() }` beside `impl Sa for File { fn s3() { Self::sib() } }`: Rust resolves `Self::sib` (no
     /// inherent `sib`) to that impl's member, and mode S's own-member list held only THIS impl's names, so the std path alone
-    /// was read and a sibling's `Env` was lost behind the classifier's `std::fs` prefix. `CANDOR_R1860_OFF=1`.
+    /// was read and a sibling's `Env` was lost behind the classifier's `std::fs` prefix.
     fn r1860_sibling_declares(&self, leaf: &str, m: &str) -> bool {
-        if candor_report::env::switch("CANDOR_R1860_OFF") {
-            return false;
-        }
         let tail = format!("\u{1f}{leaf}\u{1f}{m}");
         self.impl_members.iter().any(|k| k.ends_with(&tail) && k.matches('\u{1f}').count() == 2)
     }
@@ -14448,7 +14444,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     // keeps the written path, so `Self::m` is `d::Lone::m`, and it gets the same candidates the
                                     // written spelling `d::Lone::m(..)` gets here; where only a crate-local glob can supply the
                                     // head, the site is disclosed. Before, every such `Self::m` read pure over a write.
-                                    if written.starts_with("Self::") && extras.is_empty() && !candor_report::env::switch("CANDOR_R1850_OFF") {
+                                    if written.starts_with("Self::") && extras.is_empty() {
                                         let g = self.glob_extra_candidates(&e);
                                         if !g.is_empty() {
                                             extras.extend(g);

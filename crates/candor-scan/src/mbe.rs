@@ -610,6 +610,11 @@ pub(crate) fn file_macro_defs(items: &[syn::Item]) -> Vec<(String, Option<String
                 syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => {
                     if let Some(n) = &m.ident {
                         v.push((format!("{ALL_BODIES_KEY}{n}"), Some(m.mac.tokens.to_string())));
+                        // SOUNDNESS R1853 — `#[macro_export]` puts the definition in the crate ROOT's namespace, which is where
+                        // a `crate::n!` / `$crate::n!` path looks; a textual-scope-only definition is not reachable by path.
+                        if m.attrs.iter().any(|a| a.path().is_ident("macro_export")) {
+                            v.push((export_key(&n.to_string()), None));
+                        }
                     }
                 }
                 syn::Item::Mod(md) => {
@@ -834,6 +839,57 @@ fn non_toolchain_imports(items: &[syn::Item]) -> std::collections::HashSet<Strin
     out
 }
 
+/// SOUNDNESS R1853 — the crate-table key recording that some file defines `macro_rules! n` under `#[macro_export]`.
+pub(crate) fn export_key(n: &str) -> String {
+    format!("\u{1}export:{n}")
+}
+
+/// SOUNDNESS R1853 — the crate-table key recording that some file's `use` statement names `n` (any root, any position).
+fn use_word_key(n: &str) -> String {
+    format!("\u{1}useword:{n}")
+}
+
+/// SOUNDNESS R1853 — every identifier inside this file's `use … ;` statements, read from TEXT (no parse). An over-approximation
+/// by construction: a name merely mentioned in some `use` refuses a path binding (`local_path_name`), which keeps main's reading.
+pub(crate) fn use_words(text: &str) -> Vec<String> {
+    let b = text.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = std::collections::BTreeSet::new();
+    let mut i = 0;
+    while let Some(off) = text[i..].find("use") {
+        let at = i + off;
+        i = at + 3;
+        if (at > 0 && word(b[at - 1])) || b.get(at + 3).is_some_and(|c| word(*c)) {
+            continue;
+        }
+        let end = text[at..].find(';').map(|e| at + e).unwrap_or(text.len());
+        let stmt = &text[at + 3..end];
+        let mut cur = String::new();
+        for c in stmt.chars().chain(std::iter::once(' ')) {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                cur.push(c);
+            } else if !cur.is_empty() {
+                out.insert(std::mem::take(&mut cur));
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// SOUNDNESS R1853 — record, for every `#[macro_export]` name the table holds, whether any file's `use` names it.
+pub(crate) fn note_use_words<'a>(t: &mut CrateMacros, words: impl Iterator<Item = &'a String>) {
+    let exported: std::collections::HashSet<String> =
+        t.keys().filter_map(|k| k.strip_prefix("\u{1}export:").map(str::to_string)).collect();
+    if exported.is_empty() {
+        return;
+    }
+    for w in words {
+        if exported.contains(w) {
+            t.insert(use_word_key(w), None);
+        }
+    }
+}
+
 /// SOUNDNESS R1908 — the crate-table key recording that SOME file of the crate binds the toolchain macro name `n` through a
 /// `use` not rooted at the toolchain (`pub use dep::thread_local;` in a module another file globs). No macro name begins
 /// with a control character, so the key cannot collide with a definition.
@@ -845,7 +901,14 @@ pub(crate) fn tc_reexport_key(n: &str) -> String {
 /// a non-toolchain root (`non_toolchain_imports`). Read for every file whose text passes `may_reexport_toolchain_name`.
 pub(crate) fn file_tc_reexports(items: &[syn::Item]) -> Vec<(String, Option<String>)> {
     let names = non_toolchain_imports(items);
-    TOOLCHAIN_BANG_MACROS.iter().filter(|n| names.contains(**n)).map(|n| (tc_reexport_key(n), None)).collect()
+    let mut v: Vec<(String, Option<String>)> =
+        TOOLCHAIN_BANG_MACROS.iter().filter(|n| names.contains(**n)).map(|n| (tc_reexport_key(n), None)).collect();
+    // A glob that may carry another crate's macros (`pub use dep::*;` in an out-of-line `mod prelude;`, Fable's merge review D2,
+    // f4d) can re-export ANY toolchain name to a module that globs this one: recorded as the wildcard.
+    if foreign_glob_in(items) {
+        v.push((tc_reexport_key("*"), None));
+    }
+    v
 }
 
 /// SOUNDNESS R1908 — the cheap text test before `file_tc_reexports` parses a file: some `use` statement names a toolchain
@@ -862,6 +925,9 @@ pub(crate) fn may_reexport_toolchain_name(text: &str) -> bool {
         }
         let end = text[at..].find(';').map(|e| at + e).unwrap_or(text.len());
         let stmt = &text[at + 3..end];
+        if stmt.contains('*') {
+            return true; // a glob (R1908 D2: a dependency glob re-exports every name it carries)
+        }
         if TOOLCHAIN_BANG_MACROS.iter().any(|n| {
             stmt.match_indices(n).any(|(k, _)| {
                 let sb = stmt.as_bytes();
@@ -1685,10 +1751,14 @@ impl Ctx<'_> {
         if !ok_head || leaf == "macro_rules" {
             return None;
         }
-        let bound = match self.defs.get(leaf) {
-            Some(d) => d.is_some(),
-            None => matches!(self.xdefs.get(leaf), Some(Some(_))),
-        };
+        // What rustc reaches through the path, and nothing else (Fable's merge review D1): a `#[macro_export]` definition, which
+        // lives in the crate root's namespace, that is the crate's ONLY definition of the name (the table holds one body), and
+        // no `use` anywhere in the crate names (a `use dep::m;` at the root, or `self::`/`super::` through a module's own
+        // `use`, would put another crate's macro there). A textual-scope-only `macro_rules!` is not reachable by path at all.
+        let bound = matches!(self.xdefs.get(leaf), Some(Some(_)))
+            && self.xdefs.contains_key(&export_key(leaf))
+            && !self.xdefs.contains_key(&use_word_key(leaf))
+            && self.defs.get(leaf).is_none_or(|d| d.is_some());
         if !bound || self.imported.contains(leaf) || self.emitted.contains(leaf) {
             return None;
         }
@@ -5171,7 +5241,7 @@ pub(crate) fn splice_local_macros_with(items: &mut Vec<syn::Item>, xdefs: &Crate
         .filter(|n| {
             tc_imports.contains(**n)
                 || foreign_glob
-                || (local_glob && xdefs.contains_key(&tc_reexport_key(n)))
+                || (local_glob && (xdefs.contains_key(&tc_reexport_key(n)) || xdefs.contains_key(&tc_reexport_key("*"))))
                 || bodies.contains_key(**n)
                 || xdefs.get(**n).is_some()
                 || xdefs.get(&emitted_key(n)).is_some()
