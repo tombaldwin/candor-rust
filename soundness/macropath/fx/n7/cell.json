@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn7",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn7"
+ ],
+ "id": "n7",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): body: `self::mk!()` inside an INLINE `mod m` of the root file, which imports the dependency's PURE mk; the root export WRITES: `self` is `m`, not the root: must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n7_e"
+  },
+  {
+   "kind": "q",
+   "name": "n7_q"
+  }
+ ]
+}

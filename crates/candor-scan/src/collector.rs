@@ -13813,6 +13813,12 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
     /// never accepted — `#[cfg]`-gated, macro-shaped, mid-edit — where an inherited bound DOES reach a
     /// same-named local type and fabricates an effect on it. Pinned by
     /// `an_outer_bound_does_not_reach_a_nested_item_that_never_declared_it`.
+    /// R-ROOT — a `mod` declared inside a body is a module `MODPATH_KEY` does not name: `rroot::body_key` counts no
+    /// `self::`/`super::` head inside one (a `self::mk!` there is that module's `mk`, not the crate root's).
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let _scope = crate::rroot::BodyModScope::enter();
+        syn::visit::visit_item_mod(self, node);
+    }
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
         let outer = std::mem::take(&mut self.dyn_sig_traits);
         // R556 — the `let`-position half of the same erasure fact, scoped for the same reason.
@@ -18468,7 +18474,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // SKIPS it (a macro is never a call to a local FUNCTION; without this it would mis-link to a
         // same-named local fn and fabricate that fn's effect onto a pure caller). Classification, the
         // builder table, and κ blind-disclosure still apply (they key on the path/crate, not the edge).
-        let mpath = crate::lang::expand_noanchor_macro(&path_to_string(&node.path), &self.uses);
+        // SOUNDNESS R1910 (R-ROOT, lane rust-macropath-l2) — a ROOT-headed path (`crate::mk!`, `$crate::mk!` as transcribed,
+        // `self::`/`super::` reaching the root) binds the crate root's ONE macro of the name (`rroot`), whatever glob the root
+        // holds: an explicit root item beats a glob, so routing `crate::mk` through `use dep::*;` / `pub use other::*;` (the
+        // `expand` below) read a write as `invisible:[dep]` or not at all (b4x, b4w, b4z, b4v). The path is then read as the
+        // bare name with that one body: no glob attribution, no `#[macro_use]` log edge, no R208 same-name pick (the binding is
+        // not a pick). A root path the table holds nothing for — a twin, a non-root module, a dependency — keeps the route below.
+        let f1_body: Option<String> = crate::rroot::body_key(&node.path, &self.uses).and_then(|k| self.local_macros.get(&k).cloned());
+        if f1_body.is_some() && candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("RROOTBODY\t{}", path_to_string(&node.path)); // §E1 REACH COUNTER, on the CHANGED branch only
+        }
+        let mpath = if f1_body.is_some() {
+            node.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()
+        } else {
+            crate::lang::expand_noanchor_macro(&path_to_string(&node.path), &self.uses)
+        };
         let mleaf = mpath.rsplit("::").next().unwrap_or(&mpath).to_string();
         // `cfg_if::cfg_if! { if #[cfg(..)] { .. } else if #[cfg(..)] { .. } else { .. } }` (and the bare
         // `cfg_if!` after `use cfg_if::cfg_if`) is a MACRO that syn leaves opaque, so every effectful call
@@ -18479,7 +18499,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         // it never fabricates, the calls are real, just cfg-gated). On an unexpected token shape the parse
         // fails and we fall through to the opaque-macro path below (never panic). Because a successful
         // expansion COVERS the reach, it is NOT recorded as an invisible macro call.
-        if mleaf == "cfg_if" {
+        if mleaf == "cfg_if" && f1_body.is_none() {
             // `respan_call_site`: these tokens were parsed on a rayon worker while this walk runs on the
             // collector thread, so their spans index a source map this thread does not have. See that
             // function for what syn does with them if they are handed over as-is.
@@ -18519,6 +18539,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         let emitted_only = !self.local_macros.contains_key(&mleaf) && self.local_macros.contains_key(&emitted_leaf);
         let shadowed = self.macro_twins.contains(&format!("{}{mleaf}", crate::model::EMITTED_SHADOW_PREFIX));
         if !mpath.contains("::")
+            && f1_body.is_none()
             && (self.macro_twins.contains(&mleaf)
                 || (emitted_only && self.macro_twins.contains(&emitted_leaf))
                 || shadowed
@@ -18557,6 +18578,9 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         }
         let mbody = if mpath.contains("::") {
             None
+        } else if f1_body.is_some() {
+            // R-ROOT: the root's one definition, never a body-local or textual-scope one (a path ignores textual scope)
+            if self.macro_expanding.contains(&mname) { None } else { f1_body.clone() }
         } else if !self.macro_expanding.contains(&mname) && self.body_macros.contains_key(&mname) {
             self.body_macros.get(&mname).cloned()
         } else if scoped_def.is_some() {
@@ -18589,7 +18613,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                     || (emitted_only
                         && (self.macro_twins.contains(&emitted_leaf)
                             || self.macro_twins.contains(&format!("{}{emitted_leaf}", crate::model::MACRO_REDEF_PREFIX))));
-                if !redefined || self.body_macros.contains_key(&mname) || scoped_def.is_some() {
+                if !redefined || self.body_macros.contains_key(&mname) || scoped_def.is_some() || f1_body.is_some() {
                     if let Some(ts) = crate::mbe::expand_invocation(&body, &respan_call_site(node.tokens.clone())) {
                         let braced = proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(
                             proc_macro2::Group::new(proc_macro2::Delimiter::Brace, ts),
@@ -18688,7 +18712,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false, path: mpath, leaf: mleaf.clone(), str_arg: None, typed: false, method: false, is_macro: true,
                             path_lits_partial: false, path_lit2: None,
                         });
-        } else if let Some(lp) = self.macro_use_log_path(&mleaf) {
+        } else if let Some(lp) = self.macro_use_log_path(&mleaf).filter(|_| f1_body.is_none()) {
             // SOUNDNESS R474 — a BARE `debug!` bound by the crate root's `#[macro_use] extern crate log` is
             // `log::debug!`: the same edge the `use log::debug;` spelling forms, so the classifier answers it the
             // same way. Formed BESIDE a crate-local `macro_rules!` of the name (expanded above), not instead of it:

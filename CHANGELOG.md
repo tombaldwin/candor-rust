@@ -11,6 +11,19 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Lane rust-macropath-l2: R-ROOT — a macro path whose module is the crate ROOT binds the crate's one root macro of that name
+  (SOUNDNESS R1910, R1853's root cases; a resolution: it removes `invisible` and `Unknown` and adds concrete effects).**
+  `crate::m!`, `$crate::m!` (as a local macro transcribes it), `self::m!` at the root and `super::…::m!` reaching it bind the
+  crate's UNIQUE, ungated `#[macro_export] macro_rules! m` (written anywhere, a fn body or a local macro's expansion included;
+  `local_inner_macros` read as `$crate::`), or a root `use` of a local definition its own module re-exports (`macro_rules! m {..}
+  pub(crate) use m;`, edition 2018+). Body position: the root's glob (`use dep::*;`, `pub use other::*;`, a prelude glob) is no
+  longer followed for such a path, so a write that read `invisible:[dep]` (ABSENT chained) or nothing at all is charged. Item,
+  impl-item and trait-item position: the invocation is expanded, so the minted fn / method is a unit and its callers are charged
+  instead of `Unknown`. Everything else is refused and reads as before: a name defined twice or under any `#[cfg]`/`#[cfg_attr]`
+  (item, enclosing module, fn, impl, `mod` declaration, file), a non-root module path, a `#[path]` module, a file two crate roots
+  compile, a body-local `mod`, and (item position) any invocation inside a cfg-gated container or whose expansion writes `cfg`
+  (the cfg-twin cover does not union every produced arm yet). Acceptance: `soundness/macropath` groups C, D and the new group N
+  (second fixtures, written first). `CANDOR_R_ROOT_OFF=1` restores the old reading. Cache rev 226.
 - **Lane rust-macropath-matrix: the macro-path attack matrix groups C to F as executed fixtures (tests only, no engine change).** `soundness/macropath/gen.py` renders 65 more cells (C body position, D item / impl-item / trait-item, E toolchain names by crate kind, F must-not-compile) with executed ground truth and the readings of v0.43.0 and of main 56c3361a recorded in `expect.tsv` (`cand` empty). `run.py --live` shows whether each chained cell's join is live on an arm; the cfg-twin runner records a rustc error as `NOCOMPILE(Exxxx)` and a no_std lib as `builds`. The `main` column of the 29 earlier L1(a) / R1911 rows was refreshed from the pre-lane main to 56c3361a.
 - ⚠ **Lane rust-l1b-r1911: a dependency EXPRESSION macro keeps its `invisible` disclosure when the dependency's report is chained (SOUNDNESS R1911, adds a disclosure).**
   `D::mk!()` / `use D::mk; mk!()` whose `macro_rules!` expansion calls D's effectful fn read `[]` with `invisible:[D]` scanned alone and

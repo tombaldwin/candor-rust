@@ -52,6 +52,7 @@ mod std_bounds;
 #[cfg(test)]
 mod std_bounds_gen;
 mod mbe;
+mod rroot;
 mod deps;
 mod depsig;
 mod collector;

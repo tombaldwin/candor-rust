@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn10",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn10"
+ ],
+ "id": "n10",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): body: `self::mk!()` inside a module declared in a FN BODY (the block's own module) that imports the dependency's PURE mk; the root export WRITES: must not charge.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n10_e"
+  },
+  {
+   "kind": "q",
+   "name": "n10_q"
+  }
+ ]
+}

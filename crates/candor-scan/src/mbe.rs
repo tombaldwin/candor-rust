@@ -631,7 +631,7 @@ fn emitted_key(name: &str) -> String {
 }
 
 /// I1 stage 3 — does some `macro_rules!` body in these items (at any module depth) itself write `macro_rules`?
-fn defines_a_definer(items: &[syn::Item]) -> bool {
+pub(crate) fn defines_a_definer(items: &[syn::Item]) -> bool {
     items.iter().any(|it| match it {
         syn::Item::Macro(m) if m.mac.path.is_ident("macro_rules") => m.mac.tokens.to_string().contains("macro_rules"),
         syn::Item::Mod(md) => md.content.as_ref().is_some_and(|(_, inner)| defines_a_definer(inner)),
@@ -790,6 +790,12 @@ struct Ctx<'x> {
     claims: DecodedClaims,
     /// the inline module path of the list being spliced, within this file (`a::b`), for `claims` lookups.
     modpath: Vec<String>,
+    /// SOUNDNESS R1910 / R1853 (R-ROOT) — this file's crate root and module path (`rroot::Scope`), so a macro PATH whose module
+    /// part is the root binds the crate's one root-namespace definition (`rroot::F1_PREFIX` entries of `xdefs`).
+    f1: Option<crate::rroot::Scope>,
+    /// R-ROOT — how many `#[cfg]`/`#[cfg_attr]`-gated containers (inline module, impl, trait) enclose the list being spliced,
+    /// plus one while a gated invocation itself is expanded. A root path is not bound inside one (`root_path_name`).
+    f1_gated: usize,
 }
 
 /// SOUNDNESS R1899 (cfg-twin lane A) — every name a `use` of this file binds through a path rooted at neither the crate
@@ -1500,6 +1506,9 @@ impl Ctx<'_> {
     /// The invocation's macro, when it is a bare name this file defines once — or, R1004, a name this
     /// file does not define at all and the CRATE defines once (identically everywhere it is defined).
     fn local_name(&self, mac: &syn::Macro) -> Option<String> {
+        if mac.path.get_ident().is_none() {
+            return self.root_path_name(mac);
+        }
         let id = mac.path.get_ident()?.to_string();
         if id == "macro_rules" {
             return None;
@@ -1522,6 +1531,39 @@ impl Ctx<'_> {
             return None;
         }
         bound.then_some(id)
+    }
+
+    /// SOUNDNESS R1910 / R1853 (R-ROOT) — an item / impl-item / trait-item invocation by PATH binds only when the path's module
+    /// part is the crate root (`crate::`, `$crate::` as transcribed, `self::`/`super^k::` reaching it) and the crate has ONE
+    /// ungated root-namespace macro of the name (`rroot`): the key it is stored under in `xdefs`, which `arms_of` reads like any
+    /// other crate-table name. Every other path is refused, exactly as before: the invocation stays, and R128 / L1 disclose it.
+    fn root_path_name(&self, mac: &syn::Macro) -> Option<String> {
+        let sc = self.f1.as_ref()?;
+        if mac.path.leading_colon.is_some() || crate::rroot::off() {
+            return None;
+        }
+        // NOT INSIDE A CFG ARM. Expanded there, the invocation stops being hidden text, and what stands in its place is a
+        // PRODUCED cfg arm, whose union with the sibling arm the cfg-twin cover does not compute for every item kind — the
+        // bare spellings `wuse!`/`wov!`/`wt!` read silent there on main (lane residue-C's unnumbered findings 1-3, the
+        // cfg-twin design queue), and binding the path would carry that silence to it (soundness/cfgtwin d*v5, d*v7, d12*,
+        // e1/e4/e9/e13/e15 measured 1->0). Refused, the path keeps main's hidden-text hold. Lift this when that cover is.
+        if self.f1_gated > 0 || sc.gated {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("RROOTCFGREFUSE\t{}", crate::lang::path_to_string(&mac.path)); // §E1 REACH COUNTER
+            }
+            return None;
+        }
+        let segs: Vec<String> = mac.path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let (leaf, head) = segs.split_last()?;
+        if !sc.is_root(head, self.modpath.len()) {
+            return None;
+        }
+        let k = crate::rroot::key(&sc.root, leaf);
+        let hit = matches!(self.xdefs.get(&k), Some(Some(_)));
+        if hit && candor_report::env::trace("CANDOR_I1_INSTR") {
+            eprintln!("RROOTITEM\t{}", segs.join("::")); // §E1 REACH COUNTER, on the CHANGED branch only
+        }
+        hit.then_some(k)
     }
 
     /// SOUNDNESS R1898 (cfg-twin lane B) — the invocation bound THIS file's definition of the name, but that definition is not
@@ -1562,6 +1604,13 @@ impl Ctx<'_> {
         let arms = self.arms_of(&name)?;
         SEP2_USED.with(|c| c.set(false));
         let ts = expand(&arms, &mac.tokens)?;
+        // R-ROOT — an expansion that writes a `cfg` of its own is a produced cfg arm too (see `root_path_name`): refused.
+        if name.starts_with(crate::rroot::F1_PREFIX) && ts.to_string().contains("cfg") {
+            if candor_report::env::trace("CANDOR_I1_INSTR") {
+                eprintln!("RROOTCFGREFUSE\texpansion"); // §E1 REACH COUNTER
+            }
+            return None;
+        }
         // SOUNDNESS R1748 (a) — §E1 REACH COUNTER for the two-character separator: a macro with such a separator in a
         // MATCHER was refused whole before (`rep_tail`), and one in the TRANSCRIBER (rkyv's `$(a == b)&&*`) failed at
         // transcription, so every expansion of either is new.
@@ -1625,6 +1674,10 @@ impl Ctx<'_> {
         }
         self.budget -= 1;
         self.splice(&mut file.items, depth + 1);
+        // R-ROOT — and one whose NESTED expansions wrote one (a bare local macro inside it): refused the same way.
+        if mac.path.get_ident().is_none() && mentions_cfg(&file.items) {
+            return None;
+        }
         if ambig {
             mark_ambiguous_items(&mut file.items);
         }
@@ -1659,6 +1712,9 @@ impl Ctx<'_> {
         }
         self.budget -= 1;
         self.splice_impl_items(&mut gen, depth + 1);
+        if mac.path.get_ident().is_none() && mentions_cfg(&gen) {
+            return None; // R-ROOT, as at item position
+        }
         if ambig {
             for g in gen.iter_mut() {
                 if let syn::ImplItem::Fn(f) = g {
@@ -1690,7 +1746,11 @@ impl Ctx<'_> {
         let mut out: Vec<syn::ImplItem> = Vec::with_capacity(items.len());
         for it in std::mem::take(items) {
             if let syn::ImplItem::Macro(m) = &it {
-                if let Some(mut gen) = self.expand_impl_items(&m.mac, depth) {
+                let g = usize::from(crate::lang::has_cfg(&m.attrs) || m.attrs.iter().any(|a| a.path().is_ident("cfg_attr")));
+                self.f1_gated += g;
+                let gen = self.expand_impl_items(&m.mac, depth);
+                self.f1_gated -= g;
+                if let Some(mut gen) = gen {
                     for g in &mut gen {
                         // The invocation's own outer attributes (`#[cfg(..)]`) govern every item it expands to.
                         if let Some(a) = impl_item_attrs_mut(g) {
@@ -1744,6 +1804,9 @@ impl Ctx<'_> {
         }
         self.budget -= 1;
         self.splice_trait_items(&mut gen, depth + 1);
+        if mac.path.get_ident().is_none() && mentions_cfg(&gen) {
+            return None; // R-ROOT, as at item position
+        }
         if ambig {
             for g in gen.iter_mut() {
                 if let syn::TraitItem::Fn(f) = g {
@@ -1763,7 +1826,11 @@ impl Ctx<'_> {
         let mut out: Vec<syn::TraitItem> = Vec::with_capacity(items.len());
         for it in std::mem::take(items) {
             if let syn::TraitItem::Macro(m) = &it {
-                if let Some(mut gen) = self.expand_trait_items(&m.mac, depth) {
+                let g = usize::from(crate::lang::has_cfg(&m.attrs) || m.attrs.iter().any(|a| a.path().is_ident("cfg_attr")));
+                self.f1_gated += g;
+                let gen = self.expand_trait_items(&m.mac, depth);
+                self.f1_gated -= g;
+                if let Some(mut gen) = gen {
                     for g in &mut gen {
                         if let Some(a) = trait_item_attrs_mut(g) {
                             let mut na = m.attrs.clone();
@@ -1817,7 +1884,11 @@ impl Ctx<'_> {
                     }
                 }
                 syn::Item::Macro(m) if m.ident.is_none() && !seed_dropped(&m.mac) => {
-                    if let Some(gen) = self.expand_items(&m.mac, depth) {
+                    let g = usize::from(crate::lang::has_cfg(&m.attrs) || m.attrs.iter().any(|a| a.path().is_ident("cfg_attr")));
+                    self.f1_gated += g;
+                    let gen = self.expand_items(&m.mac, depth);
+                    self.f1_gated -= g;
+                    if let Some(gen) = gen {
                         // SOUNDNESS R1748 (a) — the TRAITS the expansion declares are not spliced (see below), but their
                         // existence is recorded: one inert `Item::Verbatim` marker per generated trait, naming it and its
                         // `fn` members, which `lang::collect_mbe_traits` reads into the decl index. No other walk reads a
@@ -1950,7 +2021,9 @@ impl Ctx<'_> {
                         // `macro_rules!`-BODY evidence is retired crate-wide from the same markers (`cache::retire_expanded`).
                         // A partial expansion (anything on the refusal list) keeps the invocation, and with it every hedge.
                         if full {
-                            let name = m.mac.path.get_ident().map(|i| i.to_string()).unwrap_or_default();
+                            // R-ROOT — a path invocation (`crate::mkfn!`) is named by its LEAF, the name `expansion_facts` keys
+                            // an unexpanded one under; only R-ROOT expands a path, so a bare name reads exactly as before.
+                            let name = m.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
                             if candor_report::env::trace("CANDOR_I1_INSTR") {
                                 eprintln!("I1EXPANDED\t{name}"); // §E1 REACH COUNTER
                             }
@@ -1980,11 +2053,23 @@ impl Ctx<'_> {
                     }
                 }
                 // R1245 — a hand-written impl whose members a local macro declares.
-                syn::Item::Impl(im) => self.splice_impl_items(&mut im.items, depth),
+                syn::Item::Impl(im) => {
+                    let g = usize::from(crate::lang::has_cfg(&im.attrs) || im.attrs.iter().any(|a| a.path().is_ident("cfg_attr")));
+                    self.f1_gated += g;
+                    self.splice_impl_items(&mut im.items, depth);
+                    self.f1_gated -= g;
+                }
                 // I1 stage 3 (D1) — a trait whose members a local macro declares.
-                syn::Item::Trait(t) => self.splice_trait_items(&mut t.items, depth),
+                syn::Item::Trait(t) => {
+                    let g = usize::from(crate::lang::has_cfg(&t.attrs) || t.attrs.iter().any(|a| a.path().is_ident("cfg_attr")));
+                    self.f1_gated += g;
+                    self.splice_trait_items(&mut t.items, depth);
+                    self.f1_gated -= g;
+                }
                 syn::Item::Mod(md) => {
+                    let g = usize::from(crate::lang::has_cfg(&md.attrs) || md.attrs.iter().any(|a| a.path().is_ident("cfg_attr")));
                     if let Some((_, inner)) = &mut md.content {
+                        self.f1_gated += g;
                         // R1156 — a child sees the parent's textual scope; its own definitions leave with it
                         // unless the module is `#[macro_use]`.
                         let saved = self.scope.clone();
@@ -1992,6 +2077,7 @@ impl Ctx<'_> {
                         self.modpath.push(md.ident.to_string());
                         self.splice(inner, depth);
                         self.modpath.pop();
+                        self.f1_gated -= g;
                         if !md.attrs.iter().any(|a| a.path().is_ident("macro_use")) {
                             self.scope = saved;
                             self.scope_bodies = saved_bodies;
@@ -4042,6 +4128,11 @@ pub(crate) fn twin_cand_keys(cand: &str, renames: &std::collections::BTreeMap<St
     out
 }
 
+/// R-ROOT — does any of these (spliced) items write `cfg` anywhere? Over-matches (`cfg_x`, `my_cfg`), which only refuses.
+fn mentions_cfg<T: quote::ToTokens>(items: &[T]) -> bool {
+    items.iter().any(|i| i.to_token_stream().to_string().contains("cfg"))
+}
+
 /// I1 stage 1 — the marker that stands where a fully expanded invocation was. Read by `mbe_expanded_of`.
 const MBE_EXPANDED_MARK: &str = "__candor_mbe_expanded";
 
@@ -5076,6 +5167,16 @@ pub(crate) fn splice_local_macros(items: &mut Vec<syn::Item>, xdefs: &CrateMacro
 
 /// `splice_local_macros`, with the cross-file cfg-twin claims this file consumes (`ArmClaims`, cfg-twin lane A).
 pub(crate) fn splice_local_macros_with(items: &mut Vec<syn::Item>, xdefs: &CrateMacros, claims: &ArmClaims) {
+    splice_local_macros_scoped(items, xdefs, claims, None);
+}
+
+/// `splice_local_macros_with`, with the file's R-ROOT scope (`rroot::Scope`): a root-headed macro path binds there.
+pub(crate) fn splice_local_macros_scoped(
+    items: &mut Vec<syn::Item>,
+    xdefs: &CrateMacros,
+    claims: &ArmClaims,
+    f1: Option<crate::rroot::Scope>,
+) {
     let mut imported = std::collections::HashSet::new();
     if !candor_report::env::switch("CANDOR_I1_BIND_OFF") {
         imported_names(items, &mut imported);
@@ -5133,6 +5234,8 @@ pub(crate) fn splice_local_macros_with(items: &mut Vec<syn::Item>, xdefs: &Crate
         tc_shadow,
         claims: claims.decode(),
         modpath: Vec::new(),
+        f1,
+        f1_gated: 0,
     };
     cx.splice(items, 0);
     // SOUNDNESS R1862 / R1824 (cfg-twin lane A) — THIS FILE AS AN OUT-OF-LINE MODULE ARM. Its own hidden text, read whole

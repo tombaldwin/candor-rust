@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdepn8",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdepn8"
+ ],
+ "id": "n8",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "N (L2 second fixture): positive: `super::mk!()` inside an INLINE `mod m` of the root file reaches the root's WRITING export (R1 glob).",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "n8_e"
+  },
+  {
+   "kind": "q",
+   "name": "n8_q"
+  }
+ ]
+}

@@ -498,7 +498,19 @@ ccell('n6', ND + 'body: `super::mk!()` from depth 2 reaches `inner` (which impor
       'must not charge.', mods='mod other;\nmod inner;', files={'inner/deep.rs': 'pub fn go_@ID@() { super::mk!() }\npub fn q_@ID@_pure() { super::mknop!() }\n'},
       probes=[('n6_e', 'e', 'inner::deep::go_n6()'), ('n6_q', 'q', 'inner::deep::q_n6_pure()')], dep=DEP_BASE + DEP_MK_P)
 CELLS['n6']['extra']['inner.rs'] = 'use fxdepn6::{mk, nop as mknop};\npub mod deep;\n'
-ccell('n9', ND + 'positive: the root re-export RENAMES (`pub(crate) use other::{mk as mkr, mknop as mkrnop}`), R1 glob, `crate::mkr!()`.',
+ccell('n7', ND + 'body: `self::mk!()` inside an INLINE `mod m` of the root file, which imports the dependency\'s PURE mk; the root export '
+      'WRITES: `self` is `m`, not the root: must not charge.', imp='mod m_n7 { use fxdepn7::{mk, nop as mknop}; pub fn go() { self::mk!() } '
+      'pub fn goq() { self::mknop!() } }', mods='mod other;\nmod inner;', probes=[('n7_e', 'e', 'm_n7::go()'), ('n7_q', 'q', 'm_n7::goq()')],
+      dep=DEP_BASE + DEP_MK_P)
+ccell('n8', ND + 'positive: `super::mk!()` inside an INLINE `mod m` of the root file reaches the root\'s WRITING export (R1 glob).',
+      imp=R1 + '\nmod m_n8 { pub fn go() { super::mk!() } pub fn goq() { super::mknop!() } }', mods='mod other;\nmod inner;',
+      probes=[('n8_e', 'e', 'm_n8::go()'), ('n8_q', 'q', 'm_n8::goq()')])
+ccell('n10', ND + 'body: `self::mk!()` inside a module declared in a FN BODY (the block\'s own module) that imports the dependency\'s PURE mk; '
+      'the root export WRITES: must not charge.', mods='mod other;\nmod inner;',
+      imp='pub fn host_n10() { mod m { use fxdepn10::{mk, nop as mknop}; pub fn g() { self::mk!() } pub fn gq() { self::mknop!() } } m::g() }\n'
+          'pub fn hostq_n10() { mod m { use fxdepn10::{mk, nop as mknop}; pub fn gq() { self::mknop!() } } m::gq() }',
+      probes=[('n10_e', 'e', 'host_n10()'), ('n10_q', 'q', 'hostq_n10()')], dep=DEP_BASE + DEP_MK_P)
+ccell('n9', ND +'positive: the root re-export RENAMES (`pub(crate) use other::{mk as mkr, mknop as mkrnop}`), R1 glob, `crate::mkr!()`.',
       imp=R1 + '\npub(crate) use other::{mk as mkr, mknop as mkrnop};', defs=NX, head='crate::mkr!()', headq='crate::mkrnop!()')
 
 # ---------------------------------------------------------------------------------------------------- F: cells that should NOT compile

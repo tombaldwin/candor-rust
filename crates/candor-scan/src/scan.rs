@@ -1803,6 +1803,19 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             })
             .collect::<Vec<_>>(),
     );
+    // SOUNDNESS R1910 / R1853 (R-ROOT, lane rust-macropath-l2) — the crate root's macro namespace (`rroot`): which
+    // definition a ROOT-headed macro path (`crate::m!`, `$crate::m!`, `self::`/`super::` reaching the root) binds. Computed
+    // only where some file writes `macro_rules` (the table above does not read fn bodies, where an export may sit), stored in
+    // the same table so its digest joins every file's cache key. `CANDOR_R_ROOT_OFF=1` computes nothing.
+    let rroot_facts = if crate::rroot::off() {
+        crate::rroot::RootFacts::default()
+    } else {
+        rroot_facts_of(&paths)
+    };
+    let mut xmacros = xmacros;
+    for (k, b) in rroot_facts.table() {
+        xmacros.insert(k, Some(b));
+    }
     let xmacros_key = (!xmacros.is_empty()).then(|| crate::mbe::crate_macros_digest(&xmacros));
     // SOUNDNESS R1154 — the package's own library name, as its bins/examples/tests spell it (`mylib::f()`). Not
     // when a manifest dependency carries the same name: then the head is ambiguous and today's reading stands.
@@ -1868,7 +1881,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             crate::lang::splice_pin_project(&mut file.items); // R988, R960
         }
         if splice_gate(&text, claims) {
-            crate::mbe::splice_local_macros_with(&mut file.items, &xmacros, claims); // R1004
+            crate::mbe::splice_local_macros_scoped(&mut file.items, &xmacros, claims, rroot_facts.scope(rel)); // R1004, R-ROOT
         }
         crate::mbe::splice_derived_comparisons(&mut file.items); // R1146 (ungated: an `include!` target may hold the derive)
         if text.contains("DeriveEntity") {
@@ -2676,7 +2689,16 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                        owners: &impl_owners, mbe_traits: &merged.mbe_traits };
     let lazy_statics = &merged.lazy_statics;
     let const_strings = &merged.const_strings;
-    let local_macros = &merged.local_macros;
+    // R-ROOT — the collector reads a root-headed macro path's definition from its macro table, under the `rroot` key.
+    let local_macros_f1;
+    let local_macros = if rroot_facts.entries.is_empty() {
+        &merged.local_macros
+    } else {
+        let mut m = merged.local_macros.clone();
+        m.extend(rroot_facts.table());
+        local_macros_f1 = m;
+        &local_macros_f1
+    };
 
     // TRANSITIVE DROP-OWNER closure (#3, FIELD edition — R49): constructing a struct `T` also runs the drop
     // glue of any LOCAL drop-type `T` OWNS through a field — directly (`_g: Guard`), via a collection element
@@ -3069,7 +3091,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                     }
                     let claims = claims_of(rel); // cfg-twin lane A — the claims its cached decls were derived under
                     if splice_gate(&t, claims) {
-                        crate::mbe::splice_local_macros_with(&mut f.items, &xmacros, claims); // R1004 — the round-2 twin
+                        crate::mbe::splice_local_macros_scoped(&mut f.items, &xmacros, claims, rroot_facts.scope(rel)); // R1004 — the round-2 twin
                     }
                     crate::mbe::splice_derived_comparisons(&mut f.items); // R1146 — the round-2 twin
                     if t.contains("DeriveEntity") {
@@ -3147,6 +3169,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         // SOUNDNESS R751 — …and this file's own module path, so `expand` can turn a `self::`/`super::`
         // path into a crate-root-ABSOLUTE one instead of collapsing it and losing the module context.
         crate::lang::seed_modpath(&modpath, &mut uses);
+        // R-ROOT — and this file's crate root, so a ROOT-headed macro path in a body binds the root's definition (`rroot`).
+        crate::rroot::seed_scope(rroot_facts.scope(rel).as_ref(), &mut uses);
         // VEIN A — and the manifest's dependency names, so a glob is never credited with a name that is
         // an extern crate (`use sqlx_core::prelude::*; dotenvy::var(..)` keeps `dotenvy`).
         crate::lang::seed_deps(&manifest_deps, &mut uses);
@@ -13692,4 +13716,89 @@ fn splice_gate(text: &str, claims: &crate::mbe::ArmClaims) -> bool {
         return true;
     }
     text.contains('!')
+}
+
+
+/// SOUNDNESS R1910 / R1853 (R-ROOT) — summarise every walked file (`rroot::summarize`) and build the crate-root facts. A file is
+/// parsed only where it can matter: it defines a `macro_rules!`, declares a module, or is a crate root.
+fn rroot_facts_of(paths: &[(std::path::PathBuf, String)]) -> crate::rroot::RootFacts {
+    use rayon::prelude::*;
+    if !paths.par_iter().any(|(p, _)| std::fs::read_to_string(p).is_ok_and(|t| t.contains("macro_rules"))) {
+        return crate::rroot::RootFacts::default();
+    }
+    let sums: HashMap<String, crate::rroot::FileSummary> = paths
+        .par_iter()
+        .filter_map(|(p, rel)| {
+            let text = std::fs::read_to_string(p).ok()?;
+            if !(text.contains("macro_rules") || text.contains("mod ") || crate::rroot::is_root_file(rel)) {
+                return Some((rel.clone(), crate::rroot::FileSummary::default()));
+            }
+            let (file, _) = crate::lang::parse_file_2015_tolerant(&text)?;
+            let spliced = if crate::mbe::defines_a_definer(&file.items) {
+                let mut c = file.items.clone();
+                crate::mbe::splice_local_macros(&mut c, &crate::mbe::CrateMacros::new());
+                Some(c)
+            } else {
+                None
+            };
+            Some((rel.clone(), crate::rroot::summarize(&file.items, &file.attrs, spliced.as_deref())))
+        })
+        .collect();
+    let by_rel: HashMap<&str, &std::path::Path> = paths.iter().map(|(p, r)| (r.as_str(), p.as_path())).collect();
+    let ed = |root: &str| by_rel.get(root).is_some_and(|p| package_edition_2018(p));
+    let f = crate::rroot::build(&sums, &ed);
+    if candor_report::env::trace("CANDOR_I1_INSTR") {
+        for (r, m) in &f.entries {
+            for n in m.keys() {
+                eprintln!("RROOTF1\t{r}\t{n}"); // §E1 REACH COUNTER
+            }
+        }
+    }
+    f
+}
+
+/// Whether the package owning a crate-root file is edition 2018 or later: the nearest `Cargo.toml` above it with a
+/// `[package]` table, its `edition`, or — `edition.workspace = true` — the nearest `[workspace.package]` `edition` above that.
+/// No `edition` key is 2015.
+fn package_edition_2018(file: &std::path::Path) -> bool {
+    fn table_edition(text: &str, table: &str) -> Option<String> {
+        let mut inside = false;
+        for line in text.lines() {
+            let l = line.trim();
+            if l.starts_with('[') {
+                inside = l == table;
+                continue;
+            }
+            if inside {
+                let k = l.split(['=', '.']).next().unwrap_or("").trim();
+                if k == "edition" {
+                    if l.contains("workspace") {
+                        return Some("workspace".to_string());
+                    }
+                    return l.split('"').nth(1).map(str::to_string);
+                }
+            }
+        }
+        None
+    }
+    let modern = |e: &str| matches!(e, "2018" | "2021" | "2024");
+    let mut dirs = file.ancestors().skip(1);
+    for d in dirs.by_ref() {
+        let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
+        if !t.lines().any(|l| l.trim() == "[package]") {
+            continue;
+        }
+        match table_edition(&t, "[package]") {
+            Some(e) if e == "workspace" => break,
+            Some(e) => return modern(&e),
+            None => return false,
+        }
+    }
+    for d in dirs {
+        let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
+        if let Some(e) = table_edition(&t, "[workspace.package]") {
+            return modern(&e);
+        }
+    }
+    false
 }
