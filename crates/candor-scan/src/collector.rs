@@ -12142,7 +12142,10 @@ impl<'a> CallCollector<'a> {
                 if candor_report::env::trace("CANDOR_R1846_INSTR") {
                     eprintln!("R1846LOCAL\t{tr}\t{d}\t{leaf}"); // §E1 REACH COUNTER
                 }
-                let dp = self.expand_scoped(&format!("{d}::{leaf}"));
+                // `expand`, not `expand_scoped`: `d` is a LOCAL trait (`declaring_traits`), which no external glob supplies, so the
+                // glob fallback of `expand_scoped` could not apply (and its generic-check closure is a call the Self-guard reads
+                // as `Unknown`).
+                let dp = crate::lang::expand(&format!("{d}::{leaf}"), &self.uses);
                 self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                     path: dp, leaf: leaf.to_string(), str_arg: None, typed: false, method: false,
                     is_macro: false, path_lits_partial: false, path_lit2: None });
