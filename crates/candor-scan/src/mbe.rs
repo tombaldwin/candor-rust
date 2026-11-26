@@ -792,6 +792,45 @@ struct Ctx<'x> {
     modpath: Vec<String>,
 }
 
+/// SOUNDNESS R1899 (cfg-twin lane A) — every name a `use` of this file binds through a path rooted at neither the crate
+/// (`crate`/`self`/`super`) nor the toolchain (`std`/`core`/`alloc`, and a leading `::` before one): `use std::thread_local;`
+/// (proc-macro2's fallback.rs) binds the toolchain's macro, `use dep::thread_local;` does not.
+fn non_toolchain_imports(items: &[syn::Item]) -> std::collections::HashSet<String> {
+    fn walk(t: &syn::UseTree, root: Option<&str>, out: &mut std::collections::HashSet<String>) {
+        let skip = |r: Option<&str>| matches!(r, Some("crate" | "self" | "super" | "std" | "core" | "alloc"));
+        match t {
+            syn::UseTree::Path(p) => {
+                let first = p.ident.to_string();
+                walk(&p.tree, Some(root.unwrap_or(first.as_str())), out);
+            }
+            syn::UseTree::Name(n) if root.is_some() && !skip(root) => {
+                out.insert(n.ident.to_string());
+            }
+            syn::UseTree::Rename(r) if root.is_some() && !skip(root) => {
+                out.insert(r.rename.to_string());
+            }
+            syn::UseTree::Group(g) => g.items.iter().for_each(|x| walk(x, root, out)),
+            _ => {}
+        }
+    }
+    fn items_walk(items: &[syn::Item], out: &mut std::collections::HashSet<String>) {
+        for it in items {
+            match it {
+                syn::Item::Use(u) => walk(&u.tree, None, out),
+                syn::Item::Mod(m) => {
+                    if let Some((_, inner)) = &m.content {
+                        items_walk(inner, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    items_walk(items, &mut out);
+    out
+}
+
 /// I1 step 1 — every name a `use` item of this file binds through a path that is NOT rooted at `crate`/`self`/`super`
 /// (a dependency, or a 2018 uniform path that may be one). Renames bind their new name. Globs bind nothing nameable.
 fn imported_names(items: &[syn::Item], out: &mut std::collections::HashSet<String>) {
@@ -4757,10 +4796,11 @@ pub(crate) fn splice_local_macros_with(items: &mut Vec<syn::Item>, xdefs: &Crate
     }
     all_bodies(items, &mut bodies);
     // SOUNDNESS R1899 — which toolchain macro names a BARE invocation in this file may not bind to the toolchain.
+    let tc_imports = non_toolchain_imports(items);
     let tc_shadow: std::collections::HashSet<String> = TOOLCHAIN_BANG_MACROS
         .iter()
         .filter(|n| {
-            imported.contains(**n)
+            tc_imports.contains(**n)
                 || imported.contains("*")
                 || bodies.contains_key(**n)
                 || xdefs.get(**n).is_some()

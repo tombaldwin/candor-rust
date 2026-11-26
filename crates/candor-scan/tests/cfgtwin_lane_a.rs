@@ -258,3 +258,27 @@ fn a_unit_marked_from_another_files_claim_keeps_its_location() {
     }
     assert!(found, "pure::go must be marked from live.rs's claim");
 }
+
+#[test]
+fn a_toolchain_rooted_import_keeps_the_toolchain_exclusion() {
+    // R1899's guard is on the BINDING: `use std::thread_local;` (proc-macro2's fallback.rs) binds the toolchain's macro, so a
+    // bare `thread_local!` there is still excluded from hidden text and a hand-written gated fn beside it is not hedged. The
+    // first cut read the import as a rebinding and hedged 203 proc-macro2 rows; the matrix's H9 (`use dep::thread_local;`)
+    // must still read `Unknown`, which `every_closed_cell_reads_unknown_over_its_write` pins.
+    let d = tmp("tcstd");
+    let c = d.join("crate");
+    std::fs::create_dir_all(c.join("src")).unwrap();
+    std::fs::write(c.join("Cargo.toml"), "[package]\nname = \"tcstd\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[workspace]\n").unwrap();
+    std::fs::write(
+        c.join("src/lib.rs"),
+        "macro_rules! unused_local { () => {} }\n\
+         use std::thread_local;\n\
+         thread_local! { static X: u8 = 0; }\n\
+         #[cfg(unix)] pub fn go_tc() { let _ = std::fs::write(\"/tmp/never\", b\"x\"); }\n\
+         #[cfg(not(unix))] pub fn go_tc() {}\n\
+         pub fn probe_tc() { go_tc() }\n",
+    )
+    .unwrap();
+    let r = scan(&c, &d, &[]);
+    assert!(effect(&r, "probe_tc") && !unknown(&r, "probe_tc"), "probe_tc: {:?}", row(&r, "probe_tc"));
+}

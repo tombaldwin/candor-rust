@@ -4534,6 +4534,15 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // cfg-twin lane A (Fable G7) — a NON-SHIPPING reach counter for the queued file-level gating question (Q3): the module paths
     // of every file a `#[cfg]`-gated `mod x;` declares (`FileDecls::i1_arms` `O` records), so a file under one is known to sit in
     // a gated chain. Read only under `CANDOR_I1_INSTR`.
+    // SOUNDNESS R1901 (cfg-twin lane A) — the first segment of every module the scan SEES (a walked file's module path, a
+    // unit's qual): `hidden_mod_head` below fires only for a module NOTHING visible declares, so a visible `date` module whose
+    // `Date::deref` names no unit is not this state (measured: time 0.3.55, the first cut hedged 88 such rows).
+    let visible_mod_heads: HashSet<String> = decls_per_file
+        .iter()
+        .map(|(rel, _, _)| module_path(Path::new(rel)))
+        .chain(fns.iter().filter(|f| f.qual.contains("::")).map(|f| f.qual.clone()))
+        .filter_map(|q| q.split("::").next().filter(|h| !h.is_empty()).map(str::to_string))
+        .collect();
     let q3_gated: Vec<String> = {
         let mut v: Vec<String> = decls_per_file
             .iter()
@@ -9004,6 +9013,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 let head = rel.split("::").next().unwrap_or("");
                 rel.contains("::")
                     && merged.macro_hidden_fns.contains(&format!("{}{head}", crate::lang::MACRO_DECL_MOD))
+                    && !visible_mod_heads.contains(head)
                     && !deps.contains(head)
                     && !deps_idx.crates.contains(dep_renames.get(head).map(String::as_str).unwrap_or(head))
                     && !matches!(head, "std" | "core" | "alloc" | "self" | "super")
