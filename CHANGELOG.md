@@ -11,6 +11,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **⚠ Lane rust-bound-l1b: bound / projection dispatch REMOVALS — a supertrait's origin is decided by what its written path names, and three
+  over-wide answers are narrowed (SOUNDNESS R1953, R1964, R1977, R1980; R1975 closed by the same resolution).** A supertrait path is resolved once
+  (`super_origins`): a crate-local declaration it names exactly (an alias's target included), a std root, a KNOWN dependency crate (the manifest's
+  dependency set, not "any non-std identifier"), else the crate's re-export table; an undecided path keeps the previous answer. Consequences: a method or
+  default-body `self.m()` through `trait LSub: dep::Sup {}` beside a crate-local `m::Sup` is no longer dispatched over the local trait's implementors (a
+  pure program read `Fs`; R1977, on 0.43.0 and main) — it keys `dep#Sup::m` and discloses where this crate implements a trait of that leaf; a
+  dependency supertrait sharing the crate trait's own leaf (`trait Float: float::Float`) is keyed without round 3's declined-leaf hedge (R1980); a
+  `use .. as` alias of a local trait as supertrait dispatches over its target (R1975, was silent); a dependency trait re-exported through a local module
+  is keyed. `where T::Item: Lt`, `Lt: Base`, `T::Item::lf()` dispatches over `Lt`'s implementors, not `Base`'s (R1953). `T::lf()` under
+  `T: dep::Dt + Lt` with `lf` declared by the local bound no longer mints `dep#Dt::lf` (E0034 makes a second declaration impossible; R1964).
+  New cfgtwin cells `lb1`–`lb4` (92 probes, executed). `CANDOR_BOUNDSET_OFF=1` restores main's readings; cache rev239.
+
 - **Lane rust-bound-l1a: path spellings of a trait member reached through a bound or a projection, which formed nothing, now form what their sibling spellings
   form (SOUNDNESS R1952, R1957–R1961; additive: each adds an edge, a key or a hedge at a site that had none).** `T::lsf()` with the associated fn declared in a
   LOCAL supertrait of the bound dispatches over the bound's implementors and keys the declaring trait (one member test for path calls, supertraits included:

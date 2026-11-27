@@ -179,6 +179,25 @@ pub(crate) struct AssignDrop<'a> {
     pub(crate) fields_q: Option<&'a crate::cache::QualIndexes>,
 }
 
+/// SOUNDNESS R1975/R1977/R1980 (bound-dispatch L1b) — what a local trait's written supertrait path names (`super_origins`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SupOrigin {
+    /// a crate-local trait, by its leaf (an alias's TARGET leaf)
+    Local(String),
+    /// a dependency trait, by its resolved path (`fxdep::Sup`)
+    Dep(String),
+    /// a std/core/alloc trait, by its path
+    Std(String),
+    /// a recorded path none of the readings decides
+    Unknown,
+}
+
+/// The kill switch for bound-dispatch L1b (R1953, R1964, R1975, R1977, R1980): restores main's answers (L1a round 3) everywhere.
+pub(crate) fn boundset_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| candor_report::env::switch("CANDOR_BOUNDSET_OFF"))
+}
+
 pub(crate) struct CallCollector<'a> {
     /// The module path of the function being walked. A bare `CFG` reference names the ENCLOSING module's
     /// static, so the forcing edge must be built with this path — see `lazy_qual`.
@@ -10290,8 +10309,22 @@ impl<'a> CallCollector<'a> {
             return false;
         }
         let Some(lt) = self.local_traits.get(tr) else { return false };
+        // SOUNDNESS R1977 (bound-dispatch L1b) — a supertrait is walked into only as the LOCAL trait its written path names
+        // (`super_walk_leaf`): `trait LSub: fxdep::Sup {}` beside a crate-local `m::Sup { fn lsm(&self) }` read `t.lsm()` as the local
+        // trait's member and dispatched over ITS implementors, charging an executed-pure program `Fs` (Fable `bl11`, cfgtwin `lb1`, on
+        // 0.43.0 and main). A supertrait whose origin is undecided keeps the leaf reading.
         lt.methods.contains(leaf)
-            || lt.supertraits.iter().any(|s| self.trait_declares_method(s, leaf, depth + 1))
+            || lt.supertraits.iter().any(|s| self.super_walk_leaf(tr, s).is_some_and(|w| self.trait_declares_method(&w, leaf, depth + 1)))
+    }
+
+    /// `trait_declares_method` as it read before L1b: every supertrait LEAF walked as the local trait of that leaf. Asked only to find
+    /// the sites where that reading, and no proven one, declares the member (R1977's lost-site answer).
+    fn trait_declares_method_leafwalk(&self, tr: &str, leaf: &str, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let Some(lt) = self.local_traits.get(tr) else { return false };
+        lt.methods.contains(leaf) || lt.supertraits.iter().any(|s| self.trait_declares_method_leafwalk(s, leaf, depth + 1))
     }
 
     /// SOUNDNESS R1957 — THE MEMBER TEST, parameterised by spelling. A method call can name only a method (`methods`); a PATH call
@@ -10318,7 +10351,8 @@ impl<'a> CallCollector<'a> {
                 return true;
             }
             // round 2 — a supertrait written through a dependency or std path is never the crate-local trait of that leaf
-            stack.extend(lt.supertraits.iter().filter(|s| self.super_local(&t, s)).map(|s| (s.clone(), d + 1)));
+            // (L1b: the walk goes to the trait the path names, an alias's target included — R1975)
+            stack.extend(lt.supertraits.iter().filter_map(|s| self.super_local_target(&t, s)).map(|s| (s, d + 1)));
         }
         false
     }
@@ -10331,6 +10365,14 @@ impl<'a> CallCollector<'a> {
     /// unproven — a re-export, an alias, a glob-reached path — is NOT local, so the member route treats it as foreign (its key where it
     /// roots at a dependency, and a hedge): a local charge can only become a disclosure, never the reverse.
     pub(crate) fn super_local(&self, t: &str, s: &str) -> bool {
+        if !boundset_off() {
+            return self.super_local_target(t, s).is_some();
+        }
+        self.super_local_r3(t, s)
+    }
+
+    /// L1a round 3's `super_local`, kept verbatim for `CANDOR_BOUNDSET_OFF`.
+    fn super_local_r3(&self, t: &str, s: &str) -> bool {
         let (Some(lt), Some(st)) = (self.local_traits.get(t), self.local_traits.get(s)) else { return false };
         lt.super_paths.iter().filter(|(l, _)| l == s).any(|(_, p)| {
             p.split('\u{2}').any(|c| {
@@ -10338,6 +10380,173 @@ impl<'a> CallCollector<'a> {
                 st.decl_quals.iter().any(|q| q == c)
             })
         })
+    }
+
+    /// SOUNDNESS R1975/R1977/R1980 (bound-dispatch L1b) — WHAT local trait `t`'s supertrait `s` (a leaf of `LocalTrait::supertraits`)
+    /// NAMES, decided ONCE from the path its declaration wrote (`super_paths`), never from the leaf. Each reading of each recorded path
+    /// is resolved, in order: a crate-local trait DECLARATION it names exactly (`decl_quals`); a std/core/alloc root; a KNOWN dependency
+    /// crate root (`lang::is_known_dep_crate`, the manifest's set — not "any non-std identifier"); else the crate's re-export / alias
+    /// table (`lang::reexport_lookup_at`, longest prefix first), whose every alternative must resolve the same three ways. A `use .. as`
+    /// alias of a local trait is resolved where it was written, so its target's LEAF is returned (`Local("Sup")` for `DepLike`, R1975).
+    /// `None` when no path was recorded for `s` (a fact built without one): each caller keeps its pre-L1b answer. A `Unknown` entry is a
+    /// path none of the above decides (a glob-reached name, an unknown root): callers keep their pre-L1b answer for it too, so this only
+    /// ever MOVES a supertrait whose origin is proven. Several entries (a `#[cfg]` pair, a leaf declared twice) are a union.
+    pub(crate) fn super_origins(&self, t: &str, s: &str) -> Option<Vec<SupOrigin>> {
+        let lt = self.local_traits.get(t)?;
+        let mut out: Vec<SupOrigin> = Vec::new();
+        let mut any = false;
+        for (_, p) in lt.super_paths.iter().filter(|(l, _)| l == s) {
+            any = true;
+            let mut got: Option<SupOrigin> = None;
+            for c in p.split('\u{2}') {
+                let o = self.classify_super_reading(c, 0);
+                let rank = |o: &Option<SupOrigin>| match o {
+                    Some(SupOrigin::Local(_)) => 3,
+                    Some(SupOrigin::Dep(_)) => 2,
+                    Some(SupOrigin::Std(_)) => 1,
+                    _ => 0,
+                };
+                if rank(&o) > rank(&got) {
+                    got = o;
+                }
+            }
+            let o = got.unwrap_or(SupOrigin::Unknown);
+            if !out.contains(&o) {
+                out.push(o);
+            }
+        }
+        any.then_some(out)
+    }
+
+    /// One reading of a written supertrait path (`super_origins`). `None` when undecided.
+    fn classify_super_reading(&self, c: &str, depth: usize) -> Option<SupOrigin> {
+        let c = c.trim_start_matches("::");
+        let c = c.strip_prefix("crate::").unwrap_or(c);
+        if c.is_empty() || depth > 4 {
+            return None;
+        }
+        let leaf = c.rsplit("::").next().unwrap_or(c);
+        if self.local_traits.get(leaf).is_some_and(|lt| lt.decl_quals.iter().any(|q| q == c)) {
+            return Some(SupOrigin::Local(leaf.to_string()));
+        }
+        let root = c.split("::").next().unwrap_or("");
+        if c.contains("::") && matches!(root, "std" | "core" | "alloc") {
+            return Some(SupOrigin::Std(c.to_string()));
+        }
+        if c.contains("::") && !matches!(root, "self" | "super" | "Self") && crate::lang::is_known_dep_crate(root) {
+            return Some(SupOrigin::Dep(c.to_string()));
+        }
+        // the crate's re-export / alias table, longest prefix first (`reexp::Sup` -> `fxdep::Sup`, `facade::sub::Sup`)
+        let segs: Vec<&str> = c.split("::").collect();
+        for n in (1..=segs.len()).rev() {
+            let Some(v) = crate::lang::reexport_lookup_at(&segs[..n].join("::"), n < segs.len()) else { continue };
+            let rest = segs[n..].join("::");
+            let mut alts: Vec<SupOrigin> = Vec::new();
+            for a in v.split(crate::decls::ALIAS_ALT_SEP) {
+                let full = if rest.is_empty() { a.to_string() } else { format!("{a}::{rest}") };
+                // an alternative the table cannot place leaves the whole reading undecided
+                let o = self.classify_super_reading(&full, depth + 1)?;
+                if !alts.contains(&o) {
+                    alts.push(o);
+                }
+            }
+            return (alts.len() == 1).then(|| alts.remove(0));
+        }
+        None
+    }
+
+    /// The crate-local trait (its leaf) that supertrait `s` of `t` is PROVEN to name, under the L1b rule (`super_origins`); round 3's
+    /// answer (`s` itself when `super_local_r3`) under `CANDOR_BOUNDSET_OFF`.
+    pub(crate) fn super_local_target(&self, t: &str, s: &str) -> Option<String> {
+        if boundset_off() {
+            return self.super_local_r3(t, s).then(|| s.to_string());
+        }
+        self.super_origins(t, s)?.into_iter().find_map(|o| match o {
+            SupOrigin::Local(l) => Some(l),
+            _ => None,
+        })
+    }
+
+    /// Is supertrait `s` of `t` PROVEN not to be a crate-local trait (every recorded path resolves to a dependency or std trait)?
+    /// `false` under `CANDOR_BOUNDSET_OFF`, for an unrecorded supertrait, and wherever one reading is undecided.
+    pub(crate) fn super_proven_foreign(&self, t: &str, s: &str) -> bool {
+        if boundset_off() {
+            return false;
+        }
+        self.super_origins(t, s)
+            .is_some_and(|v| !v.is_empty() && v.iter().all(|o| matches!(o, SupOrigin::Dep(_) | SupOrigin::Std(_))))
+    }
+
+    /// The DEPENDENCY paths supertrait `s` of `t` is proven to name (`super_origins`), e.g. `fxdep::Sup` for a written `reexp::Sup`.
+    pub(crate) fn super_dep_paths(&self, t: &str, s: &str) -> Vec<String> {
+        if boundset_off() {
+            return Vec::new();
+        }
+        self.super_origins(t, s)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|o| match o {
+                SupOrigin::Dep(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// R1964 — does the bound leaf `tr` of generic `g` NAME the crate-local trait of that leaf? Its written path (the parameter's own
+    /// qualification, else the impl's, else the leaf), read through this module's `use` map and relative to this module, must name that
+    /// trait's DECLARATION exactly, and the leaf must be declared once. A same-leaf dependency trait written by path never passes.
+    fn bound_names_local(&self, g: &str, tr: &str) -> bool {
+        let Some(lt) = self.local_traits.get(tr) else { return false };
+        if lt.count != 1 {
+            return false;
+        }
+        let w = self
+            .trait_quals_by_param
+            .get(g)
+            .and_then(|m| m.get(tr))
+            .filter(|q| !q.is_empty())
+            .or_else(|| self.impl_trait_quals.get(tr).filter(|q| !q.is_empty()))
+            .cloned()
+            .unwrap_or_else(|| tr.to_string());
+        let x = crate::lang::expand(&w, &self.uses);
+        let rel = crate::decls::qualify(&self.modpath, &x);
+        [x, rel].iter().any(|c| {
+            let c = c.strip_prefix("crate::").unwrap_or(c);
+            lt.decl_quals.iter().any(|q| q == c)
+        })
+    }
+
+    /// R1964 — does local trait `tr` declare `leaf` (a method or an associated fn) itself or through supertraits PROVEN local
+    /// (`super_local_target`)? Never through a leaf reading.
+    fn trait_declares_member_proven(&self, tr: &str, leaf: &str) -> bool {
+        let mut stack = vec![(tr.to_string(), 0usize)];
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        while let Some((t, d)) = stack.pop() {
+            if d > 16 || !seen.insert(t.clone()) {
+                continue;
+            }
+            let Some(lt) = self.local_traits.get(&t) else { continue };
+            if lt.methods.contains(leaf) || lt.assoc.contains(leaf) {
+                return true;
+            }
+            stack.extend(lt.supertraits.iter().filter_map(|s| self.super_local_target(&t, s)).map(|s| (s, d + 1)));
+        }
+        false
+    }
+
+    /// Where a supertrait walk goes next from `t`'s supertrait `s`: the LOCAL trait to recurse into, if any. The L1b rule: a proven-local
+    /// supertrait recurses into the trait it names (an alias's target); one proven foreign does not recurse; an unrecorded or undecided
+    /// one keeps the pre-L1b leaf reading (`s` if a local trait has that leaf). `CANDOR_BOUNDSET_OFF`: the leaf reading always.
+    fn super_walk_leaf(&self, t: &str, s: &str) -> Option<String> {
+        if !boundset_off() {
+            if let Some(l) = self.super_local_target(t, s) {
+                return Some(l);
+            }
+            if self.super_proven_foreign(t, s) {
+                return None;
+            }
+        }
+        self.local_traits.contains_key(s).then(|| s.to_string())
     }
 
     /// The written path of `t`'s supertrait `s` as `expand` read it at the declaration (the first reading), when one was recorded.
@@ -10368,12 +10577,14 @@ impl<'a> CallCollector<'a> {
             }
             let Some(lt) = self.local_traits.get(&t) else { continue };
             for s in &lt.supertraits {
-                if own(s) {
-                    if !out.contains(s) {
-                        out.push(s.clone());
+                // R1977 (L1b) — the local trait the supertrait's written path names, never a same-leaf one it does not
+                let Some(s) = self.super_walk_leaf(&t, s) else { continue };
+                if own(&s) {
+                    if !out.contains(&s) {
+                        out.push(s);
                     }
-                } else if self.local_traits.contains_key(s) {
-                    stack.push((s.clone(), d + 1));
+                } else {
+                    stack.push((s, d + 1));
                 }
             }
         }
@@ -11718,7 +11929,8 @@ impl<'a> CallCollector<'a> {
             && self.returns.contains_key(&crate::model::blanket_impl_key(tr))
             && !candor_report::env::switch("CANDOR_R1723_OFF")
         {
-            let sups: Vec<String> =
+            // R1977 (L1b) — each supertrait as the local trait its written path names (`super_walk_leaf`), never a same-leaf other
+            let sups: Vec<String> = if boundset_off() {
                 lt.supertraits
                     .iter()
                     .filter(|s| {
@@ -11727,7 +11939,24 @@ impl<'a> CallCollector<'a> {
                                 || (assoc && self.super_local(tr, s) && self.trait_declares_member(s, leaf, true)))
                     })
                     .cloned()
-                    .collect();
+                    .collect()
+            } else {
+                let mut v: Vec<String> = Vec::new();
+                for s in &lt.supertraits {
+                    let m = self.super_walk_leaf(tr, s).filter(|w| w.as_str() != tr && self.trait_declares_method(w, leaf, 0));
+                    let a = if assoc {
+                        self.super_local_target(tr, s).filter(|w| w.as_str() != tr && self.trait_declares_member(w, leaf, true))
+                    } else {
+                        None
+                    };
+                    if let Some(w) = m.or(a) {
+                        if !v.contains(&w) {
+                            v.push(w);
+                        }
+                    }
+                }
+                v
+            };
             for s in sups {
                 if candor_report::env::trace("CANDOR_R1723_INSTR") {
                     eprintln!("R1723BLANKET\t{tr}\t{s}\t{leaf}"); // §E1 REACH COUNTER
@@ -12125,6 +12354,27 @@ impl<'a> CallCollector<'a> {
             }
             let Some(lt) = self.local_traits.get(&t) else { continue };
             for s in &lt.supertraits {
+                if !boundset_off() {
+                    // L1b (R1980, R1975) — the origin the written path PROVES: a local trait (an alias's target) is walked; a
+                    // dependency is keyed by the path it RESOLVES to (`reexp::Sup` -> `fxdep::Sup`) with no `unproven` hedge, since a
+                    // known dependency root is not a same-leaf local trait (criterion's `trait Float: float::Float`); a std one forms
+                    // nothing here. An undecided path keeps round 3's answer below.
+                    if let Some(w) = self.super_local_target(&t, s) {
+                        stack.push((w, d + 1));
+                        continue;
+                    }
+                    // (a proven STD supertrait sharing a local leaf keeps round 3's hedge: a std-origin member is SPEC §4's external-
+                    // abstraction case, R1955, whose interim disclosure that hedge is at this site)
+                    let dps = self.super_dep_paths(&t, s);
+                    if self.super_origins(&t, s).is_some_and(|v| !v.is_empty() && v.iter().all(|o| matches!(o, SupOrigin::Dep(_)))) {
+                        for full in dps {
+                            if !deps.iter().any(|(_, f)| f == &full) {
+                                deps.push((s.clone(), full));
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if self.super_local(&t, s) {
                     stack.push((s.clone(), d + 1));
                     continue;
@@ -12806,8 +13056,26 @@ impl<'a> CallCollector<'a> {
         let r1958_dep_super = !targets.is_empty()
             && targets.iter().all(|(t, c)| c.is_none() && self.local_traits.contains_key(t))
             && !targets.iter().any(|(t, _)| self.trait_declares_member(t, leaf, true) || self.r1685_impl_declared(t, leaf));
+        // SOUNDNESS R1964 (bound-dispatch L1b, design N8) — `T::lf()` under `T: dep::Dt + Lt` where the LOCAL bound `Lt` declares `lf`
+        // (itself or through a proven-local supertrait): every non-local bound was keyed as well, minting `dep#Dt::lf`, a member `Dt`
+        // cannot declare — a path call finds an associated item by NAME in every bound, so a second declaration is E0034 and the
+        // program would not compile. The local bound must be PROVEN to be the crate's trait (`bound_names_local`: its written path names
+        // the declaration) and to declare the member over proven-local supertraits only (`trait_declares_member_proven`); a method call
+        // is not this rule's (autoref steps can separate two same-named members, R551). REMOVES the key (and the `invisible` its unjoined
+        // call carried); the local dispatch keeps its own key and its CHA, or its `dispatch:` hedge.
+        let r1964_local = !boundset_off()
+            && p.qself.is_none()
+            && segs.len() == 2
+            && generic(self, &segs[0]).is_some()
+            && targets.iter().any(|(t, c)| c.is_none() && self.bound_names_local(&segs[0], t) && self.trait_declares_member_proven(t, leaf));
         for (tr, concrete) in targets {
             if concrete.is_none() && self.local_traits.get(&tr).is_none() {
+                if r1964_local {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1964DROP\t{}::{leaf}\t{tr}", segs[0]); // §E1 REACH COUNTER (the removed key)
+                    }
+                    continue;
+                }
                 self.route_foreign_generic_member(p, &segs, &tr, leaf, args);
                 continue;
             }
@@ -15896,12 +16164,31 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
             if !candor_report::env::switch("CANDOR_R1495_OFF") {
                 let mut extra: Vec<String> = Vec::new();
+                // SOUNDNESS R1977 (bound-dispatch L1b) — a supertrait whose written path PROVES it a dependency (or std) trait, though a
+                // crate-local trait shares its LEAF (`trait LSub: fxdep::Sup {}` beside `m::Sup`): every index below is leaf-keyed, so
+                // it was walked as the local trait (and `trait_declares_method` dispatched over the local trait's implementors). It is
+                // answered here by its resolved path instead: `(leaf, dependency paths)`, an empty list for a std one.
+                let mut collided: Vec<(String, Vec<String>)> = Vec::new();
                 for tr in &recv_trs {
                     if self.local_traits.contains_key(tr) && !self.trait_declares_method(tr, &leaf, 0) {
                         let mut stack = vec![(tr.clone(), 0usize)];
                         while let Some((t, dep)) = stack.pop() {
                             let Some(lt) = self.local_traits.get(&t) else { continue };
                             for s in &lt.supertraits {
+                                if !boundset_off() && self.local_traits.contains_key(s) && self.super_local_target(&t, s).is_none()
+                                    && self.super_proven_foreign(&t, s)
+                                {
+                                    if !collided.iter().any(|(l, _)| l == s) {
+                                        collided.push((s.clone(), self.super_dep_paths(&t, s)));
+                                    }
+                                    continue;
+                                }
+                                if let Some(w) = (!boundset_off()).then(|| self.super_local_target(&t, s)).flatten().filter(|w| w != s) {
+                                    if dep < 16 {
+                                        stack.push((w, dep + 1)); // R1975 — an alias of a local trait: walk its target
+                                    }
+                                    continue;
+                                }
                                 if self.local_traits.contains_key(s) {
                                     if dep < 16 {
                                         stack.push((s.clone(), dep + 1));
@@ -15924,6 +16211,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                 }
                 if !extra.is_empty() && (crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1495_INSTR")) {
                     eprintln!("R1495SUPER\t{leaf}\t{}", extra.join(",")); // §E1 REACH COUNTER
+                }
+                let conv = matches!(leaf.as_str(), "clone" | "fmt" | "eq" | "ne" | "hash" | "cmp" | "partial_cmp"
+                    | "to_string" | "deref" | "deref_mut" | "as_ref" | "as_mut" | "borrow" | "borrow_mut");
+                for (s, dps) in &collided {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1977METH\t{s}.{leaf}\t{}", dps.join(",")); // §E1 REACH COUNTER
+                    }
+                    if dps.is_empty() {
+                        // std: §4's external-abstraction rule (no edge), disclosed where std declares a non-conventional member
+                        let tb = crate::std_bounds::table();
+                        if !conv && tb.traits_by_leaf(s).iter().any(|p| tb.trait_method(p, &leaf).is_some()) {
+                            self.mark_unresolved(format!("dispatch:{s}.{leaf}"));
+                        }
+                        continue;
+                    }
+                    for full in dps {
+                        self.emit_foreign_member(full, &leaf);
+                    }
+                    // R1495's reason, where THIS crate implements a trait of that leaf (leaf-keyed: a same-leaf local trait's
+                    // implementors count, which only ever adds the disclosure)
+                    if self.trait_impls.get(s.as_str()).is_some_and(|v| !v.is_empty()) {
+                        self.mark_unresolved(format!("dispatch:{s}.{leaf}"));
+                    }
                 }
                 // The foreign route answers for the DEPENDENCY's implementors only; where THIS crate implements that
                 // supertrait itself (tower's `RateLimit: Service`, reachable through `Box<dyn CloneService>` by its
@@ -16478,6 +16788,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         if let Some(tr) = self.trait_self.clone() {
             let recv_is_self = matches!(peel_recv(&node.receiver),
                 syn::Expr::Path(rp) if rp.qself.is_none() && rp.path.is_ident("self"));
+            // SOUNDNESS R1977 (bound-dispatch L1b) — `self.lsm()` in the default body of `trait LSub: fxdep::Sup` beside a crate-local
+            // `m::Sup`: the leaf walk read `lsm` as the local trait's and dispatched over ITS implementors (cfgtwin `lb1_selfm_q`, a
+            // pure program charged `Fs`). Where only that leaf reading declares the member, the member is a DEPENDENCY supertrait's,
+            // answered as R1958 answers it: its key, and the hedge where this crate implements a trait of that leaf.
+            if recv_is_self
+                && !boundset_off()
+                && !crate::bound_proj::bp_off()
+                && !self.trait_declares_method(&tr, &leaf, 0)
+                && self.trait_declares_method_leafwalk(&tr, &leaf, 0)
+            {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1977SELF\t{tr}::{leaf}"); // §E1 REACH COUNTER
+                }
+                self.r1958_dep_super_member(&tr, &leaf);
+            }
             if recv_is_self && self.trait_declares_method(&tr, &leaf, 0) {
                 if candor_report::env::trace("CANDOR_VEINC_INSTR") {
                     eprintln!("VEINC_SELF\t{tr}::{leaf}");

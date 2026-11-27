@@ -1,0 +1,63 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_lb3",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_lb3"
+ ],
+ "detail": true,
+ "id": "lb3",
+ "lib": false,
+ "note": "L1b R1964 (N8): no dependency key for a member a local bound declares; seeded C3 (pure: the key was the only invisible); keep-controls",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "lb3_mixed_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb3_pure_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_many_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_supl_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_depsup_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_collide_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb3_collide_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_where_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_impl_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_bare_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb3_depmem_e"
+  }
+ ]
+}

@@ -2221,6 +2221,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         );
         n
     };
+    // SOUNDNESS R1980 (bound-dispatch L1b) — the manifest's dependency names, for deciding a written supertrait path's origin in Pass B
+    *crate::lang::dep_crates_cell().write().unwrap() = r1657s2_deps.clone();
     let r1657s2_names = install_reexport_names(&merged);
     // R99 (SHAPE 2) — SECOND MERGE, over decls whose type paths have been re-expanded against the
     // crate-wide alias map that only exists once the first merge is done. Pass A walks each file in

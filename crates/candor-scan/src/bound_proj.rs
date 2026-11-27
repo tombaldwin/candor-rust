@@ -492,8 +492,36 @@ impl<'a> super::CallCollector<'a> {
                     }
                     let Some(lt) = self.local_traits.get(&t) else { continue };
                     for sup in &lt.supertraits {
-                        if self.local_traits.contains_key(sup) {
-                            stack.push((sup.clone(), d + 1));
+                        // R1977 (L1b) — a supertrait PROVEN to be a dependency (or std) trait is not the same-leaf local one: its
+                        // member list is unknown here (a dependency) or std's, so it is answered as one, never walked as local
+                        if !super::boundset_off()
+                            && self.local_traits.contains_key(sup)
+                            && self.super_local_target(&t, sup).is_none()
+                            && self.super_proven_foreign(&t, sup)
+                        {
+                            if self.super_dep_paths(&t, sup).is_empty() {
+                                let tb = crate::std_bounds::table();
+                                if tb.traits_by_leaf(sup).iter().any(|p| std_declares(p, leaf)) {
+                                    s.hit = true;
+                                    s.std_hits.push(sup.clone());
+                                }
+                            } else {
+                                // the member the leaf reading took from the same-leaf local trait is (possibly) this dependency
+                                // trait's: a site that answered is still answered, by the disclosure (never left with nothing)
+                                let h = format!("dispatch:{sup}.{leaf}");
+                                if self.trait_declares_method_leafwalk(&t, leaf, 0) {
+                                    s.hit = true;
+                                }
+                                if !s.incomplete.contains(&h) {
+                                    s.incomplete.push(h);
+                                }
+                            }
+                            continue;
+                        }
+                        if let Some(w) = self.super_walk_leaf(&t, sup) {
+                            stack.push((w, d + 1));
+                        } else if self.local_traits.contains_key(sup) {
+                            continue; // L1b: proven foreign, handled above (unreachable under the switch)
                         } else if crate::std_bounds::is_std_trait_leaf(sup) {
                             let t = crate::std_bounds::table();
                             if t.traits_by_leaf(sup).iter().any(|p| std_declares(p, leaf)) {
@@ -855,7 +883,19 @@ impl<'a> super::CallCollector<'a> {
                 continue;
             }
             if self.local_traits.contains_key(l) {
-                if self.local_declares_member(l, leaf, 0) {
+                if self.local_declares_member(l, leaf, 0) && !super::boundset_off() && self.trait_declares_member(l, leaf, true) {
+                    // SOUNDNESS R1953 (bound-dispatch L1b) — the BOUND, not the declaring trait: `where T::Item: Lt`, `Lt: Base`, `lf`
+                    // declared in `Base` dispatched over `Base`'s implementors, so an `Other` implementing only `Base` with a writing
+                    // `lf` was charged though it cannot be `T::Item` (EXECUTED `fr40_supcha_q`, cfgtwin `lb2_supcha_q`: `deny Fs`
+                    // 0/1 on executed-pure code, introduced by R1940). The route's dispatch over a local bound (`dispatch_trait_member`)
+                    // is the R1037 / `T::m` arms' own: `trait_impls[Lt]` (every one of which implements `Base`), the DECLARING trait's
+                    // key (R1794), a blanket impl of `Lt` answered by its supertraits' implementors (R1723, "may cover"), >12 or none
+                    // the `dispatch:` hedge. Only where the bound PROVABLY declares the member (`trait_declares_member`, the dispatch's own
+                    // gate); a member reached over an undecided supertrait keeps the declaring-trait rendering below.
+                    if !out.traits.iter().any(|x| x == l) {
+                        out.traits.push(l.to_string());
+                    }
+                } else if self.local_declares_member(l, leaf, 0) {
                     // the DECLARING trait(s): `T::Item: Sub` with `Sub: Lt` and `lf` declared in `Lt` dispatches over `Lt`'s implementors
                     for d in self.declaring_traits(l, leaf, true) {
                         if !out.traits.contains(&d) {
@@ -893,7 +933,10 @@ impl<'a> super::CallCollector<'a> {
             return false;
         }
         let Some(lt) = self.local_traits.get(l) else { return false };
-        lt.methods.contains(leaf) || lt.assoc.contains(leaf) || lt.supertraits.iter().any(|s| self.local_declares_member(s, leaf, depth + 1))
+        // R1977 (L1b) — into the local trait the supertrait's written path names (`super_walk_leaf`), never a same-leaf other
+        lt.methods.contains(leaf)
+            || lt.assoc.contains(leaf)
+            || lt.supertraits.iter().any(|s| self.super_walk_leaf(l, s).is_some_and(|w| self.local_declares_member(&w, leaf, depth + 1)))
     }
 
     /// Does the local trait `l` have a supertrait (transitively) that is neither local nor std — one whose member list is unknown?
@@ -906,6 +949,20 @@ impl<'a> super::CallCollector<'a> {
             }
             let Some(lt) = self.local_traits.get(&t) else { continue };
             for sup in &lt.supertraits {
+                if !super::boundset_off() {
+                    // L1b — a proven-local supertrait is walked as the trait it names; a proven std one is complete; a proven
+                    // dependency one is foreign. An undecided one keeps round 3's answer below.
+                    if let Some(w) = self.super_local_target(&t, sup) {
+                        stack.push((w, d + 1));
+                        continue;
+                    }
+                    if self.local_traits.contains_key(sup) && self.super_proven_foreign(&t, sup) {
+                        if !self.super_dep_paths(&t, sup).is_empty() {
+                            return true;
+                        }
+                        continue;
+                    }
+                }
                 // round 3 — a supertrait not PROVEN to be the local trait of its leaf (`super_local`) is foreign unless it is std's
                 if self.local_traits.contains_key(sup) && !self.super_local(&t, sup) {
                     let w = self.super_written(&t, sup).unwrap_or_default();

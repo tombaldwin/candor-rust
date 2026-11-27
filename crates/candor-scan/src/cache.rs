@@ -44,6 +44,7 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev239 (rustagent-boundl1b): Pass B decides a supertrait's origin from its recorded path through the re-export table and the manifest's dependency set, so an entry derived under rev238 answers a same-leaf dependency supertrait as the local trait.
     // rev238 (rustagent-boundl1a, round 3): `FileDecls` gains `trait_decl_quals`, and `trait_super_paths` holds two readings per path; a supertrait is local only when one names a declaration exactly.
     // rev237 (rustagent-boundl1a, round 2b): a supertrait path rooted at an item its own module declares is minted `self::`-marked (local); a rev236 entry read it as a dependency.
     // rev236 (rustagent-boundl1a, round 2): `FileDecls` gains `trait_super_paths` (each supertrait's WRITTEN path, expanded where it was written), which decides a
@@ -816,7 +817,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev238/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev239/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -1,0 +1,12 @@
+lb2_supcha_q
+lb2_cover_e
+lb2_blanket_e
+lb2_spell_e
+lb2_generic_e
+lb2_thirteen_q
+lb2_lt13_e
+lb2_twohop_q
+lb2_ref_e
+lb2_inline_q
+lb2_implcl_q
+lb2_blanket2_e

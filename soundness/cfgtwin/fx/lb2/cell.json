@@ -1,0 +1,58 @@
+{
+ "chain": null,
+ "deps": [],
+ "detail": true,
+ "id": "lb2",
+ "lib": false,
+ "note": "L1b R1953: the projection CHA over the bound's implementors, not the declaring supertrait's; blanket/spelling/generic/ref/13 seeds",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "lb2_supcha_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb2_cover_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb2_blanket_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb2_spell_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb2_generic_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb2_thirteen_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb2_lt13_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb2_twohop_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb2_ref_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb2_inline_q"
+  },
+  {
+   "kind": "q",
+   "name": "lb2_implcl_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb2_blanket2_e"
+  }
+ ]
+}

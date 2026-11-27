@@ -1,0 +1,91 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_lb1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_lb1"
+ ],
+ "detail": true,
+ "id": "lb1",
+ "lib": false,
+ "note": "L1b R1977: method/assoc spellings through a dependency supertrait that shares its leaf with a crate-local trait; local-supertrait controls",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "lb1_meth_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_meth_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb1_methuse_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_methuse_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb1_where_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_where_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb1_dyn_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_dyn_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb1_proj_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb1_projm_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_projm_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_local_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_localpath_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_localdyn_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb1_selfp_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_selfp_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb1_selfm_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb1_selfm_e"
+  }
+ ]
+}

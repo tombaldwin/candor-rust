@@ -3245,6 +3245,22 @@ pub(crate) fn reexport_names_cell() -> &'static std::sync::RwLock<ReexportNames>
     REEXPORT_NAMES.get_or_init(|| std::sync::RwLock::new(Default::default()))
 }
 
+/// SOUNDNESS R1980 (bound-dispatch L1b) — the crate names this scan's manifests declare as dependencies (`deps::cargo_deps`, the
+/// in-source spelling: `-` read as `_`, a `package = ..` rename keyed by its local name). A written path's root is a DEPENDENCY only
+/// when it is one of these; "any identifier that is not std" is not evidence (a local module reached through a glob reads the same).
+/// Installed with the re-export table, before Pass B; empty during Pass A and wherever no scan installed it (unit collectors), where
+/// every root reads as not-known and the callers keep their pre-L1b answer.
+pub(crate) static DEP_CRATES: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+
+pub(crate) fn dep_crates_cell() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+    DEP_CRATES.get_or_init(|| std::sync::RwLock::new(Default::default()))
+}
+
+/// Is `root` a crate this scan's manifests declare as a dependency (`DEP_CRATES`)?
+pub(crate) fn is_known_dep_crate(root: &str) -> bool {
+    dep_crates_cell().read().is_ok_and(|s| s.contains(root))
+}
+
 /// SOUNDNESS R1697/R1702 — the crate's module namespaces (`decls::NsIndex`), installed with the re-export table; `None`
 /// during Pass A and under `CANDOR_R1697_OFF`.
 pub(crate) static NS_INDEX: std::sync::OnceLock<std::sync::RwLock<Option<crate::decls::NsIndex>>> = std::sync::OnceLock::new();
