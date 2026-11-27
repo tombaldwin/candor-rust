@@ -11,6 +11,7 @@ usage: std_assoc.py <rust-src library dir>  -> lines, sorted, unique:
     I<TAB><type leaf><TAB><fn name>   a STABLE `pub fn` (any receiver) of an inherent `impl <Type>` block
     T<TAB><fn name>                   a fn declared in a `pub trait` body (any receiver)
     TS<TAB><fn name><TAB><trait><TAB><implementor leaves, or ->  a fn declared in a SEALED `pub impl(..) trait` body (R1913)
+    P/TC/N/G rows                     the std trait scope facts (R1951/R1956, see the block before the output)
 The integer types' inherent fns are written inside `int_impl!`/`uint_impl!`, so every `pub fn` in
 `int_macros.rs` / `uint_macros.rs` is filed under every signed / unsigned integer leaf, and every `pub fn` in a
 `macro_rules!` of `core/src/num/mod.rs` that writes an integer impl (`from_str_int_impl!`) under every integer leaf.
@@ -257,9 +258,281 @@ if bad:
     sys.stderr.write("std_assoc.py: SELF-CHECK FAILED — a sibling family is incomplete:\n  " + "\n  ".join(bad) + "\n")
     sys.exit(3)
 
+# SOUNDNESS R1951 / R1956 (lane L3) — the facts the std-type path rule needs to decide which std traits are IN SCOPE, read from rust-src:
+#   P<TAB><edition><TAB><leaf>          a name the edition's prelude imports that is a `pub trait` leaf somewhere in std (over-inclusion only
+#                                       keeps a withholding: `Debug`/`Hash` are the derive macros there, and are kept)
+#   TC<TAB><fn><TAB><trait><TAB><impls> a stable member of a stable SEALED trait, the trait by its CANONICAL path (the module that declares it:
+#                                       unix's and windows' `OsStrExt` are different traits with different members), and the std types it is
+#                                       implemented for by an UNGATED, stable impl in the declaring file (`-` for none)
+#   N<TAB><path><TAB><trait>            a path a `use` can name that sealed trait by (`std::os::unix::prelude::OsStrExt`)
+#   G<TAB><module><TAB><trait>          `use <module>::*` brings that sealed trait into scope on every target the module exists on (an ungated,
+#                                       stable declaration or re-export, followed through named and glob re-exports)
+# A missing TC/N/G row only leaves a dependency join in place (an over-charge); a WRONG one withholds a join where the dependency's member
+# runs, so these rows are built from declarations only, never from names.
+STD = os.path.join(lib, 'std', 'src')
+trait_leaves = set()
+for crate in ('core', 'alloc', 'std'):
+    for root, dirs, files in os.walk(os.path.join(lib, crate, 'src')):
+        dirs[:] = [d for d in dirs if d not in ('tests', 'benches')]
+        for f in files:
+            if f.endswith('.rs'):
+                for t in pub_trait.finditer(strip_comments(open(os.path.join(root, f), errors='replace').read())):
+                    trait_leaves.add(t.group(2))
+
+def use_idents(text):
+    """(leaf names, glob paths) of every `pub use ..;` statement in `text`."""
+    names, globs = set(), []
+    for m in re.finditer(r'\bpub\s+use\s+([^;]*);', text):
+        body = re.sub(r'\s+', '', m.group(1))
+        for leaf in re.findall(r'([A-Za-z_][A-Za-z0-9_]*)(?=[,}]|$)', body):
+            if leaf not in ('self', 'super', 'crate'):
+                names.add(leaf)
+        if body.endswith('*'):
+            globs.append(body)
+    return names, globs
+
+def read(path):
+    return strip_comments(open(path, errors='replace').read())
+
+prelude = {}
+v1 = use_idents(read(os.path.join(lib, 'core', 'src', 'prelude', 'v1.rs')))[0] | use_idents(read(os.path.join(STD, 'prelude', 'v1.rs')))[0]
+core_prelude = read(os.path.join(lib, 'core', 'src', 'prelude', 'mod.rs'))
+for ed in ('2015', '2018', '2021', '2024'):
+    mm = re.search(r'\bpub\s+mod\s+rust_%s\s*\{' % ed, core_prelude)
+    extra = set()
+    if mm:
+        e = block_end(core_prelude, mm.end() - 1)
+        extra = use_idents(core_prelude[mm.end() - 1:e + 1])[0] - {'v1'}
+    prelude[ed] = {n for n in (v1 | extra) if n in trait_leaves}
+
+def attrs_before(text, start):
+    k = max(text.rfind(';', 0, start), text.rfind('}', 0, start), text.rfind('{', 0, start))
+    return text[k + 1:start]
+
+# the std module tree: module path -> text (a file, or an inline `pub mod x { .. }` block inside one)
+mods = {}
+def add_inline(mp, text):
+    mods[mp] = text
+    for mm in re.finditer(r'\bpub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{', text):
+        if '#[unstable(' in attrs_before(text, mm.start()) or re.search(r'#\[cfg\(', attrs_before(text, mm.start())):
+            continue
+        e = block_end(text, mm.end() - 1)
+        inner = text[mm.end():e]
+        if text.count('{', 0, mm.start()) - text.count('}', 0, mm.start()) == 0:
+            add_inline(mp + '::' + mm.group(1), inner)
+for root, dirs, files in os.walk(STD):
+    dirs[:] = [d for d in dirs if d not in ('tests', 'benches', 'sys', 'sys_common')]
+    for f in files:
+        if not f.endswith('.rs') or f in ('tests.rs', 'benches.rs'):
+            continue
+        rel = os.path.relpath(os.path.join(root, f), STD)[:-3].split(os.sep)
+        segs = [x for x in rel if x not in ('mod', 'lib')]
+        add_inline('::'.join(['std'] + segs), read(os.path.join(root, f)))
+
+def top_level(text, pos):
+    return text.count('{', 0, pos) - text.count('}', 0, pos) == 0
+
+unstable_memo = {}
+def module_unstable(mp):
+    """the module, or a module above it, is `#![unstable]` (an inner attribute) or declared `#[unstable] pub mod x`"""
+    if mp in unstable_memo: return unstable_memo[mp]
+    r = '#![unstable(' in mods.get(mp, '')
+    if not r and '::' in mp:
+        par, leaf = mp.rsplit('::', 1)
+        pt = mods.get(par, '')
+        # every declaration unstable (a doc-only or unsupported-target arm of a `cfg_select!` declares `#[unstable] pub mod unix {}` beside
+        # the real, stable `pub mod unix;`)
+        decls = ['#[unstable(' in attrs_before(pt, mm.start()) for mm in re.finditer(r'\bpub\s+mod\s+%s\b' % re.escape(leaf), pt)]
+        r = (bool(decls) and all(decls)) or module_unstable(par)
+    unstable_memo[mp] = r
+    return r
+
+def decl_sealed(mp):
+    """sealed traits DECLARED at the top level of module mp: name -> (stable, ungated)"""
+    out = {}
+    if module_unstable(mp):
+        return out
+    t = mods.get(mp, '')
+    for m in pub_trait.finditer(t):
+        if m.group(1) and top_level(t, m.start()):
+            a = attrs_before(t, m.start())
+            out[m.group(2)] = ('#[unstable(' not in a, not re.search(r'#\[cfg\(', a))
+    return out
+
+def resolve_mod(mp, segs):
+    """the module a `use` path's module part names, from module mp; None outside std"""
+    cur = mp.split('::')
+    if not segs:
+        return mp
+    if segs[0] == 'crate' or segs[0] == 'std':
+        cur, segs = ['std'], segs[1:]
+    elif segs[0] == 'self':
+        segs = segs[1:]
+    elif segs[0] == 'super':
+        while segs and segs[0] == 'super':
+            cur, segs = cur[:-1], segs[1:]
+    elif segs[0] in ('core', 'alloc'):
+        return None
+    for x in segs:
+        cur = cur + [x]
+    return '::'.join(cur)
+
+def reexports(mp):
+    """top-level `pub use` of module mp: (bound name, target module, target name, stable, ungated); a glob is name `*`. A renamed
+    re-export (`pub use x::A as B`) binds `B`."""
+    t = mods.get(mp, '')
+    out = []
+    for m in re.finditer(r'\bpub\s+use\s+([^;]*);', t):
+        if not top_level(t, m.start()):
+            continue
+        a = attrs_before(t, m.start())
+        st, ug = '#[unstable(' not in a, not re.search(r'#\[cfg\(', a)
+        body = re.sub(r'\s+as\s+', ' as ', m.group(1).strip())
+        body = re.sub(r'\s*(::|,|\{|\})\s*', r'\1', body)
+        def expand(prefix, tree):
+            if tree.startswith('{') and tree.endswith('}'):
+                depth, cur, parts = 0, '', []
+                for ch in tree[1:-1]:
+                    if ch == ',' and depth == 0:
+                        parts.append(cur); cur = ''; continue
+                    depth += ch == '{'; depth -= ch == '}'; cur += ch
+                if cur.strip(): parts.append(cur)
+                for x in parts: expand(prefix, x.strip())
+                return
+            i = tree.find('::{')
+            if i >= 0:
+                expand(prefix + tree[:i].split('::'), tree[i + 2:]); return
+            bound = None
+            if ' as ' in tree:
+                tree, bound = tree.split(' as ', 1)
+            segs = prefix + tree.split('::')
+            name = segs[-1]
+            if name == 'self':
+                return
+            out.append((bound or name, resolve_mod(mp, segs[:-1]), name, st, ug))
+        expand([], body)
+    return out
+
+canon_memo = {}
+def canonical(mp, name, depth=0):
+    """(canonical path, stable) of sealed trait `name` as nameable in module mp, or None"""
+    key = (mp, name)
+    if key in canon_memo: return canon_memo[key]
+    canon_memo[key] = None
+    if depth > 12 or mp is None: return None
+    d = decl_sealed(mp)
+    r = None
+    if name in d:
+        r = (mp + '::' + name, d[name][0], d[name][1])
+    else:
+        for b, tm, n, st, ug in reexports(mp):
+            if n == '*' and tm:
+                c = canonical(tm, name, depth + 1)
+                if c: r = (c[0], c[1] and st, c[2] and ug); break
+            elif b == name and tm:
+                c = canonical(tm, n, depth + 1)
+                if c: r = (c[0], c[1] and st, c[2] and ug); break
+    canon_memo[key] = r
+    return r
+
+sealed_leaves = {tr for (_, tr) in sealed_fns}
+N_rows, G_rows, canon_traits, N_ungated = set(), set(), set(), set()
+for mp in sorted(mods):
+    for leaf in sorted(sealed_leaves):
+        c = canonical(mp, leaf)
+        if c and c[1]:
+            N_rows.add((mp + '::' + leaf, c[0]))
+            canon_traits.add(c[0])
+            if c[2]:
+                G_rows.add((mp, c[0]))
+                N_ungated.add((mp + '::' + leaf, c[0]))
+
+TC_rows, expect_members = set(), {}
+for ct in sorted(canon_traits):
+    mp, leaf = ct.rsplit('::', 1)
+    t = mods.get(mp, '')
+    m = re.search(r'\bpub\s+(impl\s*\([^)]*\)\s+)(?:(?:const|unsafe|auto)\s+)*trait\s+%s\b' % re.escape(leaf), t)
+    if not m: continue
+    b = t.find('{', m.end()); e = block_end(t, b)
+    body = t[b:e + 1]
+    members = [fm.group(1) for fm in any_fn.finditer(body) if not unstable(body, fm.start())]
+    impls = set()
+    for im in re.finditer(r'(?<![A-Za-z0-9_])impl\s*(?:<[^{};]*?>)?\s*%s\s+for\s+&?\s*(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)' % re.escape(leaf), t):
+        a = attrs_before(t, im.start())
+        if top_level(t, im.start()) and '#[unstable(' not in a and not re.search(r'#\[cfg\(', a):
+            impls.add(im.group(1))
+    for n in members:
+        TC_rows.add((n, ct, ','.join(sorted(impls)) or '-'))
+    expect_members[ct] = set(members)
+
+# SELF-CHECK (R1951 / R1956) — the scope rows must hold their structure, and the check must be able to fail on ANY dropped row:
+# `STD_ASSOC_SELFCHECK_DROP_ROW='P|2024|Future'` (or `G|<module>|<trait>`, `N|<path>|<trait>`, `TC|<fn>|<trait>`) drops that row after it is
+# derived and before the checks, and the generator must refuse (exit 3). Each row kind is checked against a second derivation: the prelude
+# editions against each other and anchors; G against the ungated N bindings and N against G; TC against each trait's declared members.
+P_rows = {(ed, n) for ed, ns in prelude.items() for n in ns}
+drop = os.environ.get('STD_ASSOC_SELFCHECK_DROP_ROW')
+if drop:
+    k, a, b2 = drop.split('|', 2)
+    if k == 'P': P_rows.discard((a, b2))
+    elif k == 'G': G_rows.discard((a, b2))
+    elif k == 'N': N_rows.discard((a, b2))
+    elif k == 'TC': TC_rows = {r for r in TC_rows if (r[0], r[1]) != (a, b2)}
+bad2 = []
+ed_sets = {ed: {n for e2, n in P_rows if e2 == ed} for ed in ('2015', '2018', '2021', '2024')}
+if ed_sets['2015'] != ed_sets['2018']:
+    bad2.append('prelude: 2015 and 2018 differ')
+if not (ed_sets['2018'] < ed_sets['2021'] < ed_sets['2024']):
+    bad2.append('prelude: the editions are not strictly increasing (2018 < 2021 < 2024)')
+for ed, need in (('2015', {'Clone', 'Default', 'Iterator', 'From', 'Into', 'Drop', 'ToString', 'ToOwned', 'IntoIterator', 'Extend'}),
+                 ('2021', {'TryFrom', 'TryInto', 'FromIterator'}), ('2024', {'Future', 'IntoFuture'})):
+    if not need <= ed_sets[ed]:
+        bad2.append('prelude %s lacks %s' % (ed, sorted(need - ed_sets[ed])))
+gmods = {}
+for m_, t_ in G_rows:
+    gmods.setdefault(m_, set()).add(t_)
+for need_m, need_l in (('std::os::unix::prelude', ('OsStrExt', 'OsStringExt', 'CommandExt', 'ExitStatusExt')),
+                       ('std::os::unix::ffi', ('OsStrExt', 'OsStringExt'))):
+    have = {t_.rsplit('::', 1)[1] for t_ in gmods.get(need_m, ()) if t_.startswith('std::os::unix::')}
+    if not set(need_l) <= have:
+        bad2.append('glob %s lacks %s' % (need_m, sorted(set(need_l) - have)))
+for m_, ts in gmods.items():   # a prelude module re-exports: every trait it brings is brought by some sibling module too
+    if m_.endswith('::prelude'):
+        par = m_.rsplit('::', 1)[0]
+        sib = set().union(*[v for k2, v in gmods.items() if k2.startswith(par + '::') and k2 != m_])
+        if not ts <= sib:
+            bad2.append('glob %s brings %s that no sibling module declares or re-exports' % (m_, sorted(ts - sib)))
+for _, t_ in G_rows | N_rows:
+    if not any(r[1] == t_ for r in TC_rows):
+        bad2.append('trait %s is nameable but has no TC member row' % t_)
+for n_, t_, _ in TC_rows:
+    if (t_.rsplit('::', 1)[0] + '::' + t_.rsplit('::', 1)[1], t_) not in N_rows and not any(x[1] == t_ for x in N_rows):
+        bad2.append('trait %s has TC rows but no N path' % t_)
+for pth, ct in N_ungated:
+    if (pth.rsplit('::', 1)[0], ct) not in G_rows:
+        bad2.append('glob %s lacks %s, which it binds ungated as %s' % (pth.rsplit('::', 1)[0], ct, pth))
+for m_, ct in G_rows:
+    if not any(p_.rsplit('::', 1)[0] == m_ and c_ == ct for p_, c_ in N_rows):
+        bad2.append('glob %s brings %s but no N path names it there' % (m_, ct))
+for ct, want in expect_members.items():
+    have = {r[0] for r in TC_rows if r[1] == ct}
+    if have != want:
+        bad2.append('trait %s: TC members %s, declared %s' % (ct, sorted(have), sorted(want)))
+if bad2:
+    sys.stderr.write("std_assoc.py: SELF-CHECK FAILED — the scope rows are inconsistent:\n  " + "\n  ".join(sorted(set(bad2))) + "\n")
+    sys.exit(3)
+
 for l, n in sorted(inh):
     print(f"I\t{l}\t{n}")
 for n in sorted(trait_fns):
     print(f"T\t{n}")
 for n, tr in sorted(sealed_fns):
     print(f"TS\t{n}\t{tr}\t{','.join(sorted(impls_for.get(tr, ()))) or '-'}")
+
+for ed, n in sorted(P_rows):
+    print(f"P\t{ed}\t{n}")
+for n, ct, im in sorted(TC_rows):
+    print(f"TC\t{n}\t{ct}\t{im}")
+for pth, ct in sorted(N_rows):
+    print(f"N\t{pth}\t{ct}")
+for m_, ct in sorted(G_rows):
+    print(f"G\t{m_}\t{ct}")

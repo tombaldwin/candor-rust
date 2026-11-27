@@ -1887,6 +1887,82 @@ for _c in ('bl1', 'bl1b', 'bl2', 'bl2b', 'la2', 'bl7', 'bl10'):
         pred(_c, _p, 'record', 'record', 'record')
 
 
+# l3s, l3e, l3g (lane L3, rust-bound-l3): the std-type path rule's SCOPE, each a one-variable fixture with executed ground truth.
+#   l3s  edition 2021: a member a std trait declares (`from_str`, `default`, `get`, `try_from`, `from_iter`, `to_string`) on a std type, with a
+#        dependency trait implementing it for that type. `_e`: only the dependency's trait applies in scope (its impl runs). `_q`: a std trait
+#        implemented for the type is in scope (std's runs, pure) — by an import, a fn-body import, `use super::*`, a local re-export, `as _`, a
+#        rename, the 2021 prelude — while the dependency still implements the member for the type. Two `_e` are the residuals the rule keeps
+#        withheld on purpose (a glob it cannot enumerate; a parent's import it reads over-inclusively); one `_q` is the over-charge it accepts
+#        (a macro-written `use`).
+#   l3e  edition 2018: `from_iter` through a dependency trait (FromIterator is not in the 2018 prelude), and the imported-std twin
+#   l3g  the R1913 sealed-trait withholding generalised (R1956/R1963): a GLOB of a std module that brings the sealed trait withholds the
+#        join where std's member runs (`_q`), and every shape where the dependency's member runs must keep it (`_e`): another type, a
+#        block-scoped or parent-module glob, a re-export elsewhere, a cfg-gated glob, a module that does not export the trait, and a member
+#        of ANOTHER platform's trait of the same leaf (`encode_wide` is windows' `OsStrExt`'s, so unix's in scope leaves the dependency's).
+_l3s_dep = """pub trait Parse { fn from_str(s: &str) -> Self; }
+pub trait Df { fn default() -> Self; }
+pub trait GetX { fn get(s: &str) -> Self; }
+pub trait GetU { fn get(x: u8) -> Self; }
+pub trait TryFromX { fn try_from(s: &str) -> Self; }
+pub trait FromIt { fn from_iter(v: Vec<char>) -> Self; }
+pub trait Tos { fn to_string(&self) -> String; }
+pub trait Other {}
+impl Parse for String { fn from_str(_s: &str) -> Self { EFF String::new() } }
+impl Df for std::time::Instant { fn default() -> Self { EFF std::time::Instant::now() } }
+impl Df for String { fn default() -> Self { EFF String::new() } }
+impl Df for std::time::SystemTime { fn default() -> Self { std::time::SystemTime::UNIX_EPOCH } }
+impl GetX for std::path::PathBuf { fn get(_s: &str) -> Self { EFF std::path::PathBuf::new() } }
+impl GetU for usize { fn get(_x: u8) -> Self { EFF 0 } }
+impl TryFromX for String { fn try_from(_s: &str) -> Self { EFF String::new() } }
+impl FromIt for String { fn from_iter(_v: Vec<char>) -> Self { EFF String::new() } }
+impl Tos for std::path::PathBuf { fn to_string(&self) -> String { EFF String::new() } }
+"""
+bm_cell('l3s', """use std::path::PathBuf;
+mod a { use DEP::Parse; pub fn e() { let _ = String::from_str("x"); } }
+mod b { use DEP::Df; pub fn e() { let _ = std::time::Instant::default(); } }
+mod c { #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::default(); } }
+mod d { use std::str::FromStr; #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::from_str("x"); } }
+mod e { #[allow(unused_imports)] use DEP::Other; pub fn q() { use std::str::FromStr; let _ = String::from_str("x"); } }
+mod f { #[allow(unused_imports)] use std::str::FromStr; pub mod g { use super::*; #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::from_str("x"); } } }
+mod pre { pub use std::str::FromStr; }
+mod h { use crate::pre::FromStr; #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::from_str("x"); } }
+mod i { use std::str::FromStr as _; #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::from_str("x"); } }
+mod j { use std::str::FromStr as Fs; #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::from_str("x"); } }
+mod k { use DEP::GetX; pub fn e() { let _ = std::path::PathBuf::get("x"); } }
+mod l { use DEP::GetU; pub fn e() { let _ = usize::get(1u8); } }
+mod m { #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::try_from("x"); } }
+mod n { #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::from_iter(vec!['a']); } }
+mod o { use DEP::Tos; pub fn e() { let _ = std::path::PathBuf::to_string(&std::path::PathBuf::new()); } }
+mod p { use DEP::*; pub fn e() { let _ = String::from_str("x"); } }
+macro_rules! imp_l3s { () => { use std::str::FromStr; } }
+mod r { imp_l3s!(); #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::from_str("x"); } }
+mod t { use DEP::Df; pub fn q() { let _ = std::time::SystemTime::default(); } }
+mod u { #[allow(unused_imports)] use std::str::FromStr; pub mod v { use DEP::Parse; pub fn e() { let _ = String::from_str("x"); } } }
+pub fn l3s_fromstr_dep_e() { a::e() }
+pub fn l3s_default_notimpl_e() { b::e() }
+pub fn l3s_default_prelude_q() { c::q() }
+pub fn l3s_fromstr_import_q() { d::q() }
+pub fn l3s_fromstr_fnbody_q() { e::q() }
+pub fn l3s_fromstr_superglob_q() { f::g::q() }
+pub fn l3s_fromstr_reexport_q() { h::q() }
+pub fn l3s_fromstr_asunder_q() { i::q() }
+pub fn l3s_fromstr_rename_q() { j::q() }
+pub fn l3s_get_pathbuf_e() { k::e() }
+pub fn l3s_get_usize_e() { l::e() }
+pub fn l3s_tryfrom_2021_q() { m::q() }
+pub fn l3s_fromiter_2021_q() { n::q() }
+pub fn l3s_tostring_blanket_e() { o::e() }
+pub fn l3s_fromstr_depglob_e() { p::e() }
+pub fn l3s_fromstr_macrouse_q() { r::q() }
+pub fn l3s_default_pureimpl_q() { t::q() }
+pub fn l3s_fromstr_parentimport_e() { u::v::e() }
+""", _l3s_dep, 'lane L3: the std-type path rule decides a std-trait-named member by SCOPE (implemented for the type AND in scope), not by name (R1951/R1962)')
+bm_cell('l3e', """mod a { use DEP::FromIt; pub fn e() { let _ = String::from_iter(vec!['a']); } }
+mod b { use std::iter::FromIterator; #[allow(unused_imports)] use DEP::Other; pub fn q() { let _ = String::from_iter(vec!['a']); } }
+pub fn l3e_fromiter_2018_e() { a::e() }
+pub fn l3e_fromiter_import_2018_q() { b::q() }
+""", _l3s_dep, 'lane L3, edition 2018: FromIterator is not in the 2018 prelude, so only an import brings the std trait (R1962)', edition='2018')
+
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):
     arms = ''.join('        "%s" => %s%s(),\n' % (p, crate_ref, p) for p, _, _ in c['probes'])

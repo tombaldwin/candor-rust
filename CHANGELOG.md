@@ -11,6 +11,18 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **⚠ Lane rust-bound-l3 (1/2, additive): the std-type path rule decides a std-trait-named member by SCOPE, not by name (SOUNDNESS R1951,
+  R1962).** `Ty::m(..)` on a std type with no inherent `m`, where some std trait declares `m`, used to be withheld from the chained dependency join BY
+  NAME, so a dependency trait's impl that runs read silent: `String::from_str` with only a dependency `Parse` imported, `Instant::default()` (Default is
+  in the prelude but not implemented for Instant), `PathBuf::get` / `usize::get` (SliceIndex's members are unstable), edition-2018 `String::try_from` /
+  `String::from_iter`. The join is now withheld only where a std trait declaring `m` is implemented for the type by an ungated impl AND may be in scope
+  (any import the unit can name bare, any glob, the prelude); a 2021/2024-only prelude trait withholds unless the package's manifest proves an older
+  edition. Every unknown keeps the name rule. Chained only: a dependency member that runs now charges (or, where its impl is pure and so has no entry,
+  is disclosed `Unknown`); unchained nothing changes. New generated rows: `std_assoc.tsv` `P` (the prelude by edition, read from rust-src; `TC`/`N`/`G`
+  are generated and not yet read; `gen/std_assoc.sh --check | --selftest`, the selftest proving the generator refuses a dropped row) and
+  `std_bounds.tsv` `IC`/`U` (impls gated more narrowly than their type; members of std traits in `os`/`sys`). New cfgtwin cells `l3s`, `l3e`
+  (executed). Cache rev241.
+
 - **⚠ Lane rust-lc1: a supertrait written with a LEADING `::` names an extern crate, never a same-named local module's trait (edition 2018+).** `trait LSub:
   ::dep::Sup {}` beside a crate-local `pub mod dep { pub trait Sup }` was read as the LOCAL trait (the recorded path dropped its `::` and the origin
   check matched the local declaration), so an executed-pure program instantiating only the dependency's implementor read `Fs` through the local trait's

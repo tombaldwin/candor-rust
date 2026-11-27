@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev241 (rustagent-boundl3): SOUNDNESS R1951/R1962 — Pass B's std-type path marker for a member a std trait declares is decided by SCOPE (a std trait
+    // implemented for the type and in scope withholds; none carries the marker, `@<edition>|` when only a later edition's prelude would bring one); a rev240
+    // entry withholds it by NAME, the silence this closes. Mandatory.
     // rev240 (rustagent-lc1): a supertrait path with a LEADING `::` in an edition-2018+ package is an extern crate, never a crate-local trait, so an entry derived under rev239 answers it as the same-named local one.
     // rev239 (rustagent-boundl1b): Pass B decides a supertrait's origin from its recorded path through the re-export table and the manifest's dependency set, so an entry derived under rev238 answers a same-leaf dependency supertrait as the local trait.
     // rev238 (rustagent-boundl1a, round 3): `FileDecls` gains `trait_decl_quals`, and `trait_super_paths` holds two readings per path; a supertrait is local only when one names a declaration exactly.
@@ -818,7 +821,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev240/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev241/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

@@ -198,6 +198,15 @@ pub(crate) fn boundset_off() -> bool {
     *OFF.get_or_init(|| candor_report::env::switch("CANDOR_BOUNDSET_OFF"))
 }
 
+/// SOUNDNESS R1951 — `CallCollector::r1951_std_name_scope`'s answer for a std-trait-named member on a std type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum R1951Scope {
+    /// a std trait implemented for the type may be in scope: std's member may be the one that runs (the old name rule)
+    Withhold,
+    /// none is: carry the dependency join marker; `Some(edition)` when a std trait in the prelude from that edition applies
+    Carry(Option<u16>),
+}
+
 pub(crate) struct CallCollector<'a> {
     /// The module path of the function being walked. A bare `CFG` reference names the ENCLOSING module's
     /// static, so the forcing edge must be built with this path — see `lazy_qual`.
@@ -7522,6 +7531,9 @@ impl<'a> CallCollector<'a> {
         let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
         let Some(member) = segs.last().cloned() else { return };
         // (the type's path, the written trait path when the call names one)
+        // SOUNDNESS R1951 — the edition from which a std trait that is applicable here is in the PRELUDE (`TryFrom`: 2021); the marker is
+        // then joined only in a package the manifest proves older (`scan.rs`, `@<edition>|` before the trait list).
+        let mut edition_gate: Option<u16> = None;
         let (ty, tr_written): (String, Option<String>) = match &p.qself {
             Some(q) => {
                 let Some(t) = crate::lang::type_path(&q.ty, &self.uses) else { return };
@@ -7572,10 +7584,24 @@ impl<'a> CallCollector<'a> {
                 vec![(r, format!("!{tl}"))]
             }
             None => {
-                // std's own for THIS type (an inherent, any receiver — Rust resolves it before any trait), or a name a std
-                // trait declares (`default`, `from_str`: std may implement it for the type): neither joined nor hedged.
-                if crate::std_assoc::has_inherent(&leaf, &member) || crate::std_assoc::is_std_trait_fn(&member) {
+                // std's own for THIS type (an inherent, any receiver — Rust resolves it before any trait): neither joined nor hedged.
+                if crate::std_assoc::has_inherent(&leaf, &member) {
                     return;
+                }
+                // SOUNDNESS R1951 / R1962 — a name a std trait declares (`default`, `from_str`, `get`, `try_from`) is std's only where such a trait
+                // is IMPLEMENTED for this type and IN SCOPE here; the name alone withheld the join wherever the dependency's was the member that
+                // runs (`String::from_str` with only a dependency `Parse` imported, `Instant::default()` — `Default` is in the prelude but not
+                // implemented for `Instant` — `PathBuf::get`, edition-2018 `String::try_from`). See `r1951_std_name_scope`.
+                if crate::std_assoc::is_std_trait_fn(&member) {
+                    match self.r1951_std_name_scope(&member, &leaf) {
+                        R1951Scope::Withhold => return,
+                        R1951Scope::Carry(g) => {
+                            if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1951_INSTR") {
+                                eprintln!("R1951CARRY\t{leaf}::{member}\t{}", g.map_or("-".to_string(), |y| y.to_string())); // §E1 REACH COUNTER
+                            }
+                            edition_gate = g;
+                        }
+                    }
                 }
                 // SOUNDNESS R1913 — a SEALED std trait (`CommandExt`, `OsStrExt`, ..) declares the member and this module IMPORTS it: std's
                 // is the member that runs (a dependency trait of the same name in scope beside it would be E0034), so the join would
@@ -7609,6 +7635,10 @@ impl<'a> CallCollector<'a> {
         };
         let argc = args.len().min(255) as u8;
         for (cr, trs) in crates {
+            let trs = match edition_gate {
+                Some(y) => format!("@{y}|{trs}"),
+                None => trs,
+            };
             if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1757_INSTR") {
                 eprintln!("R1757SITE\t{cr}\t{leaf}::{member}\t{trs}"); // §E1 REACH COUNTER (a site; the join is counted in scan.rs)
             }
@@ -7635,6 +7665,62 @@ impl<'a> CallCollector<'a> {
                     v.ends_with(&tail) && matches!(v.split("::").next(), Some("std" | "core" | "alloc"))
                 }))
         })
+    }
+
+    /// SOUNDNESS R1951 / R1962 (lane L3) — the scope test for an UNNAMED-trait path call `Ty::member` on a std type with no inherent
+    /// `member`, where some std trait declares `member`. Rust's order (resolver M3 + compiles-as-evidence): a std trait competes only where
+    /// it is IMPLEMENTED for `Ty` and IN SCOPE; where one does, std's member runs (a dependency trait applicable beside it would be E0034),
+    /// so the join is withheld. Where none does, the member that runs is a trait impl from a trait in scope — the dependency's — and the
+    /// marker is carried for the chained join (and its miss-branch hedge) to answer.
+    ///
+    /// Every fact that could make the answer WRONG IN THE SILENT DIRECTION keeps the old name withholding (`Withhold`):
+    /// * a std trait in a directory `std_bounds.tsv` does not read declares the member (`U` rows: `os`'s `FromRawFd::from_raw_fd`, ..);
+    /// * the type is not an implementing shape of the table (`NonZeroU8` is an alias of `NonZero<u8>`; a type of a skipped directory);
+    /// * a declaring trait is implemented for the type, or by a blanket impl (`*`), by an UNGATED impl (`IC` rows are gated ones, which
+    ///   do not withhold: on a target without the impl the dependency's runs), and MAY be in scope: imported by any `use` this unit can
+    ///   see (module, enclosing modules, fn body, crate re-exports — by leaf, over-inclusive on purpose), ANY glob in scope (a glob may
+    ///   re-export it; enumerating one is the resolver's namespace query, on HOLD), or the prelude of every edition (`P` rows).
+    /// A declaring trait in the prelude only from 2021 (`TryFrom`, `TryInto`, `FromIterator`) or 2024 (`Future`, `IntoFuture`) carries the
+    /// marker with that edition (`Carry(Some(y))`), and the join withholds it unless the package's manifest proves an older edition.
+    /// Errors the other way (a std impl missing from the table, a macro-written `use`) carry a marker where std runs: an over-charge, never a
+    /// silence. Unchained the marker adds nothing (the published behaviour).
+    fn r1951_std_name_scope(&self, member: &str, leaf: &str) -> R1951Scope {
+        let tb = crate::std_bounds::table();
+        if tb.uncovered_member(member) || !tb.is_impl_shape(leaf) {
+            return R1951Scope::Withhold;
+        }
+        let mut gate: Option<u16> = None;
+        for tr in tb.traits_declaring_any(member) {
+            if !(tb.impl_unconditional(tr, leaf) || tb.impl_unconditional(tr, "*")) {
+                continue;
+            }
+            let tl = crate::std_bounds::leaf(tr);
+            if self.r1951_trait_maybe_imported(tl) {
+                return R1951Scope::Withhold;
+            }
+            match crate::std_assoc::prelude_since(tl) {
+                Some(y) if y <= 2018 => return R1951Scope::Withhold,
+                Some(y) => gate = Some(gate.map_or(y, |g| g.min(y))),
+                None => {}
+            }
+        }
+        R1951Scope::Carry(gate)
+    }
+
+    /// SOUNDNESS R1951 — may a trait of this leaf be in scope here by a `use`? Over-inclusive: any binding this unit can NAME bare whose
+    /// path ends in the leaf (the module's own and inherited `use`s, the fn body's, `as _`, every cfg arm, the reserved own-import list;
+    /// whatever its root), or any glob at all. A key holding `::` is a crate-qualified alias (`crate::x`, `pre::FromStr` for another
+    /// module's `pub use`) — a path this module may WRITE, not a name in its scope — and is not counted (a `pub use std::str::FromStr` in
+    /// some other module does not bring `FromStr` into this one).
+    fn r1951_trait_maybe_imported(&self, trait_leaf: &str) -> bool {
+        let tail = format!("::{trait_leaf}");
+        let names = |v: &str| v.split('\u{1}').any(|p| p == trait_leaf || p.ends_with(&tail));
+        let glob_keys = [crate::lang::ALLGLOB_KEY, crate::lang::GLOB_KEY];
+        [&self.uses, &self.local_uses].iter().any(|m| {
+            m.contains_key(trait_leaf)
+                || glob_keys.iter().any(|k| m.get(*k).is_some_and(|g| !g.is_empty()))
+                || m.iter().any(|(k, v)| !k.contains("::") && names(v))
+        }) || self.use_alts.iter().any(|(k, vs)| !k.contains("::") && vs.iter().any(|v| names(v)))
     }
 
     /// SOUNDNESS R1098 — a COMPARISON whose left operand is a std CONTAINER or WRAPPER of a type runs that

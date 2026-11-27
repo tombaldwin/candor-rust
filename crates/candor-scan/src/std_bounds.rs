@@ -79,6 +79,14 @@ pub(crate) struct Table {
     shapes: BTreeSet<&'static str>,
     /// SOUNDNESS R1657 (bound projection) — (trait path, member) → the return slot (`p0`, `a:Target`); see `ret_slot`.
     rets: HashMap<String, &'static str>,
+    /// SOUNDNESS R1951 (lane L3) — member name → EVERY std trait of this table declaring it, sealed ones included
+    declaring_any: HashMap<&'static str, Vec<&'static str>>,
+    /// SOUNDNESS R1951 (lane L3) — the implementing shapes of the `I` rows
+    impl_shapes: BTreeSet<&'static str>,
+    /// SOUNDNESS R1951 (lane L3) — `IC` rows: (trait path, shape) whose every impl is gated more narrowly than the shape
+    gated_impls: std::collections::HashSet<(&'static str, &'static str)>,
+    /// SOUNDNESS R1951 (lane L3) — `U` rows: a member a stable pub std trait in a directory this table does not read declares
+    uncovered: std::collections::HashSet<&'static str>,
 }
 
 fn parse_slots(s: &'static str) -> Vec<SlotBound> {
@@ -141,7 +149,14 @@ pub(crate) fn table() -> &'static Table {
                     if f[2] != "*" && f[2].chars().next().is_some_and(|c| !c.is_lowercase()) {
                         t.shapes.insert(f[2]);
                     }
+                    t.impl_shapes.insert(f[2]);
                     t.impls.entry(format!("{}\t{}", f[1], f[2])).or_default().push(parse_slots(f[3]));
+                }
+                Some("IC") if f.len() >= 3 => {
+                    t.gated_impls.insert((f[1], f[2]));
+                }
+                Some("U") if f.len() >= 3 => {
+                    t.uncovered.insert(f[1]);
                 }
                 Some("R") if f.len() >= 4 => {
                     t.rets.insert(format!("{}\t{}", f[1], f[2]), f[3]);
@@ -160,7 +175,11 @@ pub(crate) fn table() -> &'static Table {
             }
         }
         let mut declaring: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
+        let mut declaring_any: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
         for (k, r) in &t.traits {
+            for m in r.required.iter().chain(&r.provided).chain(&r.provided_deferred) {
+                declaring_any.entry(m).or_default().push(k);
+            }
             if r.sealed {
                 continue;
             }
@@ -173,6 +192,11 @@ pub(crate) fn table() -> &'static Table {
             v.dedup();
         }
         t.declaring = declaring;
+        for v in declaring_any.values_mut() {
+            v.sort();
+            v.dedup();
+        }
+        t.declaring_any = declaring_any;
         t
     })
 }
@@ -272,6 +296,29 @@ impl Table {
     pub(crate) fn trait_method(&self, path: &str, name: &str) -> Option<&FnRow> {
         let owner = format!("trait:{path}");
         self.fns.get(name).and_then(|v| v.iter().find(|r| r.owner == owner))
+    }
+
+    /// SOUNDNESS R1951 (lane L3) — every std trait of this table that declares a stable member `name` (required, or provided — an unstable
+    /// provided member is kept, which only keeps a withholding), sealed ones included.
+    pub(crate) fn traits_declaring_any(&self, name: &str) -> &[&'static str] {
+        self.declaring_any.get(name).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// SOUNDNESS R1951 (lane L3) — does a std trait in a directory this table does not read (`os`, `sys`, `backtrace`) declare `name`?
+    /// Then which std impls exist for it is unknown here.
+    pub(crate) fn uncovered_member(&self, name: &str) -> bool {
+        self.uncovered.contains(name)
+    }
+
+    /// SOUNDNESS R1951 (lane L3) — is `shape` the implementing shape of some `I` row (so the table speaks for that std type)?
+    pub(crate) fn is_impl_shape(&self, shape: &str) -> bool {
+        self.impl_shapes.contains(shape)
+    }
+
+    /// SOUNDNESS R1951 (lane L3) — does std implement trait `path` for `shape` on EVERY target the shape exists on: an `I` row, and no `IC`
+    /// row saying every such impl is gated more narrowly than the type. `*` asks for a blanket impl.
+    pub(crate) fn impl_unconditional(&self, path: &str, shape: &str) -> bool {
+        self.impls.contains_key(&format!("{path}\t{shape}")) && !self.gated_impls.contains(&(path, shape))
     }
 
     /// The std traits that DECLARE a member `name` (required or provided), open ones only.

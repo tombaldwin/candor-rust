@@ -87,12 +87,14 @@ pub(crate) const STD_RECV_AMBIG_MARKER: &str = "<stdrecv>";
 /// cr::Trait for <std type>` in `cr`); anything else adds nothing here.
 pub(crate) const STD_RECV_JOIN_MARKER: &str = "<stdrecvjoin>";
 
-/// SOUNDNESS R1757 — `cr::<stdpathjoin>::<TypeLeaf>::<member>`: a PATH call naming a member on a std type
+/// SOUNDNESS R1757 — `cr::<stdpathjoin>::<traits>::<TypeLeaf>::<member>`: a PATH call naming a member on a std type
 /// (`Duration::deserialize(d)`, `<Duration as Deserialize>::deserialize(d)`, `u64::deserialize(d)`) where the body may be a
 /// dependency's `impl cr::Tr for <std type>` (`collector::r1757_std_type_dep_path`). Consumed only at the top of the call
 /// loop: where `cr` is chained and its report HAS the `TypeLeaf::member` entry, the call is rewritten to the plain
 /// dependency call `cr::TypeLeaf::member` and goes down the ordinary chained join (its `dispatchesOn` followed); anything
-/// else is dropped here (the `STD_RECV_JOIN_MARKER` formed beside it owns the miss).
+/// else is dropped here (the `STD_RECV_JOIN_MARKER` formed beside it owns the miss). SOUNDNESS R1951: `<traits>` may open with
+/// `@<edition>|` — a std trait applicable to the call is in the prelude only from that edition (`TryFrom`, 2021), so the marker is joined
+/// only in a package whose manifest proves an older edition.
 pub(crate) const STD_PATH_JOIN_MARKER: &str = "<stdpathjoin>";
 
 /// SOUNDNESS R1754 (B) — `<depdefault>::<TypeLeaf>::<member>`: a TYPE-PATH call (`V::visit_string(V, s)`) naming a member

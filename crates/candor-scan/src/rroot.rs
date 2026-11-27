@@ -343,6 +343,57 @@ pub(crate) enum Edition {
     Is(bool),
 }
 
+/// SOUNDNESS R1951 — what one `Cargo.toml` says about the edition, as a YEAR (`manifest_edition_year`); `Is(None)` for an edition string
+/// this scanner does not know (never read as older than it is).
+pub(crate) enum EditionYear {
+    Skip,
+    Inherit,
+    Is(Option<u16>),
+}
+
+/// SOUNDNESS R1951 — `manifest_edition`, keeping the year.
+pub(crate) fn manifest_edition_year(text: &str, inheriting: bool) -> EditionYear {
+    let year = |e: &str| match e {
+        "2015" => Some(2015),
+        "2018" => Some(2018),
+        "2021" => Some(2021),
+        "2024" => Some(2024),
+        _ => None,
+    };
+    if inheriting {
+        return match edition_entry(text, "[workspace.package]") {
+            (_, Some(e)) if e != "workspace" => EditionYear::Is(year(&e)),
+            _ => EditionYear::Skip,
+        };
+    }
+    match edition_entry(text, "[package]") {
+        (false, _) => EditionYear::Skip,
+        (true, Some(e)) if e == "workspace" => EditionYear::Inherit,
+        (true, Some(e)) => EditionYear::Is(year(&e)),
+        (true, None) => EditionYear::Is(Some(2015)),
+    }
+}
+
+/// (the table is present, its `edition` value) — `"workspace"` for `edition.workspace = true`.
+fn edition_entry(text: &str, table: &str) -> (bool, Option<String>) {
+    let (mut inside, mut seen) = (false, false);
+    for line in text.lines() {
+        let l = line.trim();
+        if l.starts_with('[') {
+            inside = l == table;
+            seen |= inside;
+            continue;
+        }
+        if inside && l.split(['=', '.']).next().unwrap_or("").trim() == "edition" {
+            if l.contains("workspace") {
+                return (true, Some("workspace".to_string()));
+            }
+            return (true, l.split('"').nth(1).map(str::to_string));
+        }
+    }
+    (seen, None)
+}
+
 /// Read a manifest's edition: `[package]`'s, or `[workspace.package]`'s when `inheriting`. A `[package]` with no `edition` is 2015.
 pub(crate) fn manifest_edition(text: &str, inheriting: bool) -> Edition {
     fn table_edition(text: &str, table: &str) -> (bool, Option<String>) {

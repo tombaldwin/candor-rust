@@ -1559,6 +1559,21 @@ fn build_type_surface(
 /// Is the package at `dir` PROVEN edition 2018 or later: the nearest manifest with a `[package]` table at or above it, or — `edition.workspace
 /// = true` — the nearest `[workspace.package]` above that (`rroot::manifest_edition`)? An edition the manifests do not prove reads `false`
 /// (a `[package]` with no `edition` is 2015).
+/// SOUNDNESS R1951 — the package's edition as the manifests PROVE it (2015 for a `[package]` with no `edition`; `edition.workspace = true`
+/// follows the nearest `[workspace.package]` above), or `None` when they do not decide it.
+fn package_edition_year(dir: &Path) -> Option<u16> {
+    let mut inherit = false;
+    for d in dir.ancestors() {
+        let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
+        match crate::rroot::manifest_edition_year(&t, inherit) {
+            crate::rroot::EditionYear::Skip => {}
+            crate::rroot::EditionYear::Inherit => inherit = true,
+            crate::rroot::EditionYear::Is(y) => return y,
+        }
+    }
+    None
+}
+
 fn package_edition_2018(dir: &Path) -> bool {
     let mut inherit = false;
     for d in dir.ancestors() {
@@ -2543,6 +2558,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     // alone, as is any member the local type declares. No lock-pinned source: nothing is filed, the value stays untyped, and
     // the `<untyped>` marker the call leaves is disclosed in the call loop instead (`r1605_ty_traits`).
     let r1578_sigs = std::cell::RefCell::new(crate::depsig::DepSigs::default());
+    // SOUNDNESS R1951 — the scanned package's proven edition, for the std-type marker's prelude gate (see the R1757 join)
+    let r1951_edition = package_edition_year(Path::new(dir));
     // SOUNDNESS R1743 — the facades `r1743_facade_owner_keys` read to re-key chained entries answer this scan's joins, so
     // they are recorded in its `dependencySources` (SPEC §2 ⟨0.42⟩: a lock-pinned source read to answer a join is named).
     for p in &deps_idx.r1743_read {
@@ -5065,6 +5082,18 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 Some((head, rest)) => {
                     let real = dep_renames.get(head).map(String::as_str).unwrap_or(head);
                     let Some((trs, rest)) = rest.split_once("::") else { continue };
+                    // SOUNDNESS R1951 — `@<edition>|<trait list>`: a std trait applicable to this call is in the prelude from that edition
+                    // (`TryFrom`, 2021), so std's member runs unless the package's manifest proves an OLDER edition; there the join goes ahead.
+                    let trs = match trs.strip_prefix('@').and_then(|g| g.split_once('|')) {
+                        Some((y, t)) => {
+                            let older = y.parse::<u16>().is_ok_and(|y| r1951_edition.is_some_and(|e| e < y));
+                            if !older {
+                                continue;
+                            }
+                            t
+                        }
+                        None => trs,
+                    };
                     if deps_idx.crates.contains(real) && deps_idx.by_key.contains_key(&format!("{real}#{rest}")) {
                         if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1757_INSTR") {
                             eprintln!("R1757JOIN\t{}\t{real}#{rest}", f.qual); // §E1 REACH COUNTER
@@ -5075,7 +5104,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                         if deps_idx.crates.contains(real) {
                             let member = rest.rsplit("::").next().unwrap_or("");
                             // The member is not std's for this TYPE (`collector::r1757_std_type_dep_path` refuses a member the
-                            // std type has an inherent of, or one a std trait declares — `std_assoc`), so what runs is a trait
+                            // std type has an inherent of, or one a std trait declares that is implemented for the type and may be in
+                            // scope — `r1951_std_name_scope` — or a sealed std trait's the module brings), so what runs is a trait
                             // impl from a trait in scope. Disclosed where that trait is known to be the dependency's: the call
                             // names it; the lock-pinned source shows an imported trait declares it; or — lock or no lock — the
                             // dependency's own report publishes this member on ANOTHER std type (`Duration::fetch` beside

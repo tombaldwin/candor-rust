@@ -1,0 +1,87 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_l3s",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_l3s"
+ ],
+ "detail": true,
+ "id": "l3s",
+ "lib": false,
+ "note": "lane L3: the std-type path rule decides a std-trait-named member by SCOPE (implemented for the type AND in scope), not by name (R1951/R1962)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l3s_fromstr_dep_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3s_default_notimpl_e"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_default_prelude_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_fromstr_import_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_fromstr_fnbody_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_fromstr_superglob_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_fromstr_reexport_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_fromstr_asunder_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_fromstr_rename_q"
+  },
+  {
+   "kind": "e",
+   "name": "l3s_get_pathbuf_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3s_get_usize_e"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_tryfrom_2021_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_fromiter_2021_q"
+  },
+  {
+   "kind": "e",
+   "name": "l3s_tostring_blanket_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3s_fromstr_depglob_e"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_fromstr_macrouse_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3s_default_pureimpl_q"
+  },
+  {
+   "kind": "e",
+   "name": "l3s_fromstr_parentimport_e"
+  }
+ ]
+}

@@ -71,6 +71,9 @@ fn ret_slot(sig: &syn::Signature, tparams: &[String]) -> Option<String> {
 struct ImplDecl {
     tr: String, // written trait path
     shape: String,
+    /// SOUNDNESS R1951 (lane L3) — the `#[cfg(..)]`s the impl is written under (`cfg_gate`): on the impl, an enclosing inline module,
+    /// the macro invocation that wrote it, or the out-of-line module file it is in (`mod:<path>`). Empty: present on every target.
+    gates: BTreeSet<String>,
     slots: Vec<(String, Vec<String>)>,
     uses: HashMap<String, String>,
     module: String,
@@ -92,6 +95,29 @@ struct Out {
     fns: Vec<FnDecl>,
     unparsed: Vec<String>,
     unexpanded: BTreeSet<String>,
+    /// SOUNDNESS R1951 (lane L3) — `(member, trait module path)` for every member of a stable `pub trait` declared in a directory
+    /// this table does not read (`os`, `sys`, `backtrace`): a std trait whose impls the table cannot answer.
+    uncovered: BTreeSet<(String, String)>,
+    /// SOUNDNESS R1951 (lane L3) — the gate set of every declaration of a std type leaf (struct, enum, union, type alias)
+    type_gates: HashMap<String, Vec<BTreeSet<String>>>,
+}
+
+/// SOUNDNESS R1951 (lane L3) — the `#[cfg(..)]`s of this attribute list under which the item may be ABSENT on some target, whitespace-free
+/// (`cfg(unix)`). Every `cfg` counts except the ones true for every std a user's crate links: `not(test)` (std is not built under its own
+/// test harness for users) and the std-build switches `not(no_global_oom_handling)`, `not(no_rc)`, `not(no_sync)` (set only when `alloc` is
+/// built for a kernel, which has no `std`). An impl gated more narrowly than its type is NOT evidence that std's member runs on every target
+/// where the type exists, so the std-type path rule never withholds on it (`IC` rows).
+fn cfg_gate(attrs: &[syn::Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter(|a| a.path().is_ident("cfg"))
+        .map(|a| tokens(&a.meta).chars().filter(|c| !c.is_whitespace()).collect::<String>())
+        .filter(|s| !matches!(s.as_str(), "cfg(not(test))" | "cfg(not(doc))" | "cfg(not(no_global_oom_handling))" | "cfg(not(no_rc))" | "cfg(not(no_sync))" | "cfg(not(no_fp_fmt_parse))"))
+        .collect()
+}
+
+fn cfg_gates(attrs: &[syn::Attribute]) -> bool {
+    !cfg_gate(attrs).is_empty()
 }
 
 fn is_unstable(attrs: &[syn::Attribute]) -> bool {
@@ -316,6 +342,8 @@ struct Ctx<'o> {
     macros: &'o HashMap<String, Option<String>>,
     file_macros: HashMap<String, Option<String>>,
     depth: usize,
+    /// SOUNDNESS R1951 (lane L3) — the gates of the enclosing scopes (`cfg_gate`, `mod:<path>` for a gated out-of-line module)
+    gates: BTreeSet<String>,
 }
 
 fn collect_uses(items: &[syn::Item], module: &[String], uses: &mut HashMap<String, String>) {
@@ -405,9 +433,12 @@ impl Ctx<'_> {
                     return;
                 }
                 if let Some((_, items)) = &m.content {
+                    let was = self.gates.clone();
+                    self.gates.extend(cfg_gate(&m.attrs));
                     self.module.push(m.ident.to_string());
                     self.items(items);
                     self.module.pop();
+                    self.gates = was;
                 }
             }
             syn::Item::Trait(t) => {
@@ -551,6 +582,7 @@ impl Ctx<'_> {
                     self.out.impls.push(ImplDecl {
                         tr: path_string(tp),
                         shape: shape.clone(),
+                        gates: self.gates.iter().cloned().chain(cfg_gate(&im.attrs)).collect(),
                         slots,
                         uses: self.uses.clone(),
                         module: self.modpath(),
@@ -576,6 +608,8 @@ impl Ctx<'_> {
                     syn::Item::Enum(x) => (&x.attrs, &x.vis, &x.ident, &x.generics),
                     _ => unreachable!(),
                 };
+                let decl_gates: BTreeSet<String> = self.gates.iter().cloned().chain(cfg_gate(attrs)).collect();
+                self.out.type_gates.entry(ident.to_string()).or_default().push(decl_gates);
                 if !matches!(vis, syn::Visibility::Public(_)) || is_unstable(attrs) || is_cfg_test(attrs) {
                     return;
                 }
@@ -602,12 +636,21 @@ impl Ctx<'_> {
                         self.out.impls.push(ImplDecl {
                             tr: trs.clone(),
                             shape: ident.to_string(),
+                            gates: self.gates.iter().cloned().chain(cfg_gate(attrs)).collect(),
                             slots,
                             uses: self.uses.clone(),
                             module: self.modpath(),
                         });
                     }
                 }
+            }
+            syn::Item::Union(u) => {
+                let g: BTreeSet<String> = self.gates.iter().cloned().chain(cfg_gate(&u.attrs)).collect();
+                self.out.type_gates.entry(u.ident.to_string()).or_default().push(g);
+            }
+            syn::Item::Type(t) => {
+                let g: BTreeSet<String> = self.gates.iter().cloned().chain(cfg_gate(&t.attrs)).collect();
+                self.out.type_gates.entry(t.ident.to_string()).or_default().push(g);
             }
             syn::Item::Fn(f) => {
                 if !matches!(f.vis, syn::Visibility::Public(_)) || is_unstable(&f.attrs) || is_cfg_test(&f.attrs) {
@@ -639,9 +682,12 @@ impl Ctx<'_> {
                     Some(ts) => match syn::parse_file(&rewrite_nightly(&ts.to_string())) {
                         Ok(f) => {
                             self.depth += 1;
+                            let was = self.gates.clone();
+                            self.gates.extend(cfg_gate(&m.attrs));
                             for it in &f.items {
                                 self.item(it);
                             }
+                            self.gates = was;
                             self.depth -= 1;
                         }
                         Err(_) => {
@@ -1010,9 +1056,51 @@ pub(crate) fn generate(lib: &Path, rustc: &str) -> String {
             }
         }
     }
+    // SOUNDNESS R1951 (lane L3) — the out-of-line modules declared under a gating `#[cfg(..)]` (`#[cfg(..)] mod x;`, or a `mod x;` written
+    // inside a `cfg_select!`/`cfg_if!` arm, which this generator does not expand): every file at or below such a module is gated.
+    let mut gated_mods: BTreeSet<Vec<String>> = BTreeSet::new();
+    fn gated_decls(items: &[syn::Item], module: &[String], above: bool, out: &mut BTreeSet<Vec<String>>) {
+        for it in items {
+            match it {
+                syn::Item::Mod(m) => {
+                    let mut child = module.to_vec();
+                    child.push(m.ident.to_string());
+                    let g = above || cfg_gates(&m.attrs);
+                    match &m.content {
+                        None if g => {
+                            out.insert(child);
+                        }
+                        None => {}
+                        Some((_, inner)) => gated_decls(inner, &child, g, out),
+                    }
+                }
+                syn::Item::Macro(mm) => {
+                    let leaf = mm.mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                    if matches!(leaf.as_str(), "cfg_select" | "cfg_if") {
+                        let toks: Vec<String> = mm.mac.tokens.to_string().split_whitespace().map(String::from).collect();
+                        for w in toks.windows(3) {
+                            if w[0] == "mod" && w[2] == ";" {
+                                let mut child = module.to_vec();
+                                child.push(w[1].clone());
+                                out.insert(child);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for (module, file, _) in &parsed {
+        gated_decls(&file.items, module, cfg_gates(&file.attrs), &mut gated_mods);
+    }
     for ((module, file, dir), defs) in parsed.iter().zip(per_file) {
         let mut local: HashMap<String, Option<String>> = by_dir.get(dir).cloned().unwrap_or_default();
         local.extend(defs);
+        let mut gates: BTreeSet<String> = cfg_gate(&file.attrs).into_iter().collect();
+        for g in gated_mods.iter().filter(|g| module.starts_with(g)) {
+            gates.insert(format!("mod:{}", g.join("::")));
+        }
         let mut c = Ctx {
             out: &mut out,
             module: module.clone(),
@@ -1020,8 +1108,47 @@ pub(crate) fn generate(lib: &Path, rustc: &str) -> String {
             macros: &macros,
             file_macros: local,
             depth: 0,
+            gates,
         };
         c.items(&file.items);
+    }
+    // SOUNDNESS R1951 (lane L3) — the stable `pub trait` members of the directories the walk above skips (`os`, `sys`, `backtrace`): `U` rows,
+    // so a consumer knows a member name a std trait declares whose impls this table does not hold.
+    fn trait_members(items: &[syn::Item], module: &mut Vec<String>, out: &mut BTreeSet<(String, String)>) {
+        for it in items {
+            match it {
+                syn::Item::Mod(m) => {
+                    if let Some((_, inner)) = &m.content {
+                        module.push(m.ident.to_string());
+                        trait_members(inner, module, out);
+                        module.pop();
+                    }
+                }
+                syn::Item::Trait(t) if matches!(t.vis, syn::Visibility::Public(_)) && !is_unstable(&t.attrs) => {
+                    for ti in &t.items {
+                        if let syn::TraitItem::Fn(f) = ti {
+                            out.insert((f.sig.ident.to_string(), format!("{}::{}", module.join("::"), t.ident)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut skipped: Vec<PathBuf> = Vec::new();
+    for krate in ["core", "alloc", "std"] {
+        walk_skipped(&lib.join(krate).join("src"), false, &mut skipped);
+    }
+    skipped.sort();
+    for f in &skipped {
+        let src = rewrite_nightly(&std::fs::read_to_string(f).unwrap_or_default());
+        match syn::parse_file(&src) {
+            Ok(file) => trait_members(&file.items, &mut module_of(&lib, f), &mut out.uncovered),
+            Err(e) => {
+                let rel = f.strip_prefix(&lib).unwrap().display().to_string();
+                out.unparsed.push(format!("{rel}:{} {e}", e.span().start().line));
+            }
+        }
     }
     // primitive_docs.rs — the impls rustc generates for tuples, which have no source.
     let pd = std::fs::read_to_string(lib.join("core/src/primitive_docs.rs")).unwrap_or_default();
@@ -1159,6 +1286,27 @@ pub(crate) fn generate(lib: &Path, rustc: &str) -> String {
         }
         lines.insert(format!("I\t{tr}\t{}\t{}", im.shape, slots.join(";")));
     }
+    // SOUNDNESS R1951 (lane L3) — `IC <trait> <shape>`: every impl of that trait for that shape is gated MORE narrowly than the shape itself.
+    // An impl co-gated with its type (`Arc` and its impls under `alloc::sync`'s `target_has_atomic`; `AtomicU8` and `impl Default for
+    // AtomicU8` under the same item `cfg`) exists wherever the type does — a call that names the type compiles only there — so it is not
+    // conditional; one whose gates are not all carried by some declaration of the type is (`ImplDecl::gates`, `Out::type_gates`). A shape with
+    // no declaration here (a primitive, a type of a skipped directory) is unconditional only when its impl is ungated.
+    let mut ungated_pair: HashMap<(String, String), bool> = HashMap::new();
+    for im in &out.impls {
+        let Some(tr) = resolve(&im.tr, &im.uses, &im.module) else { continue };
+        let co_gated = im.gates.is_empty()
+            || out.type_gates.get(&im.shape).is_some_and(|decls| decls.iter().any(|d| im.gates.is_subset(d)));
+        let e = ungated_pair.entry((tr, im.shape.clone())).or_insert(false);
+        *e |= co_gated;
+    }
+    for ((tr, shape), any_ungated) in &ungated_pair {
+        if !any_ungated {
+            lines.insert(format!("IC\t{tr}\t{shape}"));
+        }
+    }
+    for (m, tr) in &out.uncovered {
+        lines.insert(format!("U\t{m}\t{tr}"));
+    }
     for t in &builtin_tuple {
         if let Some(tr) = resolve(t, &HashMap::new(), "core") {
             lines.insert(format!("I\t{tr}\t()\te*={tr}"));
@@ -1190,6 +1338,7 @@ pub(crate) fn generate(lib: &Path, rustc: &str) -> String {
     o.push_str("# Regenerate / verify: bash crates/candor-scan/gen/std_bounds.sh [--check]. Rows: T trait (open|sealed, supers, required, provided, provided-deferred);\n");
     o.push_str("# I impl (trait, implementing shape, type-argument slot=bounds); F fn (owner, name, non-receiver args, slot=bounds[:d]);\n");
     o.push_str("# R return (trait, member, p<N> trait type parameter | a:<Assoc> associated type, behind at most one reference).\n");
+    o.push_str("# IC impl whose every instance is cfg-gated (trait, shape); U member of a stable pub trait in a directory this table does not read (member, trait).\n");
     for l in &lines {
         o.push_str(l);
         o.push('\n');
@@ -1228,6 +1377,23 @@ fn builtin_tuple_traits(pd: &str) -> Vec<String> {
         break;
     }
     out
+}
+
+/// SOUNDNESS R1951 (lane L3) — the `.rs` files `walk` skips: those under an `os`, `sys` or `backtrace` directory (`inside`), never `tests`/`benches`.
+fn walk_skipped(dir: &Path, inside: bool, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        if p.is_dir() {
+            if matches!(name.as_str(), "tests" | "benches") {
+                continue;
+            }
+            walk_skipped(&p, inside || matches!(name.as_str(), "sys" | "os" | "backtrace"), out);
+        } else if inside && name.ends_with(".rs") && name != "tests.rs" && name != "benches.rs" {
+            out.push(p);
+        }
+    }
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
