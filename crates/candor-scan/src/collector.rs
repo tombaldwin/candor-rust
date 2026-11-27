@@ -7685,6 +7685,7 @@ impl<'a> CallCollector<'a> {
     ///   do not withhold: on a target without the impl the dependency's runs), and MAY be in scope: imported by any `use` this unit can
     ///   see (module, enclosing modules, fn body, crate re-exports — by leaf, over-inclusive on purpose), ANY glob in scope (a glob may
     ///   re-export it; enumerating one is the resolver's namespace query, on HOLD), or the prelude of every edition (`P` rows).
+    ///
     /// A declaring trait in the prelude only from 2021 (`TryFrom`, `TryInto`, `FromIterator`) or 2024 (`Future`, `IntoFuture`) carries the
     /// marker with that edition (`Carry(Some(y))`), and the join withholds it unless the package's manifest proves an older edition.
     /// Errors the other way (a std impl missing from the table, a macro-written `use`) carry a marker where std runs: an over-charge, never a
