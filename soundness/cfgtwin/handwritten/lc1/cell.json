@@ -1,0 +1,35 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_lc1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_lc1"
+ ],
+ "detail": true,
+ "id": "lc1",
+ "lib": false,
+ "note": "lane rust-lc1: a supertrait written with a leading `::` names the EXTERN crate (edition 2018+), never a same-named local module's trait",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "lc1_colon_q"
+  },
+  {
+   "kind": "e",
+   "name": "lc1_colon_e"
+  },
+  {
+   "kind": "q",
+   "name": "lc1_colonm_q"
+  },
+  {
+   "kind": "e",
+   "name": "lc1_colonm_e"
+  },
+  {
+   "kind": "e",
+   "name": "lc1_local_e"
+  }
+ ]
+}

@@ -1,0 +1,12 @@
+lb3_mixed_e
+lb3_pure_q
+lb3_many_e
+lb3_supl_e
+lb3_depsup_e
+lb3_collide_e
+lb3_collide_q
+lb3_meth_e
+lb3_where_e
+lb3_impl_e
+lb3_bare_e
+lb3_depmem_e

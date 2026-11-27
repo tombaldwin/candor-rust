@@ -4,6 +4,11 @@
     python3 soundness/cfgtwin/gen.py            # (re)render fx/ and predict.tsv in place
     python3 soundness/cfgtwin/gen.py --check    # render to a temp dir and diff against the checked-in tree
 
+HAND-WRITTEN CELLS. Cells that a lane wrote by hand (lb1-lb4, lc1, lc1e15: lanes rust-bound-l1b and rust-lc1) are not produced by `cell()`.
+Their sources live under `handwritten/<cell>/` and `render()` copies each tree verbatim into `fx/<cell>/`, so a plain render leaves them
+byte-identical and `--check` diffs them like every generated cell (a drift between `handwritten/` and `fx/` fails it). A new hand-written
+cell is added by putting its tree in `handwritten/<cell>/` and re-rendering; never only in `fx/`, which a render replaces.
+
 One BIN crate per cell: fx/<cell>/{Cargo.toml,src/main.rs,...,cell.json}. `main()` dispatches argv[1] to ONE probe, so a
 marker file written (or not) under $MARK is that probe's executed ground truth. Hold the conventions of MATRIX.md section 0:
 
@@ -2023,8 +2028,18 @@ def cargo_toml(c, name, deps, lib_only=False, is_dep=False):
     return s
 
 
+HAND = os.path.join(HERE, 'handwritten')
+
+
+def hand_cells():
+    return sorted(d for d in os.listdir(HAND) if os.path.isdir(os.path.join(HAND, d))) if os.path.isdir(HAND) else []
+
+
 def render(out):
     cells_meta = {}
+    for hc in hand_cells():
+        assert hc not in CELLS, 'hand-written cell %s is also generated' % hc
+        shutil.copytree(os.path.join(HAND, hc), os.path.join(out, 'fx', hc))
     for cid, c in sorted(CELLS.items()):
         d = os.path.join(out, 'fx', cid)
         os.makedirs(os.path.join(d, 'src'), exist_ok=True)
@@ -2101,11 +2116,11 @@ def main():
             print((r.stdout + r2.stdout)[:2000])
             print('gen.py --check: checked-in fixtures differ from a fresh render')
             sys.exit(1)
-        print('gen.py --check: %d cells identical' % len(CELLS))
+        print('gen.py --check: %d cells identical (%d generated, %d hand-written)' % (len(CELLS) + len(hand_cells()), len(CELLS), len(hand_cells())))
         return
     shutil.rmtree(os.path.join(HERE, 'fx'), ignore_errors=True)
     render(HERE)
-    print('rendered %d cells' % len(CELLS))
+    print('rendered %d cells (%d generated, %d hand-written)' % (len(CELLS) + len(hand_cells()), len(CELLS), len(hand_cells())))
 
 
 if __name__ == '__main__':

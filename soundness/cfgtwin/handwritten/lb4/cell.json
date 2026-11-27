@@ -1,0 +1,67 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_lb4",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_lb4"
+ ],
+ "detail": true,
+ "id": "lb4",
+ "lib": false,
+ "note": "L1b R1980/R1975: supertrait origin through use/re-export/alias tables; known-dependency roots; criterion shape",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "lb4_self_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb4_self_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb4_selfm_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb4_selfm_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb4_alias_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb4_aliasm_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb4_reexp_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb4_reexp_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb4_reexl_e"
+  },
+  {
+   "kind": "e",
+   "name": "lb4_extern_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb4_extern_q"
+  },
+  {
+   "kind": "e",
+   "name": "lb4_path_e"
+  },
+  {
+   "kind": "q",
+   "name": "lb4_path_q"
+  }
+ ]
+}
