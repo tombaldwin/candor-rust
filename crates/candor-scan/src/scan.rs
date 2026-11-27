@@ -4837,16 +4837,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 if !tr.is_empty() && !m.is_empty() && (by_path || by_id || local_default) {
                     let nogen = |t: &str| t.split('<').next().unwrap_or(t).to_string();
                     let leaf_of = |t: &str| nogen(t).rsplit("::").next().unwrap_or("").to_string();
-                    let pre = format!("{tr}|");
                     // every gated block of THIS trait leaf: (self leaf, members), leaf-keyed
                     let leaf_blocks: Vec<(&str, &str)> = merged
                         .i1_gated_impls
                         .iter()
                         .filter(|g| !g.starts_with(crate::mbe::GATED_IMPL_ID_MARK))
-                        .filter_map(|g| g.split_once('|').map(|(ik, ms)| (ik, ms)))
+                        .filter_map(|g| g.split_once('|'))
                         .filter_map(|(ik, ms)| ik.split_once(" as ").filter(|(_, t)| *t == tr).map(|(s, _)| (s, ms)))
                         .collect();
-                    let _ = pre;
                     let omits = |ms: &str| !ms.split(',').any(|x| x == m);
                     let alias_leaves: Vec<&str> = i1c_renames.get(st).map(|v| v.iter().map(String::as_str).filter(|x| *x != st).collect()).unwrap_or_default();
                     let omit_alias = leaf_blocks.iter().any(|(s, ms)| alias_leaves.contains(s) && omits(ms));
