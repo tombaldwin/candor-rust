@@ -7007,22 +7007,28 @@
     },
     {
       "fn": "collector::CallCollector::<'a>::route_foreign_generic_member",
-      "loc": "crates/candor-scan/src/collector.rs:10221:5: 10228:6",
+      "loc": "crates/candor-scan/src/collector.rs:12409:5: 12416:6",
       "inferred": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "declared": [],
       "undeclared": [
         "Env"
       ],
       "overdeclared": [],
-      "hash": "7f07d505992c79d6394efdba3118ea64",
+      "unresolved": true,
+      "hash": "e4ad521a0845e5d7d80d0846971390ac",
       "calls": [
+        "collector::CallCollector::<'a>::emit_foreign_member",
+        "collector::CallCollector::<'a>::expand_scoped",
+        "collector::CallCollector::<'a>::mark_unresolved",
         "collector::CallCollector::<'a>::recv_trait_full",
         "lang::expand",
         "lang::reach_debug"
       ],
       "invisible": [
+        "candor_report",
         "proc_macro2",
         "quote",
         "syn"
@@ -7056,27 +7062,23 @@
     },
     {
       "fn": "collector::CallCollector::<'a>::route_trait_member_path",
-      "loc": "crates/candor-scan/src/collector.rs:10292:5: 10299:6",
+      "loc": "crates/candor-scan/src/collector.rs:12859:5: 12866:6",
       "inferred": [
-        "Env"
-      ],
-      "direct": [
-        "Env"
+        "Env",
+        "Unknown"
       ],
       "declared": [],
       "undeclared": [
         "Env"
       ],
       "overdeclared": [],
-      "hash": "7f07d505992c79d6c4aef0c7851c8198",
+      "unresolved": true,
+      "hash": "e4ad521a0845e5d7516d31887e8d9bb0",
       "calls": [
-        "collector::CallCollector::<'a>::dispatch_trait_member",
-        "collector::CallCollector::<'a>::mark_unresolved",
-        "collector::CallCollector::<'a>::route_foreign_generic_member",
-        "lang::reach_debug",
-        "lang::type_path"
+        "collector::CallCollector::<'a>::route_trait_member_path_via"
       ],
       "invisible": [
+        "candor_report",
         "proc_macro2",
         "quote",
         "syn"
@@ -10654,6 +10656,34 @@
       ]
     },
     {
+      "fn": "depsig::DepSigs::declaring_trait_locked",
+      "loc": "crates/candor-scan/src/depsig.rs:3949:5: 3949:139",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "e4ad521a0845e5d7d2fc2a421a1eeac6",
+      "calls": [
+        "depsig::DepSigs::l2_read"
+      ],
+      "invisible": [
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml",
+        "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "depsig::DepSigs::distinct_in_tree",
       "loc": "crates/candor-scan/src/depsig.rs:2920:5: 2920:147",
       "inferred": [
@@ -10848,6 +10878,38 @@
         "callback:generic iterable driven by collect"
       ],
       "invisible": [
+        "proc_macro2",
+        "syn",
+        "toml",
+        "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "depsig::DepSigs::l2_read",
+      "loc": "crates/candor-scan/src/depsig.rs:3982:5: 3982:126",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "e4ad521a0845e5d7f5b17cb1a63c9cc6",
+      "calls": [
+        "depsig::DepSigs::index",
+        "depsig::DepSigs::l2_read",
+        "depsig::DepSigs::lock_source",
+        "depsig::SrcIndex::trait_declarers",
+        "depsig::src_bytes"
+      ],
+      "invisible": [
+        "candor_report",
         "proc_macro2",
         "syn",
         "toml",
@@ -18213,6 +18275,35 @@
       ],
       "invisible": [
         "candor_classify",
+        "candor_report",
+        "proc_macro2",
+        "syn",
+        "toml",
+        "walkdir"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
+      "fn": "scan::r1954_declaring_keys",
+      "loc": "crates/candor-scan/src/scan.rs:13800:1: 13807:17",
+      "inferred": [
+        "Env",
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Env",
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "e4ad521a0845e5d750b623fa20e1cd0b",
+      "calls": [
+        "depsig::DepSigs::declaring_trait_locked",
+        "lang::reach_debug"
+      ],
+      "invisible": [
         "candor_report",
         "proc_macro2",
         "syn",
