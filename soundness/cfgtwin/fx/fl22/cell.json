@@ -1,0 +1,19 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_fl22"
+ ],
+ "id": "fl22",
+ "lib": false,
+ "note": "R1922: a gated override of a dependency trait default whose twin arm inherits it",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl22_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl22_q"
+  }
+ ]
+}

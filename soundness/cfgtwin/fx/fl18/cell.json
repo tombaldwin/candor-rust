@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl18",
+ "lib": false,
+ "note": "R1918 (b): an impl a root-path macro emits in a fn body is hoisted, so a caller elsewhere reads its member",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl18_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl18_q"
+  }
+ ]
+}

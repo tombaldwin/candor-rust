@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl24a",
+ "lib": false,
+ "note": "R1924: a type-alias self type in one arm, the aliased path in the other",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl24a_e"
+  }
+ ]
+}

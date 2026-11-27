@@ -88,7 +88,8 @@ fn r1919_an_alias_arm_naming_a_crate_root_fn_is_edged_in_every_spelling() {
     assert!(pure(&r, "r1_p_q"), "r1_p_q is pure: {:?}", effects(&r, "r1_p_q"));
     // falsified: main read every one of them ABSENT
     let off = scan_with("r1", "r1off", OFF);
-    for p in ["r1_tw_e", "r1_rev_e", "r1_in_e", "r1_reexp_e", "r1_sole_e", "r1_p_e"] {
+    // (`r1_sole_e` is the body-local `use` spelling, which R1926 now resolves independently of R1919: it is not on this list.)
+    for p in ["r1_tw_e", "r1_rev_e", "r1_in_e", "r1_reexp_e", "r1_p_e"] {
         assert!(!fs(&off, p), "{p}: the switch must restore main's silence (else this test cannot fail): {:?}", effects(&off, p));
     }
 }
@@ -176,7 +177,15 @@ fn r1919_the_inheriting_arm_is_the_same_impl_by_identity_not_by_leaf() {
         ("r7memcol", "f_r2memcol_q"), ("r7samecfg", "f_r2samecfg_q"), ("r7samecfg", "f_r2samecfg_q2"),
     ] {
         let r = scan_with(cell, cell, &[]);
-        assert!(pure(&r, p), "{cell}/{p}: executed pure, must not be charged or hedged: {:?}", effects(&r, p));
+        // SOUNDNESS R1924 — the three cells below are the shapes the identity cannot separate (two instantiations of one type, two impls
+        // sharing one member unit, two traits of one leaf), where the override unit is hedged at its own site (`ambiguous:another cfg
+        // arm of this impl may inherit …`). A pure twin may carry that disclosure; it must never be CHARGED.
+        let disclosed = matches!(cell, "r7gen" | "r7memcol" | "r7trleaf");
+        if disclosed {
+            assert!(effects(&r, p).iter().all(|e| e == "Unknown"), "{cell}/{p}: executed pure, must not be charged: {:?}", effects(&r, p));
+        } else {
+            assert!(pure(&r, p), "{cell}/{p}: executed pure, must not be charged or hedged: {:?}", effects(&r, p));
+        }
     }
     for (cell, p) in [("r7leaf", "f_r2leaf_e"), ("r7leafcfg", "f_r2leafcfg_e"), ("r7samecfg", "f_r2samecfg_e")] {
         let r = scan_with(cell, cell, &[]);

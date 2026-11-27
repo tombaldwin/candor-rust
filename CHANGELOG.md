@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Lane rust-floor-hedges: eight pre-existing silent under-reports get a site hedge or a resolution (SOUNDNESS R1907, R1915, R1918 (b), R1922, R1923, R1924, R1926; R1912 and R1918 (a) left).**
+  Every one read ABSENT over an executed write on v0.43.0 and main (`soundness/cfgtwin` `fl*` cells and the named residual cells). Resolutions
+  (the caller reads the real effect): R1926 (a `use tw::g;` in a body or module, `tw` a `#[cfg]`-twinned module, now follows the module-qualified
+  table as the anchored spelling does) and R1918 (b) (an impl a ROOT-path macro `crate::mk!(..)` emits in a fn body is hoisted, R-ROOT's binding). Hedges, each an
+  `Unknown` on the unit that lost the effect with a reason true of the site: R1907 (a) (a method call on a type alias a `cfg_if!` arm declares, and a `#[path]`
+  module a carrier hosts); R1907 (b) (a bare `k!()` of a macro only a carrier arm writes, unless a `#[macro_use]` import binds the name and the arm is inert);
+  R1915 (the written path `d::Lone::m()` only a crate-local glob of a dependency glob supplies); R1922/R1924 (the override unit of a gated impl whose twin
+  arm may inherit a dependency or crate trait's provided method, where r2's identity cannot answer); R1923 (a resolved path below a module whose hidden macro
+  text declares the next segment). Additive; no kill switch. Pure twins the hedges cover by name coincidence are listed in the lane report.
+
 - ⚠ **Lane rust-r1919: cfg-twin arms read as VISIBLE are unioned, and R-ROOT expands inside a cfg arm (SOUNDNESS R1919).** The row
   read its spellings (`wuse!` in a cfg module twin, a pure override `wov!{}` emits, `wt!` across `#[path]` twins) as a hidden-text
   cover gap. Measured: the same silences read on HAND-WRITTEN arms with no macro at all, on 0.43.0 and main, so the defects are in

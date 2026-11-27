@@ -1,0 +1,19 @@
+{
+ "chain": null,
+ "deps": [
+  "cfg-if"
+ ],
+ "id": "fl8v7",
+ "lib": false,
+ "note": "R1907 (b): a macro defined only by text a cfg_if! arm holds; the visible-definition twin must stay clean",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl8v7_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl8v7_q"
+  }
+ ]
+}

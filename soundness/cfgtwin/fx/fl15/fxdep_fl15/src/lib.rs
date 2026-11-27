@@ -1,0 +1,1 @@
+pub mod d_fl15 { pub struct Lone; impl Lone { pub fn m() { ::std::fs::write(::std::env::var("MARK").unwrap(), b"x").unwrap(); } } pub fn free() { ::std::fs::write(::std::env::var("MARK").unwrap(), b"x").unwrap(); } pub fn pure() {} }

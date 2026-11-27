@@ -2506,9 +2506,20 @@ impl BodyWalk<'_, '_> {
                 }
             }
         };
-        let Some(id) = mac.path.get_ident().map(|i| i.to_string()) else {
-            foreign(mac);
-            return;
+        // SOUNDNESS R1918 (b) — a body-position invocation BY PATH (`crate::mk!(..)`, `$crate::mk!(..)` as transcribed, `self::`/`super::`
+        // reaching the root) binds the crate root's one ungated definition exactly as the item-position splice does
+        // (`Ctx::root_path_name`, R-ROOT); read only for the impls it emits, so the hoist can name them. Every other path is still
+        // `foreign`. Before, `fn f() { crate::mk!(Tr, go); }` emitted `impl Tr for S { fn go(..) { <write> } }` into no index and a
+        // caller of `S.go()` elsewhere read ABSENT over an executed write.
+        let id = match mac.path.get_ident() {
+            Some(i) => i.to_string(),
+            None => match self.cx.root_path_name(mac) {
+                Some(k) => k,
+                None => {
+                    foreign(mac);
+                    return;
+                }
+            },
         };
         if id == "macro_rules" || self.depth >= MAX_DEPTH || self.cx.budget == 0 {
             return;

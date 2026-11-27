@@ -44,6 +44,10 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev229 (rustagent-floor, lane rust-floor-hedges): SOUNDNESS R1907 / R1915 / R1918 (b) / R1922 / R1923 / R1924 / R1926 — `FileDecls` gained
+    // the `macro_rules!` names a `cfg_if!` arm writes (`macro_twins`), a `macro_rules!` body's `mod` names (`macro_hidden_fns`) and the type
+    // aliases a carrier arm declares; `#[path]` modules a carrier hosts are recorded as redirected; a relative body or module `use` of a cfg
+    // twin follows the module-qualified table; a rev228 entry holds the old facts.
     // rev228 (rustagent-r1919, lane rust-r1919): SOUNDNESS R1919 — a `macro_rules!` inside a `#[cfg]`-gated inline module is an R208
     // twin (`FileDecls::macro_twins`), R-ROOT expands inside cfg arms, and a produced arm covered only by an out-of-line stand-in keeps
     // its `use`/`type` bindings; `FnInfo` gained `i1_impl_id` and `i1_gated_impls` identity-keyed entries (r2): a rev227 entry holds
@@ -795,7 +799,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev228/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev229/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

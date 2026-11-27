@@ -4773,6 +4773,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             }
         }
         loc.entry(f.qual.clone()).or_insert_with(|| f.loc.clone());
+        let mut r1919_edged = false;
+        let mut r1919_inherits = false;
         if let (Some(id), Some(m)) = (
             f.i1_impl_id.as_deref().filter(|_| f.impl_kind == 2 && !r1919_kind.is_empty()),
             f.i1_cand.as_deref().and_then(|c| c.rsplit('|').next()).filter(|m| !m.is_empty()),
@@ -4786,6 +4788,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             let block_arm = arms.is_some_and(|a| a.iter().any(|ms| !ms.contains(m)));
             let member_arm = !arms.is_some_and(|a| a.iter().any(|ms| ms.contains(m)))
                 && r1919_same.get(&(id, m)).copied().unwrap_or(0) == 1;
+            r1919_inherits = block_arm || member_arm;
             if block_arm || member_arm {
                 // The default is the trait's OWN unit, by its resolved path (generic arguments dropped): exact, never a leaf
                 // match. An external trait has no local default unit; a trait whose default this scan does not hold as a
@@ -4802,6 +4805,77 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 }
                 if found && !shared && dflt != f.qual {
                     calls.entry(f.qual.clone()).or_default().insert(dflt);
+                    r1919_edged = true;
+                }
+            }
+        }
+        // SOUNDNESS R1922 / R1924 — A GATED OVERRIDE WHOSE TWIN ARM INHERITS THE DEFAULT, AND R1919's r2 FORMED NO EDGE TO IT. r2 edges the
+        // override unit to the trait's default UNIT by impl IDENTITY, which exists only for a trait this crate declares and only where
+        // the identity resolves: a DEPENDENCY trait's provided body is another report's (R1922: `#[cfg(not(unix))] impl dep::TD for Q {
+        // fn go(&self) {} }` beside `#[cfg(unix)] impl dep::TD for Q {}` read `Q.go()` pure over the default's write, EXECUTED, f_r2dep),
+        // and an identity r2 refuses (R1924: a generic instantiation `W<u8>`/`W<u16>`, a `type`-alias self type, a re-exported trait
+        // path, a glob in scope, two impls sharing one member qual) leaves the inheriting arm unanswered. Disclosed at the override
+        // unit, the site that lost the effect, where (a) a gated block of the same self type and trait LEAF omits the member
+        // (leaf-keyed: a coincidence of leaves can only add this disclosure, never a charge), and (b) the trait is one this scan
+        // can say has a provided body: a manifest DEPENDENCY's (its head, written or through the `use` that binds it) or a crate
+        // trait with a default UNIT of that member. Not a std/core trait (its provided methods answer through the receiver's own
+        // members), and not where r2 formed its edge.
+        if f.impl_kind == 2 && !r1919_edged {
+            if let Some((tr, st, m)) = f.i1_cand.as_deref().and_then(|c| {
+                let mut it = c.splitn(3, '|');
+                Some((it.next()?, it.next()?, it.next()?))
+            }) {
+                let head = |p: &str| p.trim_start_matches("::").split("::").next().unwrap_or("").to_string();
+                let dep_head = |h: &str| !h.is_empty() && h != "crate" && h != "self" && h != "super" && h != "std" && h != "core" && h != "alloc"
+                    && (deps.contains(h) || dep_renames.contains_key(h));
+                let by_path = f.impl_trait_path.contains("::") && dep_head(&head(&f.impl_trait_path));
+                let by_id = f.i1_impl_id.as_deref().and_then(|id| id.split_once(" as ")).is_some_and(|(_, t)| t.starts_with("::") && dep_head(&head(t)));
+                let local_default = !tr.is_empty() && !m.is_empty() && {
+                    let suffix = format!("{tr}::{m}");
+                    r1919_kind.iter().any(|(q, k)| *k == 0 && (*q == suffix || q.ends_with(&format!("::{suffix}"))))
+                };
+                if !tr.is_empty() && !m.is_empty() && (by_path || by_id || local_default) {
+                    let nogen = |t: &str| t.split('<').next().unwrap_or(t).to_string();
+                    let leaf_of = |t: &str| nogen(t).rsplit("::").next().unwrap_or("").to_string();
+                    let pre = format!("{tr}|");
+                    // every gated block of THIS trait leaf: (self leaf, members), leaf-keyed
+                    let leaf_blocks: Vec<(&str, &str)> = merged
+                        .i1_gated_impls
+                        .iter()
+                        .filter(|g| !g.starts_with(crate::mbe::GATED_IMPL_ID_MARK))
+                        .filter_map(|g| g.split_once('|').map(|(ik, ms)| (ik, ms)))
+                        .filter_map(|(ik, ms)| ik.split_once(" as ").filter(|(_, t)| *t == tr).map(|(s, _)| (s, ms)))
+                        .collect();
+                    let _ = pre;
+                    let omits = |ms: &str| !ms.split(',').any(|x| x == m);
+                    let alias_leaves: Vec<&str> = i1c_renames.get(st).map(|v| v.iter().map(String::as_str).filter(|x| *x != st).collect()).unwrap_or_default();
+                    let omit_alias = leaf_blocks.iter().any(|(s, ms)| alias_leaves.contains(s) && omits(ms));
+                    let omit_same = leaf_blocks.iter().any(|(s, ms)| *s == st && omits(ms));
+                    // identity-keyed blocks of the same self/trait leaves that omit the member
+                    let id_blocks: Vec<String> = merged
+                        .i1_gated_impls
+                        .iter()
+                        .filter_map(|g| g.strip_prefix(crate::mbe::GATED_IMPL_ID_MARK))
+                        .filter_map(|g| g.rsplit_once('|'))
+                        .filter(|(_, ms)| omits(ms))
+                        .filter_map(|(ik, _)| ik.split_once(" as ").map(|(s, t)| (s.to_string(), t.to_string())))
+                        .filter(|(s, t)| leaf_of(s) == st && leaf_of(t) == tr)
+                        .map(|(s, _)| s)
+                        .collect();
+                    let our_self = f.i1_impl_id.as_deref().and_then(|id| id.split_once(" as ")).map(|(s, _)| nogen(s));
+                    let unaccounted = omit_same && id_blocks.is_empty();
+                    let same_type_other_args = our_self.as_ref().is_some_and(|o| id_blocks.iter().any(|s| nogen(s) == *o));
+                    let shared = r1919_qual_ids.get(f.qual.as_str()).is_some_and(|ids| ids.len() > 1);
+                    let leaf_rule = omit_alias || (omit_same && (our_self.is_none() || unaccounted || same_type_other_args || shared));
+                    if leaf_rule || r1919_inherits {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why.entry(f.qual.clone()).or_default().insert(format!(
+                            "ambiguous:another cfg arm of this impl may inherit the trait's provided method `{m}`"
+                        ));
+                        if candor_report::env::trace("CANDOR_R1922_INSTR") {
+                            eprintln!("R1922HIT\t{}\t{}\t{}", f.qual, f.impl_trait_path, if by_path || by_id { "dep" } else { "local" }); // §E1 REACH COUNTER
+                        }
+                    }
                 }
             }
         }
@@ -9292,13 +9366,40 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
                 && !by_leaf.get(&c.leaf).is_some_and(|v| v.iter().any(|q| q == rel))
                 && !local_types.contains(&c.leaf)
-                && (macro_hidden_owner(&c.path, 1, &merged.macro_modules) || hidden_mod_head() || {
+                && (macro_hidden_owner(&c.path, 1, &merged.macro_modules)
+                    || crate::collector::macro_hidden_ancestor(&c.path, &merged.macro_modules)
+                    || hidden_mod_head() || {
                     let hit = macro_hidden_owner(&c.path, 1, &r1690_glob_macro);
                     if hit && candor_report::env::trace("CANDOR_R1657S2_INSTR") {
                         eprintln!("R1690GLOBMACRO\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER, ADDED branch only
                     }
                     hit
                 });
+            // SOUNDNESS R1923 — a path that DID resolve to a unit, below a module whose item list holds unexpanded macro text that
+            // DECLARES a module of the next segment's name (`mod s` written in a `macro_rules!` body or an invocation's tokens):
+            // `host::s::go()` with `host { crate::wcfg! {} }` whose text writes `#[cfg(unix)] pub mod s { .. }` beside an out-of-line
+            // `s.rs` is the visible arm's unit alone, while the hidden arm is the one that runs (cfgtwin-shaped; `host::gf()`, a direct
+            // child, already read `Unknown` above). The name evidence is the R1901 module fact (`MACRO_DECL_MOD`); the owner evidence is
+            // `merged.macro_modules`. Silent over an executed write on 0.43.0 and main (fixture f_rrcfg `f_rrcfg_mod_e`).
+            if !c.is_macro && !c.method && c.path.starts_with("crate::") {
+                let segs: Vec<&str> = c.path.split("::").skip(1).collect();
+                if segs.len() >= 3 {
+                    let mods = &segs[..segs.len() - 1];
+                    if (1..mods.len()).any(|n| {
+                        merged.macro_modules.contains(&mods[..n].join("::"))
+                            && merged.macro_hidden_fns.contains(&format!("{}{}", crate::lang::MACRO_DECL_MOD, mods[n]))
+                    }) {
+                        direct.entry(f.qual.clone()).or_default().insert("Unknown");
+                        unknown_why
+                            .entry(f.qual.clone())
+                            .or_default()
+                            .insert("macro:module items hidden by an unexpanded macro".to_string());
+                        if candor_report::env::trace("CANDOR_R1923_INSTR") {
+                            eprintln!("R1923HIT\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER
+                        }
+                    }
+                }
+            }
             if r128_fired {
                 direct.entry(f.qual.clone()).or_default().insert("Unknown");
                 // KIND: `macro:` — SOUNDNESS R270, and the comment this replaces conceded the point

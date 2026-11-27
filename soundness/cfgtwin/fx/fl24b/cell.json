@@ -1,0 +1,13 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl24b",
+ "lib": false,
+ "note": "R1924: the trait named through a re-export",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl24b_e"
+  }
+ ]
+}

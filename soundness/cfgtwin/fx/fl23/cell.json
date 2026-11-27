@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl23",
+ "lib": false,
+ "note": "R1923: a nested path into a module only macro text declares, beside an out-of-line stand-in",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl23_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl23_q"
+  }
+ ]
+}

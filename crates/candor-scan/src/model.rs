@@ -1056,6 +1056,11 @@ pub(crate) const EMITTED_MACRO_PREFIX: &str = "\u{4}emitted:";
 /// I1 stage 3 (Fable stage-3 review D3) — a `macro_twins` key: ONE FILE holds both a source and an emitted definition of the
 /// name, so which one a body-position invocation sees depends on textual order the crate-wide table does not keep. The collector
 /// discloses `ambiguous:` at every body-position invocation of the name and still expands the source arm (nothing withdrawn).
+/// SOUNDNESS R1907 (b) — a `macro_twins` key: a `macro_rules!` of this name is written inside an item-position `cfg_if!` arm, which
+/// nothing reads. The collector discloses a bare invocation of the name that no visible definition binds.
+pub(crate) const MACRO_HIDDEN_DEF_PREFIX: &str = "\u{5}hiddendef:";
+/// SOUNDNESS R1907 (b) — the same, for a definition whose text is INERT (no call group, no `!`).
+pub(crate) const MACRO_HIDDEN_INERT_PREFIX: &str = "\u{5}hiddeninert:";
 pub(crate) const EMITTED_SHADOW_PREFIX: &str = "\u{4}shadow:";
 pub(crate) const MBE_PRIM_ATTR: &str = "candor_mbe_prim_op";
 /// SOUNDNESS R1180 — the attribute `mbe::splice_local_macros` stamps on a spliced macro-made operator impl whose self type is

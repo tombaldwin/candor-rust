@@ -1,0 +1,21 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl26",
+ "lib": false,
+ "note": "R1926: a body-local or module-level RELATIVE `use` of a cfg twin (re-export arm beside a fn arm) reads the union of the arms",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl26_body_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl26_mod_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl26_q"
+  }
+ ]
+}

@@ -887,9 +887,12 @@ fn i1s2_a_hidden_use_or_module_twin_keeps_a_hedge() {
     }
     assert_eq!(eff(&rows, "modctl_e"), vec!["Fs".to_string()], "a once-defined module pair is charged: {rows:?}");
     let (off, _) = scan(&d, None, &[("CANDOR_I1S2_TWIN_OFF", "1")]);
-    for f in ["modtw_e", "useuse_e", "fnuse_e", "useother_e"] {
+    for f in ["useuse_e", "fnuse_e", "useother_e"] {
         assert!(!eff(&off, f).contains(&"Unknown".to_string()), "TWIN_OFF: {f} resolves to the stub alone: {off:?}");
     }
+    // SOUNDNESS R1923 — `m1::sys::f()` reads the stub's unit under TWIN_OFF, but `m1` holds unexpanded macro text that DECLARES `mod sys`:
+    // a resolved path below a macro-hidden module whose next segment the hidden text declares is disclosed (it read ABSENT before).
+    assert_eq!(eff(&off, "modtw_e"), vec!["Unknown".to_string()], "TWIN_OFF: modtw_e names a module hidden text declares (R1923): {off:?}");
 }
 
 /// Fable's stage-2 re-check 1: the twin cover was keyed on the NAMES the hidden text writes, and missed every arm that binds a

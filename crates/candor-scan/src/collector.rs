@@ -14477,6 +14477,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                             self.mark_unresolved(format!("ambiguous:self type `{ty}` is reached only through a crate-local glob"));
                                         }
                                     }
+                                    // SOUNDNESS R1915 — the WRITTEN spelling of the same shape: `d::Lone::m(p)` / `d2::free(p)` where `d` names
+                                    // nothing this module declares or imports, no dependency or std root, and the only globs that could supply
+                                    // it are crate-local (`use crate::reexp::*;` over `mod reexp { pub use depx::*; }`, which this map does not
+                                    // follow). R1850 disclosed `Self::m` there and left the written twin ABSENT over an executed write (s50
+                                    // `p_g2d`). Not where any module of the crate binds the head itself (`use crate::lreexp::*;` over a
+                                    // `pub mod dl`, which `by_tail2` resolves): that population is resolved, and is not hedged.
+                                    if !written.starts_with("Self::") && extras.is_empty() && e == written && p.qself.is_none() {
+                                        let segs: Vec<&str> = written.split("::").collect();
+                                        if segs.len() >= 2
+                                            && !crate::lang::ns_name_bound_anywhere(segs[0])
+                                            && crate::lang::only_local_glob_supplies(&segs, &self.uses)
+                                        {
+                                            self.mark_unresolved(format!("ambiguous:path `{written}` is reached only through a crate-local glob"));
+                                        }
+                                    }
                                     if let Some(x) = self.self_std_reading(&written) {
                                         if self.self_std_own_only(&written) {
                                             e = x; // R1902 — the own member replaces the std path
@@ -18590,6 +18605,21 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
         } else {
             None
         };
+        // SOUNDNESS R1907 (b) — a BARE invocation of a name no visible definition binds, while a `macro_rules!` of that name is written
+        // only inside an item-position `cfg_if!` arm this engine does not read (`model::MACRO_HIDDEN_DEF_PREFIX`): what the call
+        // expands to is unknown here, and it read ABSENT over an executed write (cfgtwin d8v7).
+        if mbody.is_none()
+            && !mpath.contains("::")
+            && f1_body.is_none()
+            && !self.local_macros.contains_key(&mleaf)
+            && !self.local_macros.contains_key(&emitted_leaf)
+            && !self.body_macros.contains_key(&mname)
+            && (self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_HIDDEN_DEF_PREFIX))
+                || (self.macro_twins.contains(&format!("{}{mleaf}", crate::model::MACRO_HIDDEN_INERT_PREFIX))
+                    && self.macro_use_log_path(&mleaf).is_none()))
+        {
+            self.refusals.insert(format!("macro:`{mname}` is defined only in an unexpanded cfg_if! arm"));
+        }
         let mut expansion: Option<(String, syn::Block)> = None;
         {
             if let Some(body) = mbody {
@@ -19662,6 +19692,24 @@ pub(crate) fn macro_hidden_owner(
     segs.truncate(segs.len() - drop);
     // An EMPTY remainder is the crate ROOT (`crate::helper` with drop=1), whose module qual is "".
     macro_modules.contains(&segs.join("::"))
+}
+
+/// SOUNDNESS R1923 — `macro_hidden_owner` for a path BELOW the hidden module: `crate::host::s::go` where `host` holds unexpanded
+/// text (`crate::wcfg! {}`) that would declare `pub mod s`. The owner check above names only the item's immediate module
+/// (`host::s`), so a direct child of `host` read `Unknown` and a module the expansion would declare read ABSENT over an
+/// executed write. True when some PROPER ANCESTOR module of the item's module is a macro-hidden one. The caller's guards
+/// (no unit answers the tail, no visible unit has the module-relative qual) already exclude every path the scan resolves.
+pub(crate) fn macro_hidden_ancestor(path: &str, macro_modules: &std::collections::HashSet<String>) -> bool {
+    let mut segs: Vec<&str> = path.split("::").collect();
+    if segs.first() != Some(&"crate") {
+        return false;
+    }
+    segs.remove(0);
+    if segs.len() < 3 {
+        return false; // item + its module + at least one ancestor
+    }
+    segs.pop(); // the item
+    (1..segs.len()).any(|n| macro_modules.contains(&segs[..n].join("::")))
 }
 
 /// Above how many definitions one re-exported NAME may stand for before the alias is dropped. A name

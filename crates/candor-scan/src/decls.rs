@@ -3321,7 +3321,18 @@ pub(crate) fn collect_reexports(
     // a resolution through these aliases was measured and REVERTED (96 effects lost in rustix 0.37.28).
     // SOUNDNESS R1475 — the value is every ARM's module path (`ALIAS_ALT_SEP`-joined, the twin placed at its own name
     // included), so scan.rs can resolve a call written through the module in each arm. It used to be the own name alone.
-    for (name, targets) in &mods {
+    // SOUNDNESS R1907 (a) — …and the same for a `mod` item an item-position `cfg_if!` arm hosts (`lang::cfg_if_mod_items`), unioned
+    // with the module's own: the arms of one carrier are `#[cfg]` twins of each other and of any plain `mod` of that name.
+    let mut redirect_mods = mods.clone();
+    for (name, targets) in mod_targets(&crate::lang::cfg_if_mod_items(items), modpath, dir, include_tests) {
+        let all = redirect_mods.entry(name).or_default();
+        for t in targets {
+            if !all.contains(&t) {
+                all.push(t);
+            }
+        }
+    }
+    for (name, targets) in &redirect_mods {
         let own = qualify(modpath, name);
         if targets.iter().any(|t| *t != own) {
             for t in targets {
@@ -6660,6 +6671,71 @@ pub(crate) fn collect_decls(
                         macro_twins.insert(format!("{}{name}", crate::model::MACRO_REDEF_PREFIX));
                     }
                     local_macros.insert(name, tokens);
+                }
+            }
+            // SOUNDNESS R1907 (b) — the `macro_rules!` NAMES an item-position `cfg_if!` arm writes (at any inline-module depth, nested
+            // carriers included). Nothing above reads inside a carrier, so a definition there reached no index: a body `k!()` bound
+            // to no visible definition and expanded to nothing (cfgtwin `d8v7`: the unix arm's macro, which a sibling hidden text
+            // supplies, writes; the other arm's visible `macro_rules! k` is invisible to the engine). Filed under
+            // `model::MACRO_HIDDEN_DEF_PREFIX`; the collector discloses a bare invocation of such a name that no visible definition binds.
+            syn::Item::Macro(m)
+                if (include_tests || !is_cfg_test(&m.attrs))
+                    && m.ident.is_none()
+                    && m.mac.path.segments.last().is_some_and(|s| s.ident == "cfg_if") =>
+            {
+                fn names(m: &syn::ItemMacro, depth: usize, out: &mut Vec<String>) {
+                    let Ok(arms) = syn::parse2::<crate::collector::CfgIfArms>(crate::model::respan_call_site(m.mac.tokens.clone())) else {
+                        return;
+                    };
+                    fn walk(items: &[syn::Item], depth: usize, out: &mut Vec<String>) {
+                        for it in items {
+                            match it {
+                                syn::Item::Macro(x) if x.ident.is_some() && x.mac.path.is_ident("macro_rules") => {
+                                    // An INERT definition (no ident followed by a call group or `!`, anywhere in its text: `=> ()`, `=> {}`) can
+                                    // contribute no effect itself; where a `#[macro_use]` import binds the same name (the `warn!` no-op beside a
+                                    // `#[macro_use] extern crate log;` arm, R474's shape) the import's charge is the other arm and nothing is hidden.
+                                    fn acts(ts: proc_macro2::TokenStream) -> bool {
+                                        use proc_macro2::TokenTree as T;
+                                        let v: Vec<T> = ts.into_iter().collect();
+                                        v.iter().enumerate().any(|(i, t)| match t {
+                                            T::Group(g) => acts(g.stream()),
+                                            T::Ident(_) => matches!(v.get(i + 1), Some(T::Group(g)) if g.delimiter() == proc_macro2::Delimiter::Parenthesis)
+                                                || matches!(v.get(i + 1), Some(T::Punct(p)) if p.as_char() == '!'),
+                                            _ => false,
+                                        })
+                                    }
+                                    if let Some(n) = &x.ident {
+                                        // an inert one is filed apart: the collector counts it unless a `#[macro_use]` import already binds the name
+                                        out.push(if acts(x.mac.tokens.clone()) { n.to_string() } else { format!("\u{1}inert\u{1}{n}") });
+                                    }
+                                }
+                                syn::Item::Macro(x)
+                                    if x.ident.is_none() && depth < 8 && x.mac.path.segments.last().is_some_and(|s| s.ident == "cfg_if") =>
+                                {
+                                    names(x, depth + 1, out)
+                                }
+                                syn::Item::Mod(md) => {
+                                    if let Some((_, inner)) = &md.content {
+                                        walk(inner, depth, out);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    for b in &arms.0 {
+                        let items: Vec<syn::Item> =
+                            b.stmts.iter().filter_map(|st| if let syn::Stmt::Item(i) = st { Some(i.clone()) } else { None }).collect();
+                        walk(&items, depth, out);
+                    }
+                }
+                let mut v = Vec::new();
+                names(m, 0, &mut v);
+                for n in v {
+                    match n.strip_prefix("\u{1}inert\u{1}") {
+                        Some(i) => macro_twins.insert(format!("{}{i}", crate::model::MACRO_HIDDEN_INERT_PREFIX)),
+                        None => macro_twins.insert(format!("{}{n}", crate::model::MACRO_HIDDEN_DEF_PREFIX)),
+                    };
                 }
             }
             _ => {}

@@ -873,6 +873,92 @@ pub mod three_{id} { #[cfg(not(unix))] impl super::TV_{id} for super::V_{id} { f
 pred('r7idmatch', 'r7idmatch_e', 'record', 'record', 'E'); pred('r7idmatch', 'r7idmatch_sup_e', 'record', 'record', 'E')
 
 
+
+# ----------------------------------------------------------------------------------------------- floor hedges (lane rust-floor-hedges)
+# One cell per row of R1907 (a: a type alias / a `#[path]` module hosted in a `cfg_if!` carrier; b: a macro a carrier arm writes), R1915,
+# R1918 (b), R1922, R1923, R1924 (alias + re-export spellings; gen/memcol are r7's), R1926. Each `_e` is an executed write; each `_q` is a
+# pure twin with a UNIQUE name. A `_q` that reads `U` is a pure twin the hedge covers by name coincidence (counted, never hidden).
+# fl8v7: R1907 (b). `k_*!()` in a body, the macro defined by text only a `cfg_if!` arm holds; kc_* is a VISIBLE definition (must stay clean).
+cell('fl8v7', {'main.rs': 'macro_rules! kc_fl8v7 { () => {} }\ncfg_if::cfg_if! {\n    if #[cfg(unix)] { #[macro_use] pub mod m_fl8v7 { macro_rules! kw_fl8v7 { () => { EFF } } } } else { #[macro_use] pub mod m_fl8v7 { macro_rules! kw_fl8v7 { () => {} } } }\n}\n'},
+     [('fl8v7_e', 'e', 'kw_fl8v7!();'), ('fl8v7_q', 'q', 'kc_fl8v7!();')], deps={'cfg-if': '"1.0"'},
+     note='R1907 (b): a macro defined only by text a cfg_if! arm holds; the visible-definition twin must stay clean')
+pred('fl8v7', 'fl8v7_e', '-', '-', 'U'); pred('fl8v7', 'fl8v7_q', '-', '-', '-')
+# fl26: R1926. A fn-body `use` of a cfg twin whose arms are a re-export and a fn; also the module-level relative `use tw::g as h`.
+cell('fl26', {'main.rs': sub("""pub mod imp_{id} { pub fn eff() { EFF } pub fn pur() {} }
+#[cfg(unix)] pub mod tw_{id} { pub use crate::imp_{id}::eff as g; }
+#[cfg(not(unix))] pub mod tw_{id} { pub fn g() {} }
+#[cfg(unix)] pub mod twq_{id} { pub use crate::imp_{id}::pur as g; }
+#[cfg(not(unix))] pub mod twq_{id} { pub fn g() {} }
+use tw_{id}::g as h_{id};
+""", id='fl26')}, [('fl26_body_e', 'e', 'use tw_fl26::g; g()'), ('fl26_mod_e', 'e', 'h_fl26()'), ('fl26_q', 'q', 'use twq_fl26::g; g()')],
+     note='R1926: a body-local or module-level RELATIVE `use` of a cfg twin (re-export arm beside a fn arm) reads the union of the arms')
+pred('fl26', 'fl26_body_e', '-', '-', 'E'); pred('fl26', 'fl26_mod_e', '-', '-', 'E'); pred('fl26', 'fl26_q', '-', '-', '-')
+# fl15: R1915. A dependency module reached through a crate-local glob of a module that globs the dependency; lre is a crate-local module
+# the glob supplies (resolved by tail, must stay clean).
+cell('fl15', {'main.rs': sub("""mod reexp_{id} { pub use fxdep_{id}::*; }
+mod g_{id} {
+    use crate::reexp_{id}::*;
+    pub fn free_e() { d_{id}::free() }
+    pub fn ty_e() { d_{id}::Lone::m() }
+    pub fn pure_q() { d_{id}::pure() }
+}
+mod lre_{id} { pub mod dl_{id} { pub fn pf() {} } }
+mod gl_{id} { use crate::lre_{id}::*; pub fn local_q() { dl_{id}::pf() } }
+""", id='fl15')}, [('fl15_free_e', 'e', 'g_fl15::free_e()'), ('fl15_ty_e', 'e', 'g_fl15::ty_e()'), ('fl15_pure_q', 'q', 'g_fl15::pure_q()'),
+     ('fl15_local_q', 'q', 'gl_fl15::local_q()')], deps={'fxdep_fl15': '{ path = "fxdep_fl15" }'},
+     extra={'@dep/fxdep_fl15/src/lib.rs': sub("pub mod d_{id} { pub struct Lone; impl Lone { pub fn m() { EFF } } pub fn free() { EFF } pub fn pure() {} }\n", id='fl15')},
+     hdr=False, note='R1915: the written path through a crate-local glob of a module that globs a dependency')
+pred('fl15', 'fl15_free_e', '-', '-', 'U'); pred('fl15', 'fl15_ty_e', '-', '-', 'U'); pred('fl15', 'fl15_pure_q', '-', '-', 'U'); pred('fl15', 'fl15_local_q', '-', '-', '-')
+# fl18: R1918 (b). An impl a root-path macro emits in a fn BODY: the callers elsewhere. mkp is the pure twin (a pure impl).
+cell('fl18', {'main.rs': sub("""#[macro_export] macro_rules! mke_{id} { ($t:ident, $n:ident) => { impl $t for S_{id} { fn $n(&self) { EFF } } } }
+#[macro_export] macro_rules! mkp_{id} { ($t:ident, $n:ident) => { impl $t for S_{id} { fn $n(&self) {} } } }
+pub trait Te_{id} { fn goe(&self); }
+pub trait Tp_{id} { fn gop(&self); }
+pub struct S_{id};
+pub fn emit_{id}() { crate::mke_{id}!(Te_{id}, goe); crate::mkp_{id}!(Tp_{id}, gop); }
+""", id='fl18')}, [('fl18_e', 'e', 'S_fl18.goe()'), ('fl18_q', 'q', 'S_fl18.gop()')],
+     note='R1918 (b): an impl a root-path macro emits in a fn body is hoisted, so a caller elsewhere reads its member')
+pred('fl18', 'fl18_e', '-', '-', 'E'); pred('fl18', 'fl18_q', '-', '-', '-')
+# fl22: R1922. A gated pure override of a DEPENDENCY trait's effectful default; a second trait with a PURE default is the pure twin.
+cell('fl22', {'main.rs': sub("""pub struct Qe_{id}; pub struct Qq_{id};
+#[cfg(not(unix))] impl fxdep_{id}::TD for Qe_{id} { fn go(&self) {} }
+#[cfg(unix)] impl fxdep_{id}::TD for Qe_{id} {}
+#[cfg(not(unix))] impl fxdep_{id}::TQ for Qq_{id} { fn goq(&self) {} }
+#[cfg(unix)] impl fxdep_{id}::TQ for Qq_{id} {}
+""", id='fl22')}, [('fl22_e', 'e', 'use fxdep_fl22::TD; Qe_fl22.go()'), ('fl22_q', 'q', 'use fxdep_fl22::TQ; Qq_fl22.goq()')],
+     deps={'fxdep_fl22': '{ path = "fxdep_fl22" }'},
+     extra={'@dep/fxdep_fl22/src/lib.rs': 'pub trait TD { fn go(&self) { EFF } }\npub trait TQ { fn goq(&self) {} }\n'}, hdr=False,
+     note='R1922: a gated override of a dependency trait default whose twin arm inherits it')
+pred('fl22', 'fl22_e', '-', '-', 'U'); pred('fl22', 'fl22_q', '-', '-', 'U')
+# fl23: R1923. host holds a path-invoked macro (unexpanded, writes cfg); its text declares `mod s`; the out-of-line stand-in is host_fl23/s.rs.
+# `t` is a visible file module the text does NOT declare (the pure twin: must stay clean).
+cell('fl23', {'main.rs': sub("""#[macro_export] macro_rules! wcfg_{id} {{ () => {{
+    #[cfg(unix)] pub mod s {{ pub fn go() {{ EFF }} }}
+    #[cfg(not(unix))] pub mod s;
+}} }}
+pub mod host_{id} {{ crate::wcfg_{id}! {{}} pub mod t; }}
+""".replace('{{', '{').replace('}}', '}'), id='fl23')}, [('fl23_e', 'e', 'host_fl23::s::go()'), ('fl23_q', 'q', 'host_fl23::t::pure()')],
+     extra={'host_fl23/s.rs': 'pub fn go() {}\n', 'host_fl23/t.rs': 'pub fn pure() {}\n'},
+     note='R1923: a nested path into a module only macro text declares, beside an out-of-line stand-in')
+pred('fl23', 'fl23_e', '-', '-', 'U'); pred('fl23', 'fl23_q', '-', '-', '-')
+# fl24a / fl24b: R1924. A `type`-alias self type, and a trait named through a re-export; r7gen / r7memcol are the generic and member-collision shapes.
+cell('fl24a', {'main.rs': sub("""pub trait Tr_{id} { fn m(&self) { eff_{id}() } }
+pub fn eff_{id}() { EFF }
+pub mod xa_{id} { pub struct S; }
+pub type A_{id} = xa_{id}::S;
+#[cfg(not(unix))] impl Tr_{id} for A_{id} { fn m(&self) {} }
+#[cfg(unix)] impl Tr_{id} for xa_{id}::S {}
+""", id='fl24a')}, [('fl24a_e', 'e', 'xa_fl24a::S.m()')], note='R1924: a type-alias self type in one arm, the aliased path in the other')
+pred('fl24a', 'fl24a_e', '-', '-', 'U')
+cell('fl24b', {'main.rs': sub("""pub fn eff_{id}() { EFF }
+pub mod inner_{id} { pub trait Tr { fn m(&self) { crate::eff_{id}() } } }
+pub mod api_{id} { pub use crate::inner_{id}::Tr; }
+pub struct S_{id};
+#[cfg(not(unix))] impl api_{id}::Tr for S_{id} { fn m(&self) {} }
+#[cfg(unix)] impl api_{id}::Tr for S_{id} {}
+""", id='fl24b')}, [('fl24b_e', 'e', 'use api_fl24b::Tr; S_fl24b.m()')], note='R1924: the trait named through a re-export')
+pred('fl24b', 'fl24b_e', '-', '-', 'U')
+
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):
     arms = ''.join('        "%s" => %s%s(),\n' % (p, crate_ref, p) for p, _, _ in c['probes'])

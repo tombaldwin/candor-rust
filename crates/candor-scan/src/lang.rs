@@ -2938,6 +2938,24 @@ fn expand_with_in(path: &str, uses: &HashMap<String, String>, anchor: bool, foll
                                 return alias_join(full, &s2[n..]);
                             }
                         }
+                        // SOUNDNESS R1926 — …and, when no exact key answers, the same question `qualified_alias` answers for a path
+                        // WRITTEN with this head (VEIN A below): a `use tw::g;` whose head module THIS module declares binds `g` to
+                        // `tw::g` relative, and a cfg twin of that module (`#[cfg(unix)] mod tw { pub use crate::imp::eff as g; }` beside
+                        // `#[cfg(not(unix))] mod tw { pub fn g() {} }`) has no exact `uses` key, only the module-qualified table. The
+                        // written spelling `tw::g()` and the anchored `use crate::tw::g;` both unioned the arms; this one read the
+                        // declared arm alone (cfgtwin `r6_body_e`, and a module-level `use tw::g as h;` the same).
+                        if anchor && module_declares(uses, s2[0]) == Some(true) {
+                            if let Some(modpath) = uses.get(MODPATH_KEY) {
+                                let abs = if modpath.is_empty() { joined.clone() } else { format!("{modpath}::{joined}") };
+                                let abs_segs: Vec<&str> = abs.split("::").collect();
+                                if let Some(q) = qualified_alias(&abs_segs, true, uses) {
+                                    if candor_report::env::trace("CANDOR_R1926_INSTR") {
+                                        eprintln!("R1926USE\t{joined}\t{}", q.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
+                                    }
+                                    return q;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3942,6 +3960,15 @@ pub(crate) fn only_local_glob_supplies(segs: &[&str], uses: &HashMap<String, Str
             || module_declares(uses, groot) == Some(true)
             || uses.get(groot).is_some_and(|v| v.starts_with("crate::") || v.starts_with("self::") || v.starts_with("super::"))
     })
+}
+
+/// SOUNDNESS R1915 — is `name` bound by ANY module of this crate as an explicit item or a named import (per the installed
+/// namespace index)? `true` when no index is installed: the caller cannot tell, and refuses to hedge on a guess.
+pub(crate) fn ns_name_bound_anywhere(name: &str) -> bool {
+    match ns_cell().read() {
+        Ok(g) => g.as_ref().is_none_or(|ns| ns.names.values().any(|s| s.contains(name)) || ns.types.values().any(|s| s.contains(name))),
+        Err(_) => true,
+    }
 }
 
 /// VEIN A — does the module this map describes declare `name` in the TYPE namespace? `None` when the
@@ -7679,6 +7706,40 @@ pub(crate) fn cfg_if_use_items(items: &[syn::Item]) -> Vec<syn::ItemUse> {
     out
 }
 
+/// SOUNDNESS R1907 (a) — the out-of-line `mod NAME;` items written inside an item-position `cfg_if!` (bare or `cfg_if::cfg_if!`),
+/// every arm, nested `cfg_if!` arms included. `decls::mod_targets` reads only the module's own item list, so a `#[path]` redirect
+/// hosted in a carrier (`cfg_if! { if #[cfg(unix)] { #[path = "live.rs"] pub mod m; } else { #[path = "pure.rs"] pub mod m; } }`)
+/// recorded no redirected module (R986) and a call through `m` named no unit with no disclosure (cfgtwin d9v6). An arm body the
+/// `CfgIfArms` grammar does not accept contributes nothing (today's reading).
+pub(crate) fn cfg_if_mod_items(items: &[syn::Item]) -> Vec<syn::Item> {
+    fn walk(items: &[syn::Item], depth: usize, out: &mut Vec<syn::Item>) {
+        for it in items {
+            let syn::Item::Macro(m) = it else { continue };
+            if m.ident.is_some() || m.mac.path.segments.last().is_none_or(|s| s.ident != "cfg_if") || depth > 8 {
+                continue;
+            }
+            let Ok(arms) = syn::parse2::<crate::collector::CfgIfArms>(crate::model::respan_call_site(m.mac.tokens.clone())) else {
+                continue;
+            };
+            for b in &arms.0 {
+                let inner: Vec<syn::Item> =
+                    b.stmts.iter().filter_map(|st| if let syn::Stmt::Item(i) = st { Some(i.clone()) } else { None }).collect();
+                for i in &inner {
+                    if let syn::Item::Mod(md) = i {
+                        if md.content.is_none() {
+                            out.push(i.clone());
+                        }
+                    }
+                }
+                walk(&inner, depth + 1, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(items, 0, &mut out);
+    out
+}
+
 /// SOUNDNESS R128 — the MODULES whose item list this scan could not read in full, because an
 /// item-position MACRO INVOCATION sits in it and `syn` leaves a macro body opaque.
 ///
@@ -7999,6 +8060,19 @@ pub(crate) fn collect_macro_hidden_decls(
                 } else {
                     Vec::new()
                 };
+                // SOUNDNESS R1907 (a) — a `type` ALIAS an item-position `cfg_if!` arm declares (at any inline-module depth) is the same
+                // evidence as one a plain invocation's text declares: no declaration of it was read, so a method call on a receiver
+                // typed through it (`fn via(x: &m::Tt) { x.go() }`) formed `Tt::go`, named no unit and read ABSENT over an executed
+                // write (cfgtwin d8v6; d2v6, the same twin with no carrier, reads `E`). Filed as the plain-invocation form is, so the
+                // R1636 channel in `scan.rs` (no claimant for the tail, the alias declared only in unexpanded text) discloses it.
+                // The same name declared in BOTH arms files once; a pure twin spelled this way is hedged too, and counted.
+                for gi in cfgif_items.iter() {
+                    if let syn::Item::Type(x) = gi {
+                        types.insert(format!("{MACRO_DECL_ALIAS}{}", x.ident));
+                        types.insert(format!("{MACRO_DECL_TYPE}{}", x.ident));
+                        types.insert(x.ident.to_string());
+                    }
+                }
                 for gi in cfgif_items.iter().filter(|g| !matches!(g, syn::Item::Type(_) | syn::Item::Mod(_))) {
                     let n = match gi {
                         syn::Item::Struct(x) => x.ident.to_string(),
@@ -8033,8 +8107,17 @@ pub(crate) fn collect_macro_hidden_decls(
                 }
                 let mut prev_mod = false;
                 for t in toks.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
-                    if prev_mod && !t.is_empty() && m.ident.is_none() {
-                        fns.insert(format!("{MACRO_DECL_MOD}{t}")); // R1901 — see `MACRO_DECL_MOD`
+                    if prev_mod && !t.is_empty() {
+                        match &m.ident {
+                            None => {
+                                fns.insert(format!("{MACRO_DECL_MOD}{t}")); // R1901 — see `MACRO_DECL_MOD`
+                            }
+                            // SOUNDNESS R1923 — …and a `macro_rules!` BODY's `mod NAME`, tagged with the macro as its `fn` names are, so
+                            // the merge retires it once every invocation of the macro was expanded.
+                            Some(name) => {
+                                tagged.insert(format!("{name}{I1_TAG_SEP}FN{I1_TAG_SEP}{MACRO_DECL_MOD}{t}"));
+                            }
+                        }
                     }
                     if !t.is_empty() {
                         prev_mod = t == "mod";

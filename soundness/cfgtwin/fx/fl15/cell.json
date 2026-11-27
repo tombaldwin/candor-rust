@@ -1,0 +1,27 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_fl15"
+ ],
+ "id": "fl15",
+ "lib": false,
+ "note": "R1915: the written path through a crate-local glob of a module that globs a dependency",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl15_free_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl15_ty_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl15_pure_q"
+  },
+  {
+   "kind": "q",
+   "name": "fl15_local_q"
+  }
+ ]
+}
