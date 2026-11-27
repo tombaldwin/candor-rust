@@ -1,0 +1,17 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl35o",
+ "lib": false,
+ "note": "R1935: a module only named (out-of-line) in macro text is read, so a typed method call on its type is NOT hedged",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl35o_let_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl35o_q"
+  }
+ ]
+}

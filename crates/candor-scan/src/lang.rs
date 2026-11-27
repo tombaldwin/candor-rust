@@ -8110,9 +8110,46 @@ pub(crate) fn collect_macro_hidden_decls(
                         }
                     }
                 }
+                // SOUNDNESS R1935 (Fable round 2) — only an INLINE `mod NAME { .. }` hides items: an out-of-line `mod NAME;` inside the text is a file
+                // the engine READS (chacha20 `cfg_if! { pub(crate) mod avx512; }`, polling `mod iocp;`), so "items hidden by an unexpanded macro"
+                // is false of it. The name is filed for R1901/R1923 only when some occurrence in the text is followed by `{`.
+                let inline_mods: std::collections::HashSet<String> = {
+                    let b: Vec<char> = toks.chars().collect();
+                    let isid = |c: char| c.is_alphanumeric() || c == '_';
+                    let mut out = std::collections::HashSet::new();
+                    let mut i = 0;
+                    while i < b.len() {
+                        if isid(b[i]) && (i == 0 || !isid(b[i - 1])) {
+                            let st = i;
+                            while i < b.len() && isid(b[i]) {
+                                i += 1;
+                            }
+                            if b[st..i].iter().collect::<String>() == "mod" {
+                                let mut j = i;
+                                while j < b.len() && b[j].is_whitespace() {
+                                    j += 1;
+                                }
+                                let ns = j;
+                                while j < b.len() && isid(b[j]) {
+                                    j += 1;
+                                }
+                                let name: String = b[ns..j].iter().collect();
+                                while j < b.len() && b[j].is_whitespace() {
+                                    j += 1;
+                                }
+                                if !name.is_empty() && j < b.len() && b[j] == '{' {
+                                    out.insert(name);
+                                }
+                            }
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    out
+                };
                 let mut prev_mod = false;
                 for t in toks.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
-                    if prev_mod && !t.is_empty() {
+                    if prev_mod && !t.is_empty() && inline_mods.contains(t) {
                         match &m.ident {
                             None => {
                                 fns.insert(format!("{MACRO_DECL_MOD}{t}")); // R1901 — see `MACRO_DECL_MOD`

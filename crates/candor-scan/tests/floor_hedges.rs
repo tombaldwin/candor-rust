@@ -247,3 +247,19 @@ fn r1935_a_method_call_on_a_type_only_hidden_macro_text_declares_is_disclosed() 
     }
     assert!(pure(&r, "fl35_q"), "a type in a visible module the text does not declare stays clean: {r:?}");
 }
+
+#[test]
+fn round2_an_out_of_line_module_named_in_macro_text_is_read_not_hedged() {
+    let r = scan("fl35o");
+    assert!(has(&r, "fl35o_let_e", "Fs"), "the file the engine reads supplies the effect: {r:?}");
+    assert!(!why(&r, "fl35o_let_e", "macro:module items hidden"), "no false hidden-module reason: {r:?}");
+    assert!(pure(&r, "fl35o_q"), "{r:?}");
+}
+
+#[test]
+fn round2_a_projection_a_non_dependency_bound_may_declare_is_hedged_not_keyed() {
+    let (_, rows) = raw(&fx("fl34i"), &[]);
+    let r = &rows["g_fl34i::iter"];
+    assert!(strs(r, "unknownWhy").iter().any(|w| w == "dispatch:T::Item.f"), "{r}");
+    assert!(strs(r, "dispatchesOn").is_empty(), "no key may name a member the dependency trait does not declare: {r}");
+}

@@ -332,11 +332,17 @@ fl34	fl34_sup_e	Fs	-	-	-	U0F0	U0F0	U0F0
 fl34	fl34_sup_e@chained	Fs	-	-	U	U0F0	U0F0	U1F0
 fl34	fl34_two_e	Fs	-	-	U	U0F0	U0F0	U1F0
 fl34	fl34_two_e@chained	Fs	-	-	U	U0F0	U0F0	U1F0
+fl34i	fl34i_e	Fs	-	-	U	U0F0	U0F0	U1F0
+fl34i	fl34i_e@chained	Fs	-	-	U	U0F0	U0F0	U1F0
+fl34i	fl34i_q	none	-	-	U	U0F0	U0F0	U1F0
+fl34i	fl34i_q@chained	none	-	-	U	U0F0	U0F0	U1F0
 fl35	fl35_ann_e	Fs	-	-	U	U0F0	U0F0	U1F0
 fl35	fl35_let_e	Fs	-	-	U	U0F0	U0F0	U1F0
 fl35	fl35_q	none	-	-	-	U0F0	U0F0	U0F0
 fl35	fl35_ufcs_e	Fs	-	U	U	U0F0	U1F0	U1F0
 fl35	fl35_use_e	Fs	-	-	U	U0F0	U0F0	U1F0
+fl35o	fl35o_let_e	Fs	E	E	E	U0F1	U0F1	U0F1
+fl35o	fl35o_q	none	-	-	-	U0F0	U0F0	U0F0
 fl8v7	fl8v7_e	Fs	-	-	U	U0F0	U0F0	U1F0
 fl8v7	fl8v7_q	none	-	-	-	U0F0	U0F0	U0F0
 g1	g1_e	Fs	E	E	E	U0F1	U0F1	U0F1

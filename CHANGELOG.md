@@ -17,7 +17,7 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   spelling's disclosure): `T::A::f()` through a type parameter bounded by a DEPENDENCY trait formed no edge and no key, unchained and chained; it now forms
   what `<T as dep::HasA>::A::f()` forms (`dep#HasA::A::f` and the call), and with two dependency bounds it is hedged `dispatch:T::A.f`. R1935 (hedge): a method call
   on a value typed below a module whose hidden macro text declares the next segment now reads `Unknown` `macro:module items hidden by an unexpanded macro`, as R1923's path
-  call does. Additive; no kill switch.
+  call does; R1935 and R1923 fire only for a module the macro text declares INLINE (`mod s { .. }`), not for an out-of-line `mod s;` the engine reads (this narrows R1923's path-call hedge too: those removed hedges had a false reason). R1934 mints the key only when the dependency bound is the only bound that could declare the projection, else the `dispatch:T::A.f` hedge. No kill switch.
 
 - ⚠ **Lane rust-floor-hedges: eight pre-existing silent under-reports get a site hedge or a resolution (SOUNDNESS R1907, R1915, R1918 (b), R1922, R1923, R1924, R1926; R1912 and R1918 (a) left).**
   Every one read ABSENT over an executed write on v0.43.0 and main (`soundness/cfgtwin` `fl*` cells and the named residual cells). Resolutions

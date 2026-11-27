@@ -1025,6 +1025,32 @@ pub mod host_{id} {{ crate::wcfg_{id}! {{}} pub mod t; }}
 for _p in ('fl35_let_e', 'fl35_ann_e', 'fl35_use_e', 'fl35_ufcs_e'):
     pred('fl35', _p, '-', '-', 'U')
 pred('fl35', 'fl35_q', '-', '-', '-')
+# fl35o: R1935 round 2. The module the macro text names is OUT-OF-LINE (`mod s;`): the engine READS s.rs, so no "hidden by an unexpanded macro" reason is true of it.
+cell('fl35o', {'main.rs': sub("""#[macro_export] macro_rules! wcfg_{id} {{ () => {{
+    #[cfg(unix)] pub mod s;
+}} }}
+pub mod host_{id} {{ crate::wcfg_{id}! {{}} }}
+""".replace('{{', '{').replace('}}', '}'), id='fl35o')},
+     [('fl35o_let_e', 'e', 'let t = host_fl35o::s::T; t.go()'), ('fl35o_q', 'q', 'let t = host_fl35o::s::T; t.quiet()')],
+     extra={'host_fl35o/s.rs': 'pub struct T; impl T { pub fn go(&self) { EFF } pub fn quiet(&self) {} }\n'},
+     note='R1935: a module only named (out-of-line) in macro text is read, so a typed method call on its type is NOT hedged')
+pred('fl35o', 'fl35o_let_e', '-', '-', 'E'); pred('fl35o', 'fl35o_q', '-', '-', '-')
+# fl34i: R1934 round 2. A std bound that declares the projection beside the dependency's bound: the dependency trait does not declare `Item`, so no key.
+cell('fl34i', {'main.rs': sub("""use fxdep_{id}::{{Af, HasA}};
+pub struct Loud; impl Af for Loud {{ fn f() {{ EFF }} }}
+pub struct Quiet; impl Af for Quiet {{ fn f() {{}} }}
+pub struct ItE; impl Iterator for ItE {{ type Item = Loud; fn next(&mut self) -> Option<Loud> {{ None }} }} impl HasA for ItE {{ type A = Loud; }}
+pub struct ItQ; impl Iterator for ItQ {{ type Item = Quiet; fn next(&mut self) -> Option<Quiet> {{ None }} }} impl HasA for ItQ {{ type A = Quiet; }}
+mod g_{id} {{
+    use super::Af;
+    pub fn iter<T: fxdep_{id}::HasA + Iterator>() where T::Item: Af {{ T::Item::f() }}
+}}
+""".replace('{{', '{').replace('}}', '}'), id='fl34i')},
+     [('fl34i_e', 'e', 'g_fl34i::iter::<ItE>()'), ('fl34i_q', 'q', 'g_fl34i::iter::<ItQ>()')],
+     deps={'fxdep_fl34i': '{ path = "fxdep_fl34i" }'},
+     extra={'@dep/fxdep_fl34i/src/lib.rs': 'pub trait Af { fn f(); }\npub trait HasA { type A: Af; }\n'}, chain=dict(kind='dep', dep_dir='fxdep_fl34i'), hdr=False,
+     note='R1934: T: dep::HasA + Iterator, T::Item::f(): the dependency bound is not the only bound that could declare `Item`, so the site is hedged, never keyed')
+pred('fl34i', 'fl34i_e', '-', '-', 'U'); pred('fl34i', 'fl34i_q', '-', '-', 'U'); pred('fl34i', 'fl34i_e@chained', '-', '-', 'U'); pred('fl34i', 'fl34i_q@chained', '-', '-', 'U')
 # fl24a / fl24b: R1924. A `type`-alias self type, and a trait named through a re-export; r7gen / r7memcol are the generic and member-collision shapes.
 cell('fl24a', {'main.rs': sub("""pub trait Tr_{id} { fn m(&self) { eff_{id}() } }
 pub fn eff_{id}() { EFF }

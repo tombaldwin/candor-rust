@@ -958,6 +958,13 @@ fn is_recv_type_changing(method: &str) -> bool {
     )
 }
 
+/// SOUNDNESS R1934 — std traits that declare ASSOCIATED TYPES (or inherit one): a bound of one of these beside a dependency bound may be the trait `T::A` names.
+const STD_ASSOC_TRAITS: [&str; 34] = [
+    "Iterator", "IntoIterator", "DoubleEndedIterator", "ExactSizeIterator", "FusedIterator", "Deref", "DerefMut", "Add", "Sub", "Mul", "Div", "Rem", "Neg",
+    "Not", "BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Index", "IndexMut", "Fn", "FnMut", "FnOnce", "Future", "IntoFuture", "FromStr", "TryFrom", "TryInto",
+    "ToOwned", "Pointee", "Try", "Residual", "Stream",
+];
+
 impl<'a> CallCollector<'a> {
     /// SOUNDNESS R182/R196 — the drop route's REFUSALS, disclosed instead of certified.
     ///
@@ -12028,18 +12035,26 @@ impl<'a> CallCollector<'a> {
     /// is unknown, and the route above forms edges only from a LOCAL trait's declaration: with none the call formed nothing — no edge, no
     /// key, no `invisible` — and a consumer instantiating `T` with an implementor whose `A` writes read nothing, unchained AND chained
     /// (EXECUTED `fb15_assoc2_e`). The qself spelling `<T as dep::HasA>::A::f()` already mints `dep#HasA::A::f` and the call
-    /// `dep::HasA::A::f`; this mints exactly that, through the bound's own written qualification. With ONE dependency bound the trait is
-    /// the one `A` is declared in (rustc's own E0221 otherwise); with several, which declares `A` is not known, so the site is disclosed
+    /// `dep::HasA::A::f`; this mints exactly that, through the bound's own written qualification. With ONE bound that could declare `A` (the dependency's; no other dependency, crate-local or associated-type std bound) the trait is
+    /// the one `A` is declared in; otherwise which declares `A` is not known, so the site is disclosed
     /// as the dispatch it is (`dispatch:<T>::<A>.<member>`, the local-bound reading's own reason) rather than keyed to a guess.
     fn edge_dep_bound_projection(&mut self, g: &str, assoc: &str, leaf: &str) {
         let Some(bounds) = self.generic_bounds.get(g).or_else(|| self.impl_generic_bounds.get(g)).cloned() else { return };
         let Ok(recv) = syn::parse_str::<syn::Expr>(g) else { return };
         let mut deps: Vec<String> = Vec::new();
+        // any OTHER bound that could declare `assoc`: a crate-local trait, or a std trait that has associated types (a std bound beside the
+        // dependency's is legal when it is the one declaring the name: `T: dep::HasA + Iterator`, `T::Item::f()`). Std traits with none
+        // (`Debug`, `Clone`, `Send`..) cannot.
+        let mut other_may_declare = false;
         for b in &bounds {
             let full = self.recv_trait_full(&recv, b, leaf);
             let root = full.split("::").next().unwrap_or("");
-            if full.contains("::") && crate::lang::is_dependency_crate_root(root) && !deps.contains(&full) {
-                deps.push(full);
+            if full.contains("::") && crate::lang::is_dependency_crate_root(root) {
+                if !deps.contains(&full) {
+                    deps.push(full);
+                }
+            } else if !crate::std_bounds::is_std_trait_leaf(b) || STD_ASSOC_TRAITS.contains(&b.as_str()) {
+                other_may_declare = true;
             }
         }
         if crate::lang::reach_debug() {
@@ -12047,7 +12062,7 @@ impl<'a> CallCollector<'a> {
         }
         match deps.len() {
             0 => {}
-            1 => self.emit_foreign_member(&format!("{}::{assoc}", deps[0]), leaf),
+            1 if !other_may_declare => self.emit_foreign_member(&format!("{}::{assoc}", deps[0]), leaf),
             _ => self.mark_unresolved(format!("dispatch:{g}::{assoc}.{leaf}")),
         }
     }

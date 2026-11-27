@@ -1,0 +1,22 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_fl34i",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_fl34i"
+ ],
+ "id": "fl34i",
+ "lib": false,
+ "note": "R1934: T: dep::HasA + Iterator, T::Item::f(): the dependency bound is not the only bound that could declare `Item`, so the site is hedged, never keyed",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl34i_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl34i_q"
+  }
+ ]
+}

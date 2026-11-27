@@ -469,5 +469,11 @@ fl35	fl35_ann_e	-	-	U
 fl35	fl35_use_e	-	-	U
 fl35	fl35_ufcs_e	-	-	U
 fl35	fl35_q	-	-	-
+fl35o	fl35o_let_e	-	-	E
+fl35o	fl35o_q	-	-	-
+fl34i	fl34i_e	-	-	U
+fl34i	fl34i_q	-	-	U
+fl34i	fl34i_e@chained	-	-	U
+fl34i	fl34i_q@chained	-	-	U
 fl24a	fl24a_e	-	-	U
 fl24b	fl24b_e	-	-	U
