@@ -19694,24 +19694,6 @@ pub(crate) fn macro_hidden_owner(
     macro_modules.contains(&segs.join("::"))
 }
 
-/// SOUNDNESS R1923 — `macro_hidden_owner` for a path BELOW the hidden module: `crate::host::s::go` where `host` holds unexpanded
-/// text (`crate::wcfg! {}`) that would declare `pub mod s`. The owner check above names only the item's immediate module
-/// (`host::s`), so a direct child of `host` read `Unknown` and a module the expansion would declare read ABSENT over an
-/// executed write. True when some PROPER ANCESTOR module of the item's module is a macro-hidden one. The caller's guards
-/// (no unit answers the tail, no visible unit has the module-relative qual) already exclude every path the scan resolves.
-pub(crate) fn macro_hidden_ancestor(path: &str, macro_modules: &std::collections::HashSet<String>) -> bool {
-    let mut segs: Vec<&str> = path.split("::").collect();
-    if segs.first() != Some(&"crate") {
-        return false;
-    }
-    segs.remove(0);
-    if segs.len() < 3 {
-        return false; // item + its module + at least one ancestor
-    }
-    segs.pop(); // the item
-    (1..segs.len()).any(|n| macro_modules.contains(&segs[..n].join("::")))
-}
-
 /// Above how many definitions one re-exported NAME may stand for before the alias is dropped. A name
 /// with several targets is normal and correct — a `#[cfg]`-redirected platform module contributes one
 /// definition per target — but only up to a point: past it the edge is not a platform split, it is

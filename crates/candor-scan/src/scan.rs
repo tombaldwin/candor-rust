@@ -9366,9 +9366,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
                 && !tail2(&c.path).is_some_and(|t2| by_tail2.contains_key(&t2))
                 && !by_leaf.get(&c.leaf).is_some_and(|v| v.iter().any(|q| q == rel))
                 && !local_types.contains(&c.leaf)
-                && (macro_hidden_owner(&c.path, 1, &merged.macro_modules)
-                    || crate::collector::macro_hidden_ancestor(&c.path, &merged.macro_modules)
-                    || hidden_mod_head() || {
+                && (macro_hidden_owner(&c.path, 1, &merged.macro_modules) || hidden_mod_head() || {
                     let hit = macro_hidden_owner(&c.path, 1, &r1690_glob_macro);
                     if hit && candor_report::env::trace("CANDOR_R1657S2_INSTR") {
                         eprintln!("R1690GLOBMACRO\t{}\t{}", f.qual, c.path); // §E1 REACH COUNTER, ADDED branch only
