@@ -1771,6 +1771,64 @@ for _p, _, _ in CELLS['la1']['probes']:
     pred('la1', _p, 'record', 'record', 'record')
 
 
+# bl1, bl1b, bl2, bl2b (Fable's merge review of L1a round 1, `~/candor-handoff/rust-bound-L1a/fable/fx/`): a SUPERTRAIT's origin is its written ROOT.
+#   bl1   a DEPENDENCY supertrait (`trait LSub: fxdep::Sup {}`) sharing its leaf with a crate-local `m::Sup`; `_q`'s instantiation implements the dependency's
+#         `Sup` purely, and a local `Noisy` implements the local `Sup` with a write (round 1 dispatched over it: the fabrication)
+#   bl1b  the std twin (`trait LSub: std::default::Default` beside a local `m::Default`)
+#   bl2   the dependency supertrait written by PATH with no `use` (`trait LSubD: fxdep::SupD {}`): an in-crate impl inheriting the dependency default, one declaring
+#   bl2b  the same imported by `use`, with a pure declaring twin
+cell('bl1', {'main.rs': _ALLOW + """pub mod m_bl1 { pub trait Sup { fn lsf(); } }
+pub trait LSub_bl1: fxdep_bl1::Sup {}
+pub struct Noisy_bl1; impl m_bl1::Sup for Noisy_bl1 { fn lsf() { EFF } }
+pub struct Quiet_bl1; impl fxdep_bl1::Sup for Quiet_bl1 { fn lsf() {} } impl LSub_bl1 for Quiet_bl1 {}
+pub struct Loud_bl1; impl fxdep_bl1::Sup for Loud_bl1 { fn lsf() { EFF } } impl LSub_bl1 for Loud_bl1 {}
+fn g_bl1<T: LSub_bl1>() { T::lsf() }
+fn g_bl1q<T: LSub_bl1>() { T::lsf() }
+pub fn bl1_collide_q() { g_bl1q::<Quiet_bl1>() }
+pub fn bl1_collide_e() { g_bl1::<Loud_bl1>() }
+"""}, [('bl1_collide_q', 'q', None), ('bl1_collide_e', 'e', None)],
+     deps={'fxdep_bl1': '{ path = "fxdep_bl1" }'}, extra={'@dep/fxdep_bl1/src/lib.rs': 'pub trait Sup { fn lsf(); }\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_bl1'), hdr=False, detail=True,
+     note='Fable L1a review: a dependency supertrait sharing its leaf with a crate-local trait')
+cell('bl1b', {'main.rs': _ALLOW + """pub mod m_bl1b { pub trait Default { fn default() -> Self; } }
+pub trait LSub_bl1b: std::default::Default {}
+pub struct Noisy_bl1b; impl m_bl1b::Default for Noisy_bl1b { fn default() -> Self { EFF Noisy_bl1b } }
+#[derive(Default)] pub struct Quiet_bl1b; impl LSub_bl1b for Quiet_bl1b {}
+fn g_bl1b<T: LSub_bl1b>() { let _ = T::default(); }
+pub fn bl1b_stdcollide_q() { g_bl1b::<Quiet_bl1b>() }
+"""}, [('bl1b_stdcollide_q', 'q', None)], hdr=False, detail=True,
+     note='Fable L1a review: a std supertrait sharing its leaf with a crate-local trait')
+cell('bl2', {'main.rs': _ALLOW + """pub trait LSubD_bl2: fxdep_bl2::SupD {}
+pub struct Inh_bl2; impl fxdep_bl2::SupD for Inh_bl2 {} impl LSubD_bl2 for Inh_bl2 {}
+pub struct Decl_bl2; impl fxdep_bl2::SupD for Decl_bl2 { fn sf() { EFF } } impl LSubD_bl2 for Decl_bl2 {}
+fn g_inh<T: LSubD_bl2>() { T::sf() }
+fn g_decl<T: LSubD_bl2>() { T::sf() }
+pub fn bl2_inherit_e() { g_inh::<Inh_bl2>() }
+pub fn bl2_declares_e() { g_decl::<Decl_bl2>() }
+"""}, [('bl2_inherit_e', 'e', None), ('bl2_declares_e', 'e', None)],
+     deps={'fxdep_bl2': '{ path = "fxdep_bl2" }'}, extra={'@dep/fxdep_bl2/src/lib.rs': 'pub trait SupD { fn sf() { EFF } }\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_bl2'), hdr=False, detail=True,
+     note='Fable L1a review: a dependency supertrait written by path, no use')
+cell('bl2b', {'main.rs': _ALLOW + """use fxdep_bl2b::SupD;
+pub trait LSubD_bl2b: SupD {}
+pub struct Inh_bl2b; impl SupD for Inh_bl2b {} impl LSubD_bl2b for Inh_bl2b {}
+pub struct Decl_bl2b; impl SupD for Decl_bl2b { fn sf() { EFF } } impl LSubD_bl2b for Decl_bl2b {}
+pub struct DeclQ_bl2b; impl SupD for DeclQ_bl2b { fn sf() {} } impl LSubD_bl2b for DeclQ_bl2b {}
+fn g_inh<T: LSubD_bl2b>() { T::sf() }
+fn g_decl<T: LSubD_bl2b>() { T::sf() }
+fn g_declq<T: LSubD_bl2b>() { T::sf() }
+pub fn bl2b_inherit_e() { g_inh::<Inh_bl2b>() }
+pub fn bl2b_declares_e() { g_decl::<Decl_bl2b>() }
+pub fn bl2b_declares_q() { g_declq::<DeclQ_bl2b>() }
+"""}, [('bl2b_inherit_e', 'e', None), ('bl2b_declares_e', 'e', None), ('bl2b_declares_q', 'q', None)],
+     deps={'fxdep_bl2b': '{ path = "fxdep_bl2b" }'}, extra={'@dep/fxdep_bl2b/src/lib.rs': 'pub trait SupD { fn sf() { EFF } }\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_bl2b'), hdr=False, detail=True,
+     note='Fable L1a review: a dependency supertrait imported by use')
+for _c in ('bl1', 'bl1b', 'bl2', 'bl2b'):
+    for _p, _, _ in CELLS[_c]['probes']:
+        pred(_c, _p, 'record', 'record', 'record')
+
+
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):
     arms = ''.join('        "%s" => %s%s(),\n' % (p, crate_ref, p) for p, _, _ in c['probes'])

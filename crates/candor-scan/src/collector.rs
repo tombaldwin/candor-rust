@@ -10317,9 +10317,34 @@ impl<'a> CallCollector<'a> {
             if lt.assoc.contains(leaf) {
                 return true;
             }
-            stack.extend(lt.supertraits.iter().map(|s| (s.clone(), d + 1)));
+            // round 2 — a supertrait written through a dependency or std path is never the crate-local trait of that leaf
+            stack.extend(lt.supertraits.iter().filter(|s| self.super_rooted_away(&t, s).is_none()).map(|s| (s.clone(), d + 1)));
         }
         false
+    }
+
+    /// SOUNDNESS R1957/R1958 (round 2) — the written path of local trait `t`'s supertrait `s` when EVERY spelling of it at the
+    /// declaration roots OUTSIDE the crate (a dependency or std/core/alloc): `trait LSub: fxdep::Sup {}` beside a crate-local
+    /// `trait Sup`. The leaf alone made that supertrait the local `Sup`, so its implementors were dispatched and a pure program read
+    /// `Fs` (EXECUTED Fable `bl1_collide_q`), and a std one keyed the local trait (`bl1b`). The DEPENDENCY path is preferred when
+    /// there are several. `None` when the declaration was not recorded or one spelling stays in the crate (the leaf reading stands).
+    pub(crate) fn super_rooted_away(&self, t: &str, s: &str) -> Option<String> {
+        let lt = self.local_traits.get(t)?;
+        let paths: Vec<&String> = lt.super_paths.iter().filter(|(l, _)| l == s).map(|(_, p)| p).collect();
+        if paths.is_empty() {
+            return None;
+        }
+        let away = |p: &str| {
+            let root = p.split("::").next().unwrap_or("");
+            p.contains("::")
+                && !matches!(root, "crate" | "self" | "super" | "Self")
+                && (matches!(root, "std" | "core" | "alloc") || crate::lang::is_dependency_crate_root(root))
+        };
+        if !paths.iter().all(|p| away(p)) {
+            return None;
+        }
+        let dep = paths.iter().find(|p| !matches!(p.split("::").next(), Some("std" | "core" | "alloc")));
+        Some(dep.unwrap_or(&paths[0]).to_string())
     }
 
     /// SOUNDNESS R1794 — the LOCAL trait(s) that DECLARE `leaf` for a call dispatched on `tr`: `tr` itself when it does
@@ -11695,7 +11720,15 @@ impl<'a> CallCollector<'a> {
             && !candor_report::env::switch("CANDOR_R1723_OFF")
         {
             let sups: Vec<String> =
-                lt.supertraits.iter().filter(|s| s.as_str() != tr && self.trait_declares_member(s, leaf, assoc)).cloned().collect();
+                lt.supertraits
+                    .iter()
+                    .filter(|s| {
+                        s.as_str() != tr
+                            && (self.trait_declares_method(s, leaf, 0)
+                                || (assoc && self.super_rooted_away(tr, s).is_none() && self.trait_declares_member(s, leaf, true)))
+                    })
+                    .cloned()
+                    .collect();
             for s in sups {
                 if candor_report::env::trace("CANDOR_R1723_INSTR") {
                     eprintln!("R1723BLANKET\t{tr}\t{s}\t{leaf}"); // §E1 REACH COUNTER
@@ -12076,18 +12109,14 @@ impl<'a> CallCollector<'a> {
     /// dispatch it cannot bound (`dispatch:<Sup>.<member>`, R1495's reason) — where that implementor's impl declares the member (one
     /// that inherits the dependency's default runs the body the key's join reaches: R1605's spliced `impl EntityTrait`). A std supertrait is not this route's (the std-origin
     /// arm, a SPEC question). Additive: the site formed nothing. `CANDOR_R1657BP_OFF=1` disables it with the rest of the probe.
-    fn r1958_dep_super_member(
-        &mut self,
-        p: &syn::ExprPath,
-        segs: &[String],
-        tr: &str,
-        leaf: &str,
-        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
-    ) {
+    fn r1958_dep_super_member(&mut self, tr: &str, leaf: &str) {
         if crate::bound_proj::bp_off() {
             return;
         }
-        let mut deps: Vec<String> = Vec::new();
+        // (supertrait leaf, its dependency path) — the path the DECLARATION wrote (`super_rooted_away`, round 2: a written
+        // `fxdep::SupD` needs no `use`, and a leaf shared with a local trait is the dependency's), else the leaf through this
+        // module's `use` map
+        let mut deps: Vec<(String, String)> = Vec::new();
         let mut stack = vec![(tr.to_string(), 0usize)];
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         while let Some((t, d)) = stack.pop() {
@@ -12096,22 +12125,31 @@ impl<'a> CallCollector<'a> {
             }
             let Some(lt) = self.local_traits.get(&t) else { continue };
             for s in &lt.supertraits {
-                if self.local_traits.contains_key(s) {
-                    stack.push((s.clone(), d + 1));
-                    continue;
-                }
-                let full = crate::lang::expand(s, &self.uses);
+                let full = match self.super_rooted_away(&t, s) {
+                    Some(w) => w,
+                    None if self.local_traits.contains_key(s) => {
+                        stack.push((s.clone(), d + 1));
+                        continue;
+                    }
+                    None => lt
+                        .super_paths
+                        .iter()
+                        .find(|(l, _)| l == s)
+                        .map(|(_, w)| w.clone())
+                        .filter(|w| w.contains("::"))
+                        .unwrap_or_else(|| crate::lang::expand(s, &self.uses)),
+                };
                 let root = full.split("::").next().unwrap_or("");
-                if full.contains("::") && crate::lang::is_dependency_crate_root(root) && !deps.contains(s) {
-                    deps.push(s.clone());
+                if full.contains("::") && crate::lang::is_dependency_crate_root(root) && !deps.iter().any(|(_, f)| f == &full) {
+                    deps.push((s.clone(), full));
                 }
             }
         }
         if crate::lang::reach_debug() && !deps.is_empty() {
-            eprintln!("R1958DEPSUP\t{tr}::{leaf}\t{}", deps.join(",")); // §E1 REACH COUNTER
+            eprintln!("R1958DEPSUP\t{tr}::{leaf}\t{}", deps.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>().join(",")); // §E1 REACH COUNTER
         }
-        for s in &deps {
-            self.route_foreign_generic_member(p, segs, s, leaf, args);
+        for (s, full) in &deps {
+            self.emit_foreign_member(full, leaf);
             // only an in-crate implementor whose impl DECLARES the member (or may: an opaque block) runs a body the dependency's
             // report cannot answer; one that inherits the dependency's default runs the body the key's join already reaches
             let own_body = self.trait_impls.get(s.as_str()).is_some_and(|v| {
@@ -12784,7 +12822,7 @@ impl<'a> CallCollector<'a> {
             }
             if !is_method && !is_assoc {
                 if r1958_dep_super && p.qself.is_none() && segs.len() >= 2 && generic(self, &segs[0]).is_some() {
-                    self.r1958_dep_super_member(p, &segs, &tr, leaf, args);
+                    self.r1958_dep_super_member(&tr, leaf);
                 }
                 continue; // not this trait's member — a blanket/unrelated name, left as it was
             }

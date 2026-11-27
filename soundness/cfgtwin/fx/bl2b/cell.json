@@ -1,0 +1,27 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bl2b",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bl2b"
+ ],
+ "detail": true,
+ "id": "bl2b",
+ "lib": false,
+ "note": "Fable L1a review: a dependency supertrait imported by use",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "bl2b_inherit_e"
+  },
+  {
+   "kind": "e",
+   "name": "bl2b_declares_e"
+  },
+  {
+   "kind": "q",
+   "name": "bl2b_declares_q"
+  }
+ ]
+}

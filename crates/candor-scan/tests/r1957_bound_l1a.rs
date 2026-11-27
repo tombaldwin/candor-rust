@@ -213,3 +213,29 @@ fn r1957_r1958_keys_join_a_two_hop_consumer() {
         assert!(fs(&c, p), "{p}: {:?}", row(&c, p));
     }
 }
+
+#[test]
+fn round2_a_supertrait_is_classified_by_its_written_root_not_its_leaf() {
+    // Fable bl1: `trait LSub: fxdep::Sup {}` beside a crate-local `m::Sup` whose implementor writes. `g::<Quiet>()` runs the DEPENDENCY's
+    // pure `lsf` (executed: none). Round 1 dispatched over the LOCAL `Sup` and charged `Fs` with a key naming it — a fabrication.
+    let r = cell("bl1");
+    for p in ["bl1_collide_q", "bl1_collide_e"] {
+        let x = row(&r, p);
+        assert!(!fs(&r, p), "{p} charged through the crate-local trait of the same leaf: {x:?}");
+        assert!(!x.keys.iter().any(|k| k.contains("m_bl1")), "{p} keyed the local trait: {x:?}");
+        assert!(key(&r, p, "fxdep_bl1#Sup::lsf"), "{p}: the dependency supertrait is keyed: {x:?}");
+    }
+    // the std twin: no key naming the local `m::Default`
+    let r = cell("bl1b");
+    let x = row(&r, "bl1b_stdcollide_q");
+    assert!(!x.keys.iter().any(|k| k.contains("m_bl1b")), "bl1b: {x:?}");
+    // bl2: the dependency supertrait written by PATH with no `use` is keyed (it formed nothing in round 1)
+    let r = cell("bl2");
+    for p in ["bl2_inherit_e", "bl2_declares_e"] {
+        assert!(key(&r, p, "fxdep_bl2#SupD::sf"), "{p}: {:?}", row(&r, p));
+    }
+    let c = chained("bl2", "fxdep_bl2");
+    for p in ["bl2_inherit_e", "bl2_declares_e"] {
+        assert!(fs(&c, p), "{p} chained: {:?}", row(&c, p));
+    }
+}

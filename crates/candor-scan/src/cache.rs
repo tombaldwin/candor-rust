@@ -44,6 +44,8 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev236 (rustagent-boundl1a, round 2): `FileDecls` gains `trait_super_paths` (each supertrait's WRITTEN path, expanded where it was written), which decides a
+    // supertrait's origin by root; a rev235 entry deserializes it EMPTY and reads a dependency supertrait sharing a local trait's leaf as the local one (a fabrication).
     // rev235 (rustagent-boundl1a, lane rust-bound-l1a): SOUNDNESS R1952 / R1957-R1961 — Pass B's `calls`/`dispatch`/`unresolved` gain the path spellings of a member reached
     // through a bound or projection that formed nothing (an associated fn of a local supertrait, a dependency supertrait of a local bound, `<T as Tr>::A::f()`, a
     // dependency trait named like a std one on a projection, the std-type marker for a written `Item = X` binding) and the caller hook for `<T as StdTr>::m(x)`. Mandatory.
@@ -812,7 +814,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev235/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev236/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts
@@ -878,6 +880,9 @@ pub(crate) struct FileDecls {
     /// A separate map rather than a fourth tuple slot so the existing triple keeps its shape.
     #[serde(default)]
     pub(crate) trait_assoc: HashMap<String, Vec<String>>,
+    /// SOUNDNESS R1957/R1958 (round 2) — `LocalTrait::super_paths`, flattened (trait leaf -> (supertrait leaf, written path)).
+    #[serde(default)]
+    pub(crate) trait_super_paths: HashMap<String, Vec<(String, String)>>,
     /// SOUNDNESS R1037 — `LocalTrait::assoc_types`, flattened: trait leaf -> assoc type -> bound leaves.
     #[serde(default)]
     pub(crate) trait_assoc_types: HashMap<String, std::collections::BTreeMap<String, Vec<String>>>,
@@ -1332,6 +1337,11 @@ pub(crate) fn file_decls(items: &[syn::Item], include_tests: bool, rel: &Path) -
                 a.sort(); // content-hashed: a HashSet's order must not reach the entry
                 (k.clone(), a)
             })
+            .collect(),
+        trait_super_paths: trait_decls
+            .iter()
+            .filter(|(_, v)| !v.super_paths.is_empty())
+            .map(|(k, v)| (k.clone(), v.super_paths.clone()))
             .collect(),
         trait_assoc_types: trait_decls
             .iter()
@@ -2544,6 +2554,14 @@ pub(crate) fn merge_decls(acc: &mut MergedDecls, fd: &FileDecls) {
     for (tr, assoc) in &fd.trait_assoc {
         acc.trait_decls.entry(tr.clone()).or_default().assoc.extend(assoc.iter().cloned()); // set union (R776)
     }
+    for (tr, sp) in &fd.trait_super_paths {
+        let e = acc.trait_decls.entry(tr.clone()).or_default();
+        for p in sp {
+            if !e.super_paths.contains(p) {
+                e.super_paths.push(p.clone());
+            }
+        }
+    }
     for (tr, (count, methods, supers)) in &fd.trait_decls {
         let e = acc.trait_decls.entry(tr.clone()).or_default();
         e.count += count;
@@ -2926,6 +2944,14 @@ pub(crate) fn decl_index_digest(m: &MergedDecls) -> String {
         for sname in sup {
             s.push('^');
             s.push_str(sname);
+        }
+        let mut sp: Vec<&(String, String)> = lt.super_paths.iter().collect();
+        sp.sort();
+        for (l, p) in sp {
+            s.push('`');
+            s.push_str(l);
+            s.push('=');
+            s.push_str(p);
         }
     }
     s.push('\n');

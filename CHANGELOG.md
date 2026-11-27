@@ -18,8 +18,10 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
   method spelling does (R1958). `<T as Tr>::A::f()` is read as `T::A::f()` through `Tr` (R1959). `<T as Iterator>::next(&mut t)` and `<R as Read>::read(..)`
   reach the caller hooks the UFCS spelling reaches (R1960). A written `Item = String` binding asks the std-type join route the concrete `String::f()` asks
   (R1961). A projection bound's trait is classified by its resolved root, so `where T::Item: dep::Error` is a dependency bound, not std's (R1952). The
-  receiver and path projection arms now share one fact source (`bp_proj_facts`). New cfgtwin cell `la1` (18 probes). `CANDOR_R1657BP_OFF=1` disables R1952,
-  R1958–R1960; cache rev235.
+  receiver and path projection arms now share one fact source (`bp_proj_facts`). A supertrait's origin is decided by the ROOT of its written path
+  (`LocalTrait::super_paths`), never its leaf: a dependency or std supertrait sharing a leaf with a crate-local trait is not that trait, and a
+  dependency supertrait written by path with no `use` is keyed. New cfgtwin cells `la1` (18 probes), `bl1`, `bl1b`, `bl2`, `bl2b`.
+  `CANDOR_R1657BP_OFF=1` disables R1952, R1958–R1960; cache rev236.
 
 - **Lane rust-bound-l0: the bound / projection dispatch acceptance matrix, and a reader fix in the soundness runner (test instruments only; no engine change, no verdict moves).**
   `soundness/cfgtwin` gains cells bm1-bm4, bd1, bd2, wg1, wg2, wg3, wg5, wg5g, wc1, wc3 (     173 executed probes, each also read chained; the two-hop W-g5 chain is a new `twohop` chain kind; a cell can set

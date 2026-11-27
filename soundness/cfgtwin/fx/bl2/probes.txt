@@ -1,0 +1,2 @@
+bl2_inherit_e
+bl2_declares_e

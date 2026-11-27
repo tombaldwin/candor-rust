@@ -906,6 +906,12 @@ impl<'a> super::CallCollector<'a> {
             }
             let Some(lt) = self.local_traits.get(&t) else { continue };
             for sup in &lt.supertraits {
+                // round 2 — a supertrait the declaration wrote through a DEPENDENCY path is foreign, whatever a local trait is called
+                if let Some(w) = self.super_rooted_away(&t, sup) {
+                    if !matches!(w.split("::").next(), Some("std" | "core" | "alloc")) {
+                        return true;
+                    }
+                }
                 if self.local_traits.contains_key(sup) {
                     stack.push((sup.clone(), d + 1));
                 } else if !crate::std_bounds::is_std_trait_leaf(sup) && !matches!(sup.as_str(), "Send" | "Sync" | "Unpin" | "Sized" | "Copy") {

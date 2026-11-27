@@ -1832,6 +1832,10 @@ pub(crate) struct LocalTrait {
     /// member called on a projection (`S::Tf::conv(x)` under `S: Std`) dispatches over what `Tf` is bound
     /// by and nothing wider.
     pub(crate) assoc_types: std::collections::BTreeMap<String, Vec<String>>,
+    /// SOUNDNESS R1957/R1958 (round 2) — each supertrait AS WRITTEN at the declaration, expanded through THAT module's `use`
+    /// map: `(leaf, path)` (`("Sup", "fxdep::Sup")`). `supertraits` keeps leaves only, so a dependency or std supertrait that
+    /// shares its leaf with a crate-local trait read as the local one; the path decides its origin by ROOT (`super_rooted_away`).
+    pub(crate) super_paths: Vec<(String, String)>,
 }
 
 /// The trait indexes Pass A builds (impl universe, local declarations, dispatch-typed fields),

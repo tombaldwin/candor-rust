@@ -12,6 +12,21 @@ bd1	bd1_where_q	none	-	-	E{key=cf_bd1#LSup_bd1::lsf}	U0F0	U0F0
 bd1	bd1_where_q@chained	none	-	-	E{key=cf_bd1#LSup_bd1::lsf}	U0F0	U0F0	
 bd2	bd2_tryfrom_2018_e	Fs	-	-	-	U0F0	U0F0	
 bd2	bd2_tryfrom_2018_e@chained	Fs	-	-	-	U0F0	U0F0	
+bl1	bl1_collide_e	Fs	-	-	U{inv=fxdep_bl1;key=fxdep_bl1#Sup::lsf}	U0F0	U0F0	U1F0
+bl1	bl1_collide_e@chained	Fs	-	-	U{inv=fxdep_bl1;key=fxdep_bl1#Sup::lsf}	U0F0	U0F0	U1F0
+bl1	bl1_collide_q	none	-	-	U{inv=fxdep_bl1;key=fxdep_bl1#Sup::lsf}	U0F0	U0F0	U1F0
+bl1	bl1_collide_q@chained	none	-	-	U{inv=fxdep_bl1;key=fxdep_bl1#Sup::lsf}	U0F0	U0F0	U1F0
+bl1b	bl1b_stdcollide_q	none	-	-	-	U0F0	U0F0	U0F0
+bl2	bl2_declares_e	Fs	-	-	U{inv=fxdep_bl2;key=fxdep_bl2#SupD::sf}	U0F0	U0F0	U1F0
+bl2	bl2_declares_e@chained	Fs	-	-	E+U{key=fxdep_bl2#SupD::sf}	U0F0	U0F0	U1F1
+bl2	bl2_inherit_e	Fs	-	-	U{inv=fxdep_bl2;key=fxdep_bl2#SupD::sf}	U0F0	U0F0	U1F0
+bl2	bl2_inherit_e@chained	Fs	-	-	E+U{key=fxdep_bl2#SupD::sf}	U0F0	U0F0	U1F1
+bl2b	bl2b_declares_e	Fs	-	-	U{inv=fxdep_bl2b;key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F0
+bl2b	bl2b_declares_e@chained	Fs	-	-	E+U{key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F1
+bl2b	bl2b_declares_q	none	-	-	U{inv=fxdep_bl2b;key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F0
+bl2b	bl2b_declares_q@chained	none	-	-	E+U{key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F1
+bl2b	bl2b_inherit_e	Fs	-	-	U{inv=fxdep_bl2b;key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F0
+bl2b	bl2b_inherit_e@chained	Fs	-	-	E+U{key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F1
 bm1	bm1_b1_meth_e	Fs	E{key=cf_bm1#Lt::lm}	E{key=cf_bm1#Lt::lm}	E{key=cf_bm1#Lt::lm}	U0F1	U0F1	
 bm1	bm1_b1_meth_e@chained	Fs	E{key=cf_bm1#Lt::lm}	E{key=cf_bm1#Lt::lm}	E{key=cf_bm1#Lt::lm}	U0F1	U0F1	
 bm1	bm1_b1_path_e	Fs	E{key=cf_bm1#Lt::lf}	E{key=cf_bm1#Lt::lf}	E{key=cf_bm1#Lt::lf}	U0F1	U0F1	
@@ -912,9 +927,9 @@ wg5g	wg5g_lsdmeth_e@chained	Fs	-	-	-	U0F0	U0F0
 wg5g	wg5g_lsdmeth_q	none	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	U0F0	U0F0	
 wg5g	wg5g_lsdmeth_q@chained	none	-	-	-	U0F0	U0F0	
 wg5g	wg5g_lsdpath_e	Fs	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	U0F0	U0F0	
-wg5g	wg5g_lsdpath_e@chained	Fs	-	-	-	U0F0	U0F0	
+wg5g	wg5g_lsdpath_e@chained	Fs	-	-	E+U{inv=fxdep_wg5gd}	U0F0	U0F0	
 wg5g	wg5g_lsdpath_q	none	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	U0F0	U0F0	
-wg5g	wg5g_lsdpath_q@chained	none	-	-	-	U0F0	U0F0	
+wg5g	wg5g_lsdpath_q@chained	none	-	-	U{inv=fxdep_wg5gd}	U0F0	U0F0	
 wg5g	wg5g_lsup_e	Fs	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	U0F0	U0F0	
 wg5g	wg5g_lsup_e@chained	Fs	-	-	E+U	U0F0	U0F0	
 wg5g	wg5g_lsup_q	none	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	[]{inv=fxdep_wg5gp}	U0F0	U0F0	

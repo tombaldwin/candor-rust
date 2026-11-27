@@ -668,3 +668,11 @@ la1	la1_ufcs_read_e	record	record	record
 la1	la1_r1952_bare_e	record	record	record
 la1	la1_r1952_bare2_e	record	record	record
 la1	la1_collide_e	record	record	record
+bl1	bl1_collide_q	record	record	record
+bl1	bl1_collide_e	record	record	record
+bl1b	bl1b_stdcollide_q	record	record	record
+bl2	bl2_inherit_e	record	record	record
+bl2	bl2_declares_e	record	record	record
+bl2b	bl2b_inherit_e	record	record	record
+bl2b	bl2b_declares_e	record	record	record
+bl2b	bl2b_declares_q	record	record	record

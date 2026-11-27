@@ -1,0 +1,14 @@
+{
+ "chain": null,
+ "deps": [],
+ "detail": true,
+ "id": "bl1b",
+ "lib": false,
+ "note": "Fable L1a review: a std supertrait sharing its leaf with a crate-local trait",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "bl1b_stdcollide_q"
+  }
+ ]
+}

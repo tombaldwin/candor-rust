@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bl1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bl1"
+ ],
+ "detail": true,
+ "id": "bl1",
+ "lib": false,
+ "note": "Fable L1a review: a dependency supertrait sharing its leaf with a crate-local trait",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "bl1_collide_q"
+  },
+  {
+   "kind": "e",
+   "name": "bl1_collide_e"
+  }
+ ]
+}

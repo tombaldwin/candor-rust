@@ -7621,6 +7621,20 @@ pub(crate) fn collect_decls(
                         e.supertraits.push(s);
                     }
                 }
+                // SOUNDNESS R1957/R1958 (round 2) — and each one's written path, expanded where it was written
+                for b in &t.supertraits {
+                    let syn::TypeParamBound::Trait(tb) = b else { continue };
+                    if matches!(tb.modifier, syn::TraitBoundModifier::Maybe(_)) {
+                        continue;
+                    }
+                    let Some(l) = tb.path.segments.last().map(|x| x.ident.to_string()) else { continue };
+                    let w = tb.path.segments.iter().map(|x| x.ident.to_string()).collect::<Vec<_>>().join("::");
+                    let full = if tb.path.leading_colon.is_some() { w } else { crate::lang::expand(&w, uses) };
+                    let pair = (l, full);
+                    if !e.super_paths.contains(&pair) {
+                        e.super_paths.push(pair);
+                    }
+                }
             }
             // A foreign (`extern "C" { fn system(..); }`) function declaration: the body lives in
             // another language and is the canonical unknowable boundary. Record every declared name so a
