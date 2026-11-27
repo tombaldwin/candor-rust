@@ -168,3 +168,62 @@ fn r1956_a_glob_of_a_std_module_that_brings_the_sealed_trait_withholds_the_join(
         assert!(has(&r, p, "Fs"), "{p} under CANDOR_R1913_OFF: {:?}", row(&r, p));
     }
 }
+
+/// R1962 follow-up (lane rust-tooling-l3): the package edition is read from the CANONICAL path. `candor-scan .` run from inside a workspace
+/// member must decide an inherited edition (`edition.workspace = true`, root `[workspace.package] edition = "2018"`) exactly as the same
+/// scan by absolute path does; walking the ancestors of `.` never reached the workspace root, so the edition was undecided and the std-type
+/// marker was withheld. The dependency's `TryFromX::try_from` for `String` runs under edition 2018 (`TryFrom` is not in that prelude).
+#[test]
+fn r1962_an_inherited_workspace_edition_is_read_from_inside_the_member_by_a_relative_path() {
+    let d = std::env::temp_dir().join(format!("candor-l3ws-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&d);
+    let w = |rel: &str, text: &str| {
+        let p = d.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    w("ws/Cargo.toml", "[workspace]\nmembers = [\"m\"]\n[workspace.package]\nedition = \"2018\"\n");
+    w("ws/m/Cargo.toml", "[package]\nname = \"fa_lx2\"\nversion = \"0.1.0\"\nedition.workspace = true\n\n[dependencies]\nfxdep_lx2 = { path = \"../fxdep_lx2\" }\n");
+    w("ws/m/src/main.rs", "mod a { use fxdep_lx2::TryFromX; pub fn e() { let _ = String::try_from(\"x\"); } }\npub fn lx2_ws_tryfrom_2018_e() { a::e() }\nfn main() { lx2_ws_tryfrom_2018_e() }\n");
+    w("ws/fxdep_lx2/Cargo.toml", "[package]\nname = \"fxdep_lx2\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+    w("ws/fxdep_lx2/src/lib.rs", "pub trait TryFromX { fn try_from(s: &str) -> Self; }\nimpl TryFromX for String { fn try_from(_s: &str) -> Self { ::std::fs::write(::std::env::var(\"MARK\").unwrap(), b\"x\").unwrap(); String::new() } }\n");
+    let dep_out = d.join("dep");
+    run(&d.join("ws/fxdep_lx2"), &dep_out, &d.join("c0"), None, &[]);
+    let deps: Vec<String> = reports(&dep_out).iter().map(|p| p.to_string_lossy().to_string()).collect();
+    assert!(!deps.is_empty());
+    let deps = deps.join(":");
+    let read = |out: &Path| -> Rows {
+        let mut r = Rows::new();
+        for p in reports(out) {
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+            for f in v["functions"].as_array().unwrap() {
+                let s = |k: &str| -> Vec<String> { f[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default() };
+                r.insert(f["fn"].as_str().unwrap().to_string(), (s("inferred"), s("unknownWhy")));
+            }
+        }
+        r
+    };
+    // by absolute path
+    let abs_out = d.join("abs");
+    run(&d.join("ws/m"), &abs_out, &d.join("c1"), Some(&deps), &[]);
+    let abs = read(&abs_out);
+    assert!(has(&abs, "a::e", "Fs"), "by absolute path the inherited 2018 edition must carry the marker: {:?}", row(&abs, "a::e"));
+    // by `.` from inside the member
+    let rel_out = d.join("rel");
+    let o = Command::new(env!("CARGO_BIN_EXE_candor-scan"))
+        .current_dir(d.join("ws/m"))
+        .arg(".")
+        .arg("--out")
+        .arg(rel_out.join("r"))
+        .env_remove("CANDOR_CONFIG")
+        .env_remove("CANDOR_POLICY")
+        .env("CANDOR_DEPS", &deps)
+        .env("CANDOR_CACHE_DIR", d.join("c2"))
+        .output()
+        .expect("run candor-scan");
+    let rc = o.status.code().unwrap_or(-1);
+    assert!(rc == 0 || rc == 1, "scan failed: {}", String::from_utf8_lossy(&o.stderr));
+    let rel = read(&rel_out);
+    assert!(has(&rel, "a::e", "Fs"), "`candor-scan .` inside the member must read the same inherited edition: {:?} (absolute: {:?})", row(&rel, "a::e"), row(&abs, "a::e"));
+    let _ = std::fs::remove_dir_all(&d);
+}

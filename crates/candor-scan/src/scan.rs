@@ -1563,6 +1563,9 @@ fn build_type_surface(
 /// follows the nearest `[workspace.package]` above), or `None` when they do not decide it.
 fn package_edition_year(dir: &Path) -> Option<u16> {
     let mut inherit = false;
+    // The ancestors of the path AS WRITTEN stop at its first component: `candor-scan .` inside a workspace member never reached the
+    // workspace root, so an inherited edition (`edition.workspace = true`) stayed undecided. Walk the canonical path.
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     for d in dir.ancestors() {
         let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
         match crate::rroot::manifest_edition_year(&t, inherit) {
@@ -1576,6 +1579,7 @@ fn package_edition_year(dir: &Path) -> Option<u16> {
 
 fn package_edition_2018(dir: &Path) -> bool {
     let mut inherit = false;
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     for d in dir.ancestors() {
         let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
         match crate::rroot::manifest_edition(&t, inherit) {
@@ -1868,6 +1872,7 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
         let ed2018 = |root_rel: &str| -> bool {
             let Some((p, _)) = paths.iter().find(|(_, r)| r == root_rel) else { return false };
             let mut inherit = false;
+            let p = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
             for d in p.ancestors().skip(1) {
                 let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
                 match crate::rroot::manifest_edition(&t, inherit) {

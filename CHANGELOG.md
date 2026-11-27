@@ -11,6 +11,13 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **Lane rust-tooling-l3 (additive, tooling): the package edition is read from the CANONICAL path.** `candor-scan .` run from inside a workspace
+  member never reached the workspace root (the ancestors of `.` stop at its first component), so an inherited edition (`edition.workspace = true`)
+  stayed undecided and R1951's `@<edition>|` marker was withheld; `scan::package_edition_year`, `scan::package_edition_2018` (lane rust-lc1) and the
+  crate-root edition closure in `scan_one` all walked the written path and all had the defect. A scan by absolute path was never affected, so the
+  corpus (absolute paths) reads identically. The cfg-twin generator now emits the hand-written L1b/lc1 cells (`soundness/cfgtwin/handwritten/`),
+  and CI runs `std_bounds.sh --check`, `std_assoc.sh --check` / `--selftest` and both attack-matrix `gen.py --check`.
+
 - **⚠ Lane rust-bound-l3 (2/2, a removal): a GLOB of a std module that brings a sealed trait withholds the dependency join, and the sealed-trait
   match is by the trait's canonical path (SOUNDNESS R1956, R1963).** `use std::os::unix::ffi::*` / `use std::os::unix::prelude::*` beside a dependency
   trait no longer charges the dependency's impl for `OsStr::from_bytes` / `OsString::from_vec` / `ExitStatus::from_raw` where std's sealed member
