@@ -893,6 +893,27 @@ use tw_{id}::g as h_{id};
 """, id='fl26')}, [('fl26_body_e', 'e', 'use tw_fl26::g; g()'), ('fl26_mod_e', 'e', 'h_fl26()'), ('fl26_q', 'q', 'use twq_fl26::g; g()')],
      note='R1926: a body-local or module-level RELATIVE `use` of a cfg twin (re-export arm beside a fn arm) reads the union of the arms')
 pred('fl26', 'fl26_body_e', '-', '-', 'E'); pred('fl26', 'fl26_mod_e', '-', '-', 'E'); pred('fl26', 'fl26_q', '-', '-', '-')
+# fl26f: R1926, the OTHER orientation (Fable merge review, fa26): the DECLARED fn arm writes, the re-export arm is pure. A swap (the table's re-export
+# target in place of the declared arm) and a union read alike on fl26; only this cell tells them apart.
+cell('fl26f', {'main.rs': sub("""pub mod imp_{id} { pub fn pur() {} }
+#[cfg(unix)] pub mod tw_{id} { pub fn g() { EFF } }
+#[cfg(not(unix))] pub mod tw_{id} { pub use crate::imp_{id}::pur as g; }
+#[cfg(unix)] pub mod twq_{id} { pub fn g() {} }
+#[cfg(not(unix))] pub mod twq_{id} { pub use crate::imp_{id}::pur as g; }
+use tw_{id}::g as h_{id};
+""", id='fl26f')}, [('fl26f_body_e', 'e', 'use tw_fl26f::g; g()'), ('fl26f_mod_e', 'e', 'h_fl26f()'), ('fl26f_q', 'q', 'use twq_fl26f::g; g()')],
+     note='R1926 (orientation 2): a relative `use` of a cfg twin whose DECLARED fn arm writes reads the union, never the re-export arm alone')
+pred('fl26f', 'fl26f_body_e', '-', 'E', 'E'); pred('fl26f', 'fl26f_mod_e', '-', 'E', 'E'); pred('fl26f', 'fl26f_q', '-', '-', '-')
+# fl15g: R1915 must not hedge a generic TYPE PARAMETER head (`T::default()`); fl15 above is the module-head population that stays hedged.
+cell('fl15g', {'main.rs': sub("""mod reexp_{id} { pub use fxdep_{id}::*; }
+mod g_{id} {
+    use crate::reexp_{id}::*;
+    pub fn gen_q<T: Default>() -> T { T::default() }
+}
+""", id='fl15g')}, [('fl15g_q', 'q', 'let _: u8 = g_fl15g::gen_q::<u8>()')], deps={'fxdep_fl15g': '{ path = "fxdep_fl15g" }'},
+     extra={'@dep/fxdep_fl15g/src/lib.rs': 'pub fn unused() {}\n'}, hdr=False,
+     note='R1915: a type-parameter head is not a glob-supplied head; the pure twin stays clean')
+pred('fl15g', 'fl15g_q', '-', '-', '-')
 # fl15: R1915. A dependency module reached through a crate-local glob of a module that globs the dependency; lre is a crate-local module
 # the glob supplies (resolved by tail, must stay clean).
 cell('fl15', {'main.rs': sub("""mod reexp_{id} { pub use fxdep_{id}::*; }

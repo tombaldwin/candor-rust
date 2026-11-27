@@ -2952,7 +2952,12 @@ fn expand_with_in(path: &str, uses: &HashMap<String, String>, anchor: bool, foll
                                     if candor_report::env::trace("CANDOR_R1926_INSTR") {
                                         eprintln!("R1926USE\t{joined}\t{}", q.replace(crate::decls::ALIAS_ALT_SEP, "|")); // §E1 REACH
                                     }
-                                    return q;
+                                    // a UNION, never a swap: the module's own declared arm (`joined`, resolved by its tail) stays beside the
+                                    // table's targets (a `pub fn g` arm that writes, beside a re-export arm that is pure: fixture fa26).
+                                    if q.split(crate::decls::ALIAS_ALT_SEP).any(|a| a == joined) {
+                                        return q;
+                                    }
+                                    return format!("{joined}{}{q}", crate::decls::ALIAS_ALT_SEP);
                                 }
                             }
                         }

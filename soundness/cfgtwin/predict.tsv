@@ -431,6 +431,10 @@ fl8v7	fl8v7_q	-	-	-
 fl26	fl26_body_e	-	-	E
 fl26	fl26_mod_e	-	-	E
 fl26	fl26_q	-	-	-
+fl26f	fl26f_body_e	-	E	E
+fl26f	fl26f_mod_e	-	E	E
+fl26f	fl26f_q	-	-	-
+fl15g	fl15g_q	-	-	-
 fl15	fl15_free_e	-	-	U
 fl15	fl15_ty_e	-	-	U
 fl15	fl15_pure_q	-	-	U

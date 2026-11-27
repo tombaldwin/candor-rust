@@ -14486,6 +14486,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     if !written.starts_with("Self::") && extras.is_empty() && e == written && p.qself.is_none() {
                                         let segs: Vec<&str> = written.split("::").collect();
                                         if segs.len() >= 2
+                                            && !self.scope_generic_names().contains(segs[0])
                                             && !crate::lang::ns_name_bound_anywhere(segs[0])
                                             && crate::lang::only_local_glob_supplies(&segs, &self.uses)
                                         {

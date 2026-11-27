@@ -1,0 +1,21 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl26f",
+ "lib": false,
+ "note": "R1926 (orientation 2): a relative `use` of a cfg twin whose DECLARED fn arm writes reads the union, never the re-export arm alone",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl26f_body_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl26f_mod_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl26f_q"
+  }
+ ]
+}

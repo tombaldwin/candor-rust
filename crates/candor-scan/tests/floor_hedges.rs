@@ -95,6 +95,14 @@ fn r1926_a_relative_use_of_a_cfg_twin_reads_the_union_of_its_arms() {
         assert!(has(&r, p, "Fs"), "{p}: the re-export arm's write must be read: {r:?}");
     }
     assert!(pure(&r, "fl26_q"), "fl26_q: a twin whose arms are both pure stays pure: {r:?}");
+    // the OTHER orientation: the declared fn arm writes and the re-export arm is pure. A swap to the table's target reads pure here.
+    let r = scan("fl26f");
+    for p in ["fl26f_body_e", "fl26f_mod_e"] {
+        assert!(has(&r, p, "Fs"), "{p}: the declared arm's write must survive (union, not swap): {r:?}");
+    }
+    assert!(pure(&r, "fl26f_q"), "fl26f_q: {r:?}");
+    // R1915 does not hedge a type-parameter head
+    assert!(pure(&scan("fl15g"), "fl15g_q"), "a generic parameter is not a glob-supplied head");
     assert!(has(&scan("r6"), "r6_body_e", "Fs"));
 }
 

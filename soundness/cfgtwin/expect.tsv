@@ -298,6 +298,7 @@ fl15	fl15_free_e	Fs	-	-	U	U0F0	U0F0	U1F0
 fl15	fl15_local_q	none	-	-	-	U0F0	U0F0	U0F0
 fl15	fl15_pure_q	none	-	-	U	U0F0	U0F0	U1F0
 fl15	fl15_ty_e	Fs	-	-	U	U0F0	U0F0	U1F0
+fl15g	fl15g_q	none	-	-	-	U0F0	U0F0	U0F0
 fl18	fl18_e	Fs	-	-	E	U0F0	U0F0	U0F1
 fl18	fl18_q	none	-	-	-	U0F0	U0F0	U0F0
 fl22	fl22_e	Fs	-	-	U	U0F0	U0F0	U1F0
@@ -309,6 +310,9 @@ fl24b	fl24b_e	Fs	-	-	U	U0F0	U0F0	U1F0
 fl26	fl26_body_e	Fs	-	-	E	U0F0	U0F0	U0F1
 fl26	fl26_mod_e	Fs	-	-	E	U0F0	U0F0	U0F1
 fl26	fl26_q	none	-	-	-	U0F0	U0F0	U0F0
+fl26f	fl26f_body_e	Fs	E	E	E	U0F1	U0F1	U0F1
+fl26f	fl26f_mod_e	Fs	E	E	E	U0F1	U0F1	U0F1
+fl26f	fl26f_q	none	-	-	-	U0F0	U0F0	U0F0
 fl8v7	fl8v7_e	Fs	-	-	U	U0F0	U0F0	U1F0
 fl8v7	fl8v7_q	none	-	-	-	U0F0	U0F0	U0F0
 g1	g1_e	Fs	E	E	E	U0F1	U0F1	U0F1

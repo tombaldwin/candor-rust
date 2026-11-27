@@ -1,0 +1,15 @@
+{
+ "chain": null,
+ "deps": [
+  "fxdep_fl15g"
+ ],
+ "id": "fl15g",
+ "lib": false,
+ "note": "R1915: a type-parameter head is not a glob-supplied head; the pure twin stays clean",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "fl15g_q"
+  }
+ ]
+}
