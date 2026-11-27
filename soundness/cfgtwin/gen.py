@@ -951,6 +951,90 @@ for _p, _pub, _cand in (('fl34_e', '-', '-'), ('fl34_qself_e', '-', '-'), ('fl34
     pred('fl34', _p, _pub, _pub, _cand)
 for _p, _pub, _cand in (('fl34_e@chained', '-', 'U'), ('fl34_qself_e@chained', 'U', 'U'), ('fl34_sup_e@chained', '-', 'U'), ('fl34_two_e@chained', '-', 'U'), ('fl34_q@chained', '-', 'U')):
     pred('fl34', _p, _pub, _pub, _cand)
+# fl40: R1940. `T::Item::f()` where the only bound ON `T` is a STD trait (`Iterator`, `IntoIterator`, `Deref`) and the member's trait bounds the PROJECTION
+# (`where T::Item: dep::Af`, a local `Lt`, or the `Iterator<Item: ..>` spelling), instantiated in-crate with an effectful implementor. Executed: every `_e` writes.
+cell('fl40', {'main.rs': sub("""use fxdep_{id}::Af;
+#[derive(Clone)] pub struct Loud_{id}; impl fxdep_{id}::Af for Loud_{id} { fn f() { EFF } }
+pub struct Quiet_{id}; impl fxdep_{id}::Af for Quiet_{id} { fn f() {} }
+pub trait Lt_{id} { fn lf(); fn lm(&self) {} }
+pub struct LoudL_{id}; impl fxdep_{id}::Af for LoudL_{id} { fn f() { EFF } } impl Lt_{id} for LoudL_{id} { fn lf() { EFF } fn lm(&self) { EFF } }
+pub struct QuietL_{id}; impl Lt_{id} for QuietL_{id} { fn lf() {} }
+pub struct ItL_{id}; impl Iterator for ItL_{id} { type Item = Loud_{id}; fn next(&mut self) -> Option<Loud_{id}> { None } }
+pub struct ItQ_{id}; impl Iterator for ItQ_{id} { type Item = Quiet_{id}; fn next(&mut self) -> Option<Quiet_{id}> { None } }
+#[derive(Clone)] pub struct ItLL_{id}; impl Iterator for ItLL_{id} { type Item = LoudL_{id}; fn next(&mut self) -> Option<LoudL_{id}> { None } }
+pub struct ItQL_{id}; impl Iterator for ItQL_{id} { type Item = QuietL_{id}; fn next(&mut self) -> Option<QuietL_{id}> { None } }
+pub struct IiLL_{id}; impl IntoIterator for IiLL_{id} { type Item = LoudL_{id}; type IntoIter = std::vec::IntoIter<LoudL_{id}>; fn into_iter(self) -> Self::IntoIter { Vec::new().into_iter() } }
+pub struct IiQL_{id}; impl IntoIterator for IiQL_{id} { type Item = QuietL_{id}; type IntoIter = std::vec::IntoIter<QuietL_{id}>; fn into_iter(self) -> Self::IntoIter { Vec::new().into_iter() } }
+pub struct DrL_{id}; impl std::ops::Deref for DrL_{id} { type Target = LoudL_{id}; fn deref(&self) -> &LoudL_{id} { &LoudL_{id} } }
+pub struct DrQ_{id}; impl std::ops::Deref for DrQ_{id} { type Target = QuietL_{id}; fn deref(&self) -> &QuietL_{id} { &QuietL_{id} } }
+pub trait Sub_{id}: Lt_{id} {}
+impl Sub_{id} for LoudL_{id} {} impl Sub_{id} for QuietL_{id} {}
+impl LoudL_{id} { }
+pub trait Hl_{id} { type A; }
+impl Hl_{id} for ItLL_{id} { type A = LoudL_{id}; }
+pub struct FsL_{id}; impl std::str::FromStr for FsL_{id} { type Err = (); fn from_str(_: &str) -> Result<Self, ()> { EFF Ok(FsL_{id}) } }
+pub struct ItFs_{id}; impl Iterator for ItFs_{id} { type Item = FsL_{id}; fn next(&mut self) -> Option<FsL_{id}> { None } }
+pub struct W_{id}<T>(std::marker::PhantomData<T>);
+impl<T: Iterator> W_{id}<T> where T::Item: Lt_{id} { pub fn go() { T::Item::lf() } }
+mod g_{id} {
+    use fxdep_{id}::Af; use crate::Lt_{id}; use std::str::FromStr;
+    pub fn std_dep<T: Iterator>() where T::Item: fxdep_{id}::Af { T::Item::f() }
+    pub fn std_loc<T: Iterator>() where T::Item: crate::Lt_{id} { T::Item::lf() }
+    pub fn std_inl<T: Iterator<Item: crate::Lt_{id}>>() { T::Item::lf() }
+    pub fn std_into<T: IntoIterator>() where T::Item: crate::Lt_{id} { T::Item::lf() }
+    pub fn std_deref<T: std::ops::Deref>() where T::Target: crate::Lt_{id} { T::Target::lf() }
+    pub fn std_qself<T: Iterator>() where T::Item: crate::Lt_{id} { <T::Item as crate::Lt_{id}>::lf() }
+    pub fn std_two<T: Iterator + Clone>() where T::Item: crate::Lt_{id} { T::Item::lf() }
+    pub fn bind<T: Iterator<Item = crate::LoudL_{id}>>() { T::Item::lf() }
+    pub fn bind_q<T: Iterator<Item = crate::QuietL_{id}>>() { T::Item::lf() }
+    pub fn loc_dep<T: Iterator>() where T::Item: crate::Lt_{id} + fxdep_{id}::Af { T::Item::lf() }
+    pub fn dep_clone<T: Iterator>() where T::Item: fxdep_{id}::Af + Clone { T::Item::f() }
+    pub fn sup<T: Iterator>() where T::Item: crate::Sub_{id} { T::Item::lf() }
+    pub fn recv<T: Iterator>(x: T::Item) where T::Item: crate::Lt_{id} { T::Item::lm(&x) }
+    pub fn fromstr<T: Iterator>() where T::Item: std::str::FromStr { let _ = T::Item::from_str("x"); }
+    pub fn fromstr_head<U: std::str::FromStr>() { let _ = U::from_str("x"); }
+    pub fn qs0<T: Iterator>() where T::Item: crate::Lt_{id} { <T::Item>::lf() }
+    pub fn lochead<T: crate::Hl_{id}>() where T::A: crate::Lt_{id} { T::A::lf() }
+    pub fn ctl_head<U: fxdep_{id}::Af>() { U::f() }
+    pub fn ctl_dep_qself<T: Iterator>() where T::Item: fxdep_{id}::Af { <T::Item as fxdep_{id}::Af>::f() }
+}
+""", id='fl40')},
+     [('fl40_dep_e', 'e', 'g_fl40::std_dep::<ItL_fl40>()'), ('fl40_dep_q', 'q', 'g_fl40::std_dep::<ItQ_fl40>()'),
+      ('fl40_loc_e', 'e', 'g_fl40::std_loc::<ItLL_fl40>()'), ('fl40_loc_q', 'q', 'g_fl40::std_loc::<ItQL_fl40>()'),
+      ('fl40_inl_e', 'e', 'g_fl40::std_inl::<ItLL_fl40>()'), ('fl40_into_e', 'e', 'g_fl40::std_into::<IiLL_fl40>()'),
+      ('fl40_into_q', 'q', 'g_fl40::std_into::<IiQL_fl40>()'), ('fl40_deref_e', 'e', 'g_fl40::std_deref::<DrL_fl40>()'),
+      ('fl40_deref_q', 'q', 'g_fl40::std_deref::<DrQ_fl40>()'), ('fl40_qself_e', 'e', 'g_fl40::std_qself::<ItLL_fl40>()'),
+      ('fl40_two_e', 'e', 'g_fl40::std_two::<ItLL_fl40>()'), ('fl40_impl_e', 'e', 'W_fl40::<ItLL_fl40>::go()'),
+      ('fl40_bind_e', 'e', 'g_fl40::bind::<ItLL_fl40>()'), ('fl40_bind_q', 'q', 'g_fl40::bind_q::<ItQL_fl40>()'),
+      ('fl40_locdep_e', 'e', 'g_fl40::loc_dep::<ItLL_fl40>()'), ('fl40_depclone_e', 'e', 'g_fl40::dep_clone::<ItL_fl40>()'),
+      ('fl40_sup_e', 'e', 'g_fl40::sup::<ItLL_fl40>()'), ('fl40_qs0_e', 'e', 'g_fl40::qs0::<ItLL_fl40>()'),
+      ('fl40_fromstr_e', 'e', 'g_fl40::fromstr::<ItFs_fl40>()'), ('fl40_fromstrhead_e', 'e', 'g_fl40::fromstr_head::<FsL_fl40>()'),
+      ('fl40_lochead_e', 'e', 'g_fl40::lochead::<ItLL_fl40>()'), ('fl40_recv_e', 'e', 'g_fl40::recv::<ItLL_fl40>(LoudL_fl40)'),
+      ('fl40_ctlhead_e', 'e', 'g_fl40::ctl_head::<Loud_fl40>()'), ('fl40_ctlhead_q', 'q', 'g_fl40::ctl_head::<Quiet_fl40>()'),
+      ('fl40_ctlqs_e', 'e', 'g_fl40::ctl_dep_qself::<ItL_fl40>()')],
+     deps={'fxdep_fl40': '{ path = "fxdep_fl40" }'},
+     extra={'@dep/fxdep_fl40/src/lib.rs': 'pub trait Af { fn f(); }\n'}, chain=dict(kind='dep', dep_dir='fxdep_fl40'), hdr=False,
+     note='R1940: T::Item::f() under a std-only bound on T with the member bounding the PROJECTION; every `_e` executes a write')
+# fl41: R1913. A std type's PATH call `OsStr::from_bytes(..)` with the trait UNNAMED: std's sealed `OsStrExt::from_bytes` runs only where that trait is IMPORTED,
+# a dependency trait's `FromB::from_bytes` (implemented for `OsStr` in the dependency) runs where only the dependency's is. `dep_e` runs the dependency's (writes);
+# every `_q` runs std's (pure). `ordt_e` is the ORDINARY-`T` control: `Parse::from_str` for `String` with only the dependency's trait imported (std's FromStr is not).
+cell('fl41', {'main.rs': sub("""mod a_{id} { use fxdep_{id}::FromB; pub fn dep_e() { std::ffi::OsStr::from_bytes(b"x") } }
+mod b_{id} { use std::os::unix::ffi::OsStrExt; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn std_q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod c_{id} { use std::os::unix::ffi::*; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn glob_q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod d_{id} { use std::os::unix::ffi::OsStrExt as _; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn alias_q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod e_{id} { use fxdep_{id}::Parse; pub fn ordt_e() { let _ = String::from_str("x"); } }
+""", id='fl41')},
+     [('fl41_dep_e', 'e', 'a_fl41::dep_e()'), ('fl41_std_q', 'q', 'b_fl41::std_q()'), ('fl41_glob_q', 'q', 'c_fl41::glob_q()'),
+      ('fl41_alias_q', 'q', 'd_fl41::alias_q()'), ('fl41_ordt_e', 'e', 'e_fl41::ordt_e()')],
+     deps={'fxdep_fl41': '{ path = "fxdep_fl41" }'},
+     extra={'@dep/fxdep_fl41/src/lib.rs': sub("""pub trait FromB { fn from_bytes(b: &[u8]); }
+pub trait Marker {}
+pub trait Parse { fn from_str(s: &str) -> Self where Self: Sized; }
+impl FromB for std::ffi::OsStr { fn from_bytes(_b: &[u8]) { EFF } }
+impl Parse for String { fn from_str(_s: &str) -> Self { EFF String::new() } }
+""", id='fl41')}, chain=dict(kind='dep', dep_dir='fxdep_fl41'), hdr=False,
+     note='R1913: a sealed std trait declares the member and is IMPORTED -> std runs, the dependency join charges a body that does not run; the dependency trait alone in scope joins')
+
 # fl15g: R1915 must not hedge a generic TYPE PARAMETER head (`T::default()`); fl15 above is the module-head population that stays hedged.
 cell('fl15g', {'main.rs': sub("""mod reexp_{id} { pub use fxdep_{id}::*; }
 mod g_{id} {

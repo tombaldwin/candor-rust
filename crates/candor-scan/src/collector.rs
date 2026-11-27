@@ -7558,6 +7558,15 @@ impl<'a> CallCollector<'a> {
                 if crate::std_assoc::has_inherent(&leaf, &member) || crate::std_assoc::is_std_trait_fn(&member) {
                     return;
                 }
+                // SOUNDNESS R1913 — a SEALED std trait (`CommandExt`, `OsStrExt`, ..) declares the member and this module IMPORTS it: std's
+                // is the member that runs (a dependency trait of the same name in scope beside it would be E0034), so the join would
+                // charge a body that does not run. Only an explicit import counts; a glob, or no import, leaves the join as it was.
+                if self.r1913_sealed_std_imported(&member) {
+                    if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1913_INSTR") {
+                        eprintln!("R1913SEALED\t{leaf}::{member}"); // §E1 REACH COUNTER
+                    }
+                    return;
+                }
                 self.trait_import_crates()
                     .into_iter()
                     .map(|cr| {
@@ -7589,6 +7598,19 @@ impl<'a> CallCollector<'a> {
                 leaf: member.clone(), str_arg: None, typed: false, method: false, is_macro: false,
                 path_lits_partial: false, path_lit2: None });
         }
+    }
+
+    /// SOUNDNESS R1913 — does this module (or the enclosing fn) import, by its written path, a SEALED std trait declaring `member`?
+    fn r1913_sealed_std_imported(&self, member: &str) -> bool {
+        if candor_report::env::switch("CANDOR_R1913_OFF") {
+            return false;
+        }
+        crate::std_assoc::sealed_std_traits(member).iter().any(|tr| {
+            let tail = format!("::{tr}");
+            self.uses.values().chain(self.local_uses.values()).any(|v| {
+                v.ends_with(&tail) && matches!(v.split("::").next(), Some("std" | "core" | "alloc"))
+            })
+        })
     }
 
     /// SOUNDNESS R1098 — a COMPARISON whose left operand is a std CONTAINER or WRAPPER of a type runs that
@@ -12030,6 +12052,39 @@ impl<'a> CallCollector<'a> {
             path_lits_partial: false, path_lit2: None, typed: true, method: true, is_macro: false });
     }
 
+    /// SOUNDNESS R1940 — `T::Item::f()` where the bound that declares `f` is written ON THE PROJECTION (`where T::Item: Lt`,
+    /// `T: Iterator<Item: Lt>`, an impl's clause) and `T`'s own bounds are std traits, so neither the local-declaration route nor
+    /// `edge_dep_bound_projection` (which reads `T`'s bounds) saw it: the call formed nothing, and an in-crate implementor whose `f`
+    /// writes read ABSENT, standalone and chained (EXECUTED `fl40_*`, the Fable fixture `fc34_std_e`). The receiver spelling's authority
+    /// (`bp_member_proj`) answers it: a LOCAL bound trait dispatches over its implementors (appended to `targets`, so the written-path
+    /// route's own member checks and key apply), a written `Item = X` binding types the call, and a DEPENDENCY bound — whose member
+    /// list is unknown — is keyed like the qself spelling `<T::Item as dep::Tr>::f()` when it is the one bound that could declare `f`,
+    /// else disclosed as `dispatch:<T>::<Item>.<f>` (R1934's reason). Additive: it only adds edges, keys and hedges to a site that formed none.
+    /// `CANDOR_R1657BP_OFF=1` disables it with the rest of the probe.
+    fn r1940_projection_bounds(&mut self, g: &str, assoc: &str, leaf: &str, targets: &mut Vec<(String, Option<String>)>) {
+        let pp = self.bp_path_projection(g, assoc, leaf);
+        if crate::lang::reach_debug() {
+            eprintln!("R1940PROJ\t{g}::{assoc}::{leaf}\ttyped={}\tlocal={}\tdeps={}\tunnamed={}", pp.typed.len(), pp.traits.len(), pp.deps.len(), pp.unnamed); // §E1 REACH COUNTER
+        }
+        for t in &pp.typed {
+            self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
+                path: crate::lang::alias_join(t, &[leaf]), leaf: leaf.to_string(), str_arg: None, typed: true, method: true,
+                is_macro: false, path_lits_partial: false, path_lit2: None });
+        }
+        for t in &pp.traits {
+            if !targets.iter().any(|(x, c)| x == t && c.is_none()) {
+                targets.push((t.clone(), None));
+            }
+        }
+        let alone = pp.traits.is_empty() && pp.typed.is_empty() && !pp.unnamed && !pp.std_declares;
+        if pp.deps.len() == 1 && alone {
+            let full = crate::lang::expand(&pp.deps[0].path, &self.uses);
+            self.emit_foreign_member(&full, leaf);
+        } else if !pp.deps.is_empty() || pp.unnamed {
+            self.mark_unresolved(format!("dispatch:{g}::{assoc}.{leaf}"));
+        }
+    }
+
     /// SOUNDNESS R1934 — `T::A::f()`: a member called on the ASSOCIATED TYPE of a generic parameter whose bound is a DEPENDENCY trait
     /// (`T: dep::HasA`, `A` declared in `HasA`). The dependency's declaration of `A` is not in this scan, so the projection's own bound
     /// is unknown, and the route above forms edges only from a LOCAL trait's declaration: with none the call formed nothing — no edge, no
@@ -12266,6 +12321,23 @@ impl<'a> CallCollector<'a> {
         } else {
             path.split("::").map(str::to_string).collect()
         };
+        // SOUNDNESS R1940 — `<T::Item>::f()`: the qself WITHOUT a trait names the projection, which is the same call as `T::Item::f()`
+        // (it formed nothing: one segment after the qself). Re-routed as the path spelling.
+        if let Some(q) = p.qself.as_ref().filter(|q| q.position == 0 && p.path.segments.len() == 1) {
+            if let syn::Type::Path(tp) = &*q.ty {
+                let n = tp.path.segments.len();
+                let head = tp.path.segments.first().map(|s| s.ident.to_string());
+                if tp.qself.is_none() && n == 2 && tp.path.leading_colon.is_none() && tp.path.segments.iter().all(|s| s.arguments.is_none())
+                    && head.as_deref().is_some_and(|h| self.generic_bounds.contains_key(h) || self.impl_generic_bounds.contains_key(h))
+                {
+                    let (a, b) = (&tp.path.segments[0].ident, &tp.path.segments[1].ident);
+                    let leaf_id = &p.path.segments[0].ident;
+                    let np: syn::ExprPath = syn::parse_quote!(#a::#b::#leaf_id);
+                    self.route_trait_member_path(&np, &format!("{a}::{b}::{leaf_id}"), leaf, args, str_arg);
+                    return;
+                }
+            }
+        }
         if segs.len() < 2 {
             return;
         }
@@ -12345,6 +12417,7 @@ impl<'a> CallCollector<'a> {
             for t in ts {
                 targets.push((t, None));
             }
+            self.r1940_projection_bounds(&segs[0], assoc, leaf, &mut targets);
         }
         if targets.is_empty() && p.qself.is_none() {
             // `Tr::m(x)` (or `Self::m(x)` in a default body, which `expand` has already turned into the

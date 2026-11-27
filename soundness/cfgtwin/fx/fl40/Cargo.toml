@@ -1,0 +1,9 @@
+[package]
+name = "cf_fl40"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_fl40 = { path = "fxdep_fl40" }
+
+[workspace]

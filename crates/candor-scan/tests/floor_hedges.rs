@@ -261,5 +261,55 @@ fn round2_a_projection_a_non_dependency_bound_may_declare_is_hedged_not_keyed() 
     let (_, rows) = raw(&fx("fl34i"), &[]);
     let r = &rows["g_fl34i::iter"];
     assert!(strs(r, "unknownWhy").iter().any(|w| w == "dispatch:T::Item.f"), "{r}");
-    assert!(strs(r, "dispatchesOn").is_empty(), "no key may name a member the dependency trait does not declare: {r}");
+    // R1940: the only key is the one the WHERE bound names (`Af`, which declares `f`); never `HasA::Item::f` (HasA does not declare `Item`)
+    assert!(strs(r, "dispatchesOn").iter().all(|k| k == "fxdep_fl34i#Af::f"), "no key may name a member the dependency trait does not declare: {r}");
+}
+
+#[test]
+fn r1940_a_member_called_on_a_projection_a_std_only_bound_generic_bounds_by_where_is_read() {
+    // `T: Iterator` (a std-only bound on `T`) with the member's trait bounding the PROJECTION. Every `_e` probe writes when run
+    // (`fl40` in `expect.tsv`), and every one read ABSENT on v0.43.0 and main. A LOCAL bound trait dispatches over its implementors.
+    let r = scan("fl40");
+    for p in [
+        "fl40_loc_e", "fl40_inl_e", "fl40_into_e", "fl40_deref_e", "fl40_impl_e", "fl40_two_e", "fl40_bind_e", "fl40_sup_e", "fl40_qs0_e",
+        "fl40_recv_e",
+    ] {
+        assert!(has(&r, p, "Fs"), "{p}: the in-crate implementor's write must be read: {r:?}");
+    }
+    // the written `Item = QuietL` binding TYPES the call, so the pure twin stays pure (a resolution, not a union)
+    assert!(pure(&r, "fl40_bind_q"), "fl40_bind_q: {r:?}");
+    // a dependency bound whose member list is unknown is keyed like the qself spelling, unchained, and Unknown when chained
+    let cell = fx("fl40");
+    let (_, rows) = raw(&cell, &[]);
+    for g in ["g_fl40::std_dep", "g_fl40::ctl_dep_qself"] {
+        let r = rows.get(g).unwrap_or_else(|| panic!("{g} must have a row: {rows:?}"));
+        assert_eq!(strs(r, "invisible"), ["fxdep_fl40"], "{g}: {r}");
+        assert_eq!(strs(r, "dispatchesOn"), ["fxdep_fl40#Af::f"], "{g}: {r}");
+    }
+    let (dep_reports, _) = raw(&cell.join("fxdep_fl40"), &[]);
+    let (_, chained) = raw(&cell, &dep_reports);
+    for g in ["g_fl40::std_dep", "g_fl40::dep_clone", "g_fl40::ctl_dep_qself"] {
+        assert!(strs(&chained[g], "inferred").contains(&"Unknown".to_string()), "{g} must not read pure when chained: {}", chained[g]);
+    }
+    // a dependency bound beside a local one is disclosed beside the local answer (Fs + Unknown), never keyed to a guess
+    let both = &rows["g_fl40::loc_dep"];
+    assert!(strs(both, "inferred").contains(&"Fs".to_string()) && strs(both, "unknownWhy").iter().any(|w| w == "dispatch:T::Item.lf"), "{both}");
+}
+
+#[test]
+fn r1913_a_std_path_call_naming_a_sealed_std_trait_member_the_module_imports_is_not_joined_to_a_dependency_impl() {
+    // `OsStr::from_bytes(..)`: std's sealed `OsStrExt::from_bytes` runs where that trait is IMPORTED, the dependency's `FromB::from_bytes`
+    // (implemented for `OsStr` there) where only it is. `fl41_std_q` and `fl41_alias_q` run std's (pure, executed); on v0.43.0 and main the chained
+    // join charged the dependency's write to them (a fabrication). `fl41_dep_e` runs the dependency's and must keep its charge.
+    let cell = fx("fl41");
+    let (dep_reports, _) = raw(&cell.join("fxdep_fl41"), &[]);
+    assert!(!dep_reports.is_empty(), "the dependency must produce a report");
+    let (_, chained) = raw(&cell, &dep_reports);
+    let inf = |g: &str| chained.get(g).map(|r| strs(r, "inferred")).unwrap_or_default(); // a pure unit has no row
+    assert!(inf("a_fl41::dep_e").contains(&"Fs".to_string()), "the dependency's member runs here and must be charged: {chained:?}");
+    for g in ["b_fl41::std_q", "d_fl41::alias_q"] {
+        assert!(!inf(g).contains(&"Fs".to_string()), "{g}: std's sealed member is the one imported, so the dependency's write must not be charged: {chained:?}");
+    }
+    // a GLOB of the std module is not an explicit import of the trait: the join stays (the conservative direction, as before)
+    assert!(inf("c_fl41::glob_q").contains(&"Fs".to_string()), "a glob does not prove the std trait is the one in scope: {chained:?}");
 }

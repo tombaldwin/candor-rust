@@ -10,6 +10,7 @@ read here from rust-src, never from a list of names.
 usage: std_assoc.py <rust-src library dir>  -> lines, sorted, unique:
     I<TAB><type leaf><TAB><fn name>   a STABLE `pub fn` (any receiver) of an inherent `impl <Type>` block
     T<TAB><fn name>                   a fn declared in a `pub trait` body (any receiver)
+    TS<TAB><fn name><TAB><trait>      a fn declared in a SEALED `pub impl(..) trait` body (R1913)
 The integer types' inherent fns are written inside `int_impl!`/`uint_impl!`, so every `pub fn` in
 `int_macros.rs` / `uint_macros.rs` is filed under every signed / unsigned integer leaf, and every `pub fn` in a
 `macro_rules!` of `core/src/num/mod.rs` that writes an integer impl (`from_str_int_impl!`) under every integer leaf.
@@ -24,7 +25,14 @@ import os, re, sys
 lib = sys.argv[1]
 pub_fn = re.compile(r'\bpub\s+(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)')
 any_fn = re.compile(r'\bfn\s+([A-Za-z_][A-Za-z0-9_]*)')
-pub_trait = re.compile(r'\bpub\s+(?:const\s+)?(?:unsafe\s+)?(?:auto\s+)?trait\s+[A-Za-z_][A-Za-z0-9_]*')
+# SOUNDNESS R1913 — `pub impl(self) trait X` / `pub impl(crate) const unsafe trait X` is std's SEALED-trait syntax (the `impl(..)`
+# restriction names who may implement it); the first cut matched only `pub [const] [unsafe] [auto] trait`, so every fn of ~27 public std
+# traits (`CommandExt`, `OpenOptionsExt`, `PermissionsExt`, `OsStrExt`, `IsTerminal`, `SliceIndex`, ..) was missing from the table. Those
+# fns are NOT filed as `T` rows (a `T` row withholds the dependency join BY NAME, which is right for `default`/`from_str`, traits std
+# implements for its own types and which the prelude or a common import brings into scope): a sealed std trait's member is std's only
+# where that trait is IMPORTED, and a dependency trait's member of the same name runs where only the dependency's is. They are filed as
+# `TS<TAB>fn<TAB>trait` rows, which a consumer asks beside the module's imports.
+pub_trait = re.compile(r'\bpub\s+(impl\s*\([^)]*\)\s+)?(?:(?:const|unsafe|auto)\s+)*trait\s+([A-Za-z_][A-Za-z0-9_]*)')
 impl_kw = re.compile(r'(?<![A-Za-z0-9_])impl(?![A-Za-z0-9_])')
 SIGNED = ['i8', 'i16', 'i32', 'i64', 'i128', 'isize']
 UNSIGNED = ['u8', 'u16', 'u32', 'u64', 'u128', 'usize']
@@ -85,7 +93,7 @@ SYS_DIRS = [os.path.join(lib, 'std', 'src', d) for d in ('sys', 'sys_common')]
 def private_platform(root):
     return any(root == d or root.startswith(d + os.sep) for d in SYS_DIRS)
 
-inh = set(); trait_fns = set()
+inh = set(); trait_fns = set(); sealed_fns = set()
 for crate in ('core', 'alloc', 'std'):
     for root, dirs, files in os.walk(os.path.join(lib, crate, 'src')):
         dirs[:] = [d for d in dirs if d not in ('tests', 'benches')]
@@ -99,7 +107,7 @@ for crate in ('core', 'alloc', 'std'):
                     if b < 0: continue
                     e = block_end(s, b)
                     for m in any_fn.finditer(s[b:e+1]):
-                        trait_fns.add(m.group(1))
+                        (sealed_fns.add((m.group(1), t.group(2))) if t.group(1) else trait_fns.add(m.group(1)))
                 continue
             if f in ('int_macros.rs', 'uint_macros.rs'):
                 leaves = SIGNED if f == 'int_macros.rs' else UNSIGNED
@@ -130,7 +138,7 @@ for crate in ('core', 'alloc', 'std'):
                 if b < 0: continue
                 e = block_end(s, b)
                 for m in any_fn.finditer(s[b:e+1]):
-                    trait_fns.add(m.group(1))
+                    (sealed_fns.add((m.group(1), t.group(2))) if t.group(1) else trait_fns.add(m.group(1)))
 # ROUND 3 — INHERENT IMPLS A `macro_rules!` WRITES. std writes many inherent impls inside macros whose self type is a
 # macro parameter (`atomic_int!` -> `impl $atomic_type { pub const fn new(..) }`), and names the type only at the
 # invocation (`atomic_int! { .., i8 AtomicI8 }`); an alias family is minted the same way (`nonzero_integer! { Self =
@@ -247,3 +255,5 @@ for l, n in sorted(inh):
     print(f"I\t{l}\t{n}")
 for n in sorted(trait_fns):
     print(f"T\t{n}")
+for n, tr in sorted(sealed_fns):
+    print(f"TS\t{n}\t{tr}")

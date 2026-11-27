@@ -1,0 +1,114 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_fl40",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_fl40"
+ ],
+ "id": "fl40",
+ "lib": false,
+ "note": "R1940: T::Item::f() under a std-only bound on T with the member bounding the PROJECTION; every `_e` executes a write",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl40_dep_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl40_dep_q"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_loc_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl40_loc_q"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_inl_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_into_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl40_into_q"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_deref_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl40_deref_q"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_qself_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_two_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_impl_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_bind_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl40_bind_q"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_locdep_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_depclone_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_sup_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_qs0_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_fromstr_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_fromstrhead_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_lochead_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_recv_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_ctlhead_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl40_ctlhead_q"
+  },
+  {
+   "kind": "e",
+   "name": "fl40_ctlqs_e"
+  }
+ ]
+}

@@ -59,6 +59,26 @@ fn refs_of(bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token!
         .collect()
 }
 
+/// SOUNDNESS R1940 — the bounds an associated-type CONSTRAINT puts on a projection of the bounded parameter: `T: Iterator<Item: Lt>`
+/// bounds `T::Item` by `Lt`, exactly as `where T::Item: Lt` does. `(assoc, bounds)` per constraint in the written bound list.
+fn constraints_of(bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>) -> Vec<(String, Vec<TraitRef>)> {
+    let mut out = Vec::new();
+    for b in bounds {
+        let syn::TypeParamBound::Trait(tb) = b else { continue };
+        let Some(seg) = tb.path.segments.last() else { continue };
+        let syn::PathArguments::AngleBracketed(ab) = &seg.arguments else { continue };
+        for a in &ab.args {
+            if let syn::GenericArgument::Constraint(c) = a {
+                let r = refs_of(&c.bounds);
+                if !r.is_empty() {
+                    out.push((c.ident.to_string(), r));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// What a binding holds, when it holds a value of a generic of this scope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BVal {
@@ -147,6 +167,9 @@ impl BoundEnv {
                 if !r.is_empty() {
                     env.of_param.entry(tp.ident.to_string()).or_default().extend(r);
                 }
+                for (assoc, rs) in constraints_of(&tp.bounds) {
+                    env.of_projection.entry((tp.ident.to_string(), assoc)).or_default().extend(rs);
+                }
             }
             let Some(w) = &g.where_clause else { continue };
             for p in &w.predicates {
@@ -154,6 +177,11 @@ impl BoundEnv {
                 let r = refs_of(&pt.bounds);
                 if r.is_empty() {
                     continue;
+                }
+                if let Some(BVal::Generic(n)) = env.generic_of(&pt.bounded_ty).filter(|_| matches!(pt.bounded_ty, syn::Type::Path(_))) {
+                    for (assoc, rs) in constraints_of(&pt.bounds) {
+                        env.of_projection.entry((n.clone(), assoc)).or_default().extend(rs);
+                    }
                 }
                 match env.generic_of(&pt.bounded_ty) {
                     // only the bare written type (`C: ..`, `C::A: ..`), never a reference to one
@@ -341,6 +369,21 @@ struct Step1 {
     /// local traits with a BLANKET impl that declare the member: applicability is undecided without a solver, so they are
     /// unioned with the later step's answer, with their key
     blanket: Vec<String>,
+}
+
+/// What the path-call projection arm found for `T::Item::f()` (see `bp_path_projection`).
+#[derive(Default, Debug)]
+pub(crate) struct PathProj {
+    /// nominal types a written `Item = X` binding names: typed calls
+    pub(crate) typed: Vec<String>,
+    /// LOCAL bound traits that declare the member: bounded dispatch over their implementors
+    pub(crate) traits: Vec<String>,
+    /// DEPENDENCY bound traits (member list unknown): keyed when alone, else disclosed
+    pub(crate) deps: Vec<TraitRef>,
+    /// a STD bound of the projection declares the member too
+    pub(crate) std_declares: bool,
+    /// a candidate whose member list or type this route cannot see (dependency supertrait, a binding to a non-nominal type)
+    pub(crate) unnamed: bool,
 }
 
 /// A member every type has through a std blanket impl (or through `&C`, which is `Clone`/`Borrow`/`Into`-able whatever `C`
@@ -712,6 +755,94 @@ impl<'a> super::CallCollector<'a> {
         }
         a.facts.insert("projection");
         Some(a)
+    }
+
+    /// SOUNDNESS R1940 — the PATH-call form of the projection arm: `T::Item::f()` / `T::A::g()`. `route_trait_member_path` answered this
+    /// spelling only from a LOCAL bound trait's declaration of the associated type, so a bound written on the projection itself (`where
+    /// T::Item: Lt`, `T: Iterator<Item: Lt>`, an impl's clause) or a written `Item = X` binding, under a STD-only bound on `T`, formed no
+    /// edge, no key and no disclosure (EXECUTED `fl40_*`). The sources are the receiver spelling's own (`bp_member_proj`, R1795): a written
+    /// binding, then the projection's bound set; the difference is the MEMBER TEST, because an associated fn with no receiver (`f()`, the
+    /// usual path-call member) is in the trait's `assoc`, not its `methods` (`declaring_traits(.., true)`).
+    pub(crate) fn bp_path_projection(&self, g: &str, assoc: &str, leaf: &str) -> PathProj {
+        let mut out = PathProj::default();
+        if bp_off() || universal_member(leaf) {
+            return out;
+        }
+        for t in self.bp.env.bounds(g) {
+            for (n, ty) in &t.bindings {
+                if n == assoc {
+                    match self.bp_written(ty) {
+                        Val::Nominal(x) => {
+                            if !out.typed.contains(&x) {
+                                out.typed.push(x);
+                            }
+                        }
+                        _ => out.unnamed = true, // bound to a generic / dyn / opaque type this route does not name
+                    }
+                }
+            }
+        }
+        if !out.typed.is_empty() || out.unnamed {
+            return out; // a written binding IS the projection's type; its bound set is not consulted (as `bp_member_proj`)
+        }
+        for t in self.bp.env.of_projection.get(&(g.to_string(), assoc.to_string())).into_iter().flatten() {
+            let l = t.leaf.as_str();
+            if self.local_traits.contains_key(l) {
+                if self.local_declares_member(l, leaf, 0) {
+                    // the DECLARING trait(s): `T::Item: Sub` with `Sub: Lt` and `lf` declared in `Lt` dispatches over `Lt`'s implementors
+                    for d in self.declaring_traits(l, leaf, true) {
+                        if !out.traits.contains(&d) {
+                            out.traits.push(d);
+                        }
+                    }
+                } else if self.local_trait_has_foreign_super(l) {
+                    out.unnamed = true; // a dependency supertrait whose member list is unknown may declare it
+                }
+            } else if crate::std_bounds::is_std_trait_leaf(l) || matches!(l, "Send" | "Sync" | "Unpin" | "Sized" | "Copy") {
+                // a std bound is not this route's to answer (the receiver spelling's R1286 hedge is for driving I/O members of a
+                // receiver), but one that DECLARES the member means a dependency bound beside it is not the only candidate
+                let table = crate::std_bounds::table();
+                let paths: Vec<&str> = match table.resolve_trait(&t.path) {
+                    Some(p) => vec![p],
+                    None => table.traits_by_leaf(l).to_vec(),
+                };
+                if paths.iter().any(|p| std_declares(p, leaf)) {
+                    out.std_declares = true;
+                }
+            } else {
+                out.deps.push(t.clone());
+            }
+        }
+        out
+    }
+
+    /// Does the local trait `l` (or a local supertrait) declare `leaf` as a method OR an associated fn?
+    fn local_declares_member(&self, l: &str, leaf: &str, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let Some(lt) = self.local_traits.get(l) else { return false };
+        lt.methods.contains(leaf) || lt.assoc.contains(leaf) || lt.supertraits.iter().any(|s| self.local_declares_member(s, leaf, depth + 1))
+    }
+
+    /// Does the local trait `l` have a supertrait (transitively) that is neither local nor std — one whose member list is unknown?
+    fn local_trait_has_foreign_super(&self, l: &str) -> bool {
+        let mut stack = vec![(l.to_string(), 0usize)];
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some((t, d)) = stack.pop() {
+            if !seen.insert(t.clone()) || d > 16 {
+                continue;
+            }
+            let Some(lt) = self.local_traits.get(&t) else { continue };
+            for sup in &lt.supertraits {
+                if self.local_traits.contains_key(sup) {
+                    stack.push((sup.clone(), d + 1));
+                } else if !crate::std_bounds::is_std_trait_leaf(sup) && !matches!(sup.as_str(), "Send" | "Sync" | "Unpin" | "Sized" | "Copy") {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// SOUNDNESS R1723's reading, for a FIELD typed by its owner's own type parameter: the impl-scope generic that position is
