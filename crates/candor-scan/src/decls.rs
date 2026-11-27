@@ -2435,6 +2435,10 @@ pub(crate) const NS_EXT_USE_PRIV_MARK: &str = "\u{1}ns-ext-use-priv";
 /// RESOLVER STEP 1 — the names the module declares whose use through a cfg arm set is a MEMBER call resolved per arm: its
 /// TYPE-namespace declarations (`struct`/`enum`/`union`/`type`/`trait`) and its `static`/`const` items, `NS_SEP`-joined.
 pub(crate) const NS_TYPES_MARK: &str = "\u{1}ns-types";
+/// SOUNDNESS R1932 — the FREE FNS a module body declares, `NS_SEP`-joined. A fn declared in module `m` beside a named `use` that binds the same
+/// name in module `m` (the `#[cfg]` twin of a re-export: `#[cfg(unix)] mod m { pub fn g() {..} }` / `#[cfg(not(unix))] mod m { pub use ..::p as g; }`)
+/// is an ARM of the re-export table's key `m::g`, as a declared TYPE twin already is (`build_reexport_names`, R1489's rule).
+pub(crate) const NS_FNS_MARK: &str = "\u{1}ns-fns";
 
 /// SOUNDNESS R1697/R1702 — ONE MODULE NAMESPACE PER MODULE, for the question every re-export route answers in its own slice:
 /// "what does the name `x`, written in (or below) module `m`, denote?". Built once per scan from the merged edges and
@@ -2485,6 +2489,8 @@ pub(crate) struct NsIndex {
     pub(crate) arm_placed: std::collections::HashSet<(String, String)>,
     /// RESOLVER STEP 1 — module -> the names it declares in the TYPE namespace (`NS_TYPES_MARK`).
     pub(crate) types: HashMap<String, std::collections::HashSet<String>>,
+    /// SOUNDNESS R1932 — `module::name` of every FREE FN a module body declares (`NS_FNS_MARK`).
+    pub(crate) declared_fns: std::collections::HashSet<String>,
     /// Pass B answers of `resolve_memo` (the installed table no longer changes then), by caller and key
     memo: std::sync::Mutex<HashMap<String, Option<Vec<String>>>>,
 }
@@ -2513,6 +2519,11 @@ impl NsIndex {
                     set.extend(e.name.split(NS_SEP).filter(|n| !n.is_empty()).map(str::to_string));
                     if e.alias == NS_NAMES_OPAQUE_MARK {
                         ns.opaque.insert(e.module.clone());
+                    }
+                }
+                NS_FNS_MARK => {
+                    for n in e.name.split(NS_SEP).filter(|n| !n.is_empty()) {
+                        ns.declared_fns.insert(qualify(&e.module, n));
                     }
                 }
                 NS_TYPES_MARK => {
@@ -2926,6 +2937,13 @@ pub(crate) fn build_reexport_names(
         // A declared TYPE twin is unioned in (R1489's rule); a declared MODULE is the other namespace, not an arm.
         if declared.contains(k) && !local_mods.contains(k) {
             record_alias(&mut raw, k.clone(), format!("crate::{k}"));
+        } else if ns.is_some_and(|n| n.declared_fns.contains(k)) && !local_mods.contains(k) {
+            // SOUNDNESS R1932 — …and a declared FREE FN twin of a re-export (a `#[cfg]` pair of modules, or of items in one): its own
+            // definition is an arm of the key, `crate::m::g` beside the re-export's targets. Read by every spelling that asks the table.
+            if candor_report::env::trace("CANDOR_R1932_INSTR") {
+                eprintln!("R1932TWIN\t{k}\t{}", raw[k].replace(ALIAS_ALT_SEP, "|")); // §E1 REACH COUNTER
+            }
+            record_alias(&mut raw, k.clone(), format!("crate::{k}"));
         }
     }
     // Modules that GLOB-import (`use x::*` / `pub use x::*`, any visibility): a name such a module re-binds may sit behind
@@ -3168,6 +3186,7 @@ fn collect_private_uses_in(
         let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut opaque = false;
         let mut type_names: Vec<String> = Vec::new();
+        let mut fn_names: Vec<String> = Vec::new();
         for it in items {
             // A `static`/`const` counts too: `zi::DB.q()` through an arm set is a member call on the arm's declared TYPE, the same
             // per-arm member resolution a type answer needs (Fable's `static_prov`: arm b's type gets `pq` from a provided body).
@@ -3242,11 +3261,25 @@ fn collect_private_uses_in(
                 syn::Item::Macro(_) => {}
                 other => {
                     if let Some(n) = declared_item_name(other, include_tests) {
+                        if matches!(other, syn::Item::Fn(_)) {
+                            fn_names.push(n.clone());
+                        }
                         declared.insert(n.clone());
                         names.push(n);
                     }
                 }
             }
+        }
+        if !fn_names.is_empty() {
+            fn_names.sort();
+            fn_names.dedup();
+            out.push(Reexport {
+                module: modpath.to_string(),
+                from: Vec::new(),
+                name: fn_names.join(&NS_SEP.to_string()),
+                alias: NS_FNS_MARK.to_string(),
+                cfg_gated: false,
+            });
         }
         // A name the module both DECLARES and binds by a `use` is a `#[cfg]` twin (tokio-websockets `sha`: `fn digest` in
         // the openssl/sha1_smol arms, `use ring::digest` in another): which one a path names depends on the build, so the

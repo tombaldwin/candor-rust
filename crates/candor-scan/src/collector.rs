@@ -12000,6 +12000,12 @@ impl<'a> CallCollector<'a> {
             let unit: syn::Expr = syn::parse_quote!(());
             self.recv_trait_full(args.first().unwrap_or(&unit), tr, leaf)
         };
+        self.emit_foreign_member(&full, leaf);
+    }
+
+    /// The ⟨0.39⟩ obligation-1 key and the crate-qualified call for a member `leaf` written under the dependency path `full`
+    /// (`dep::Tr`, or `dep::Tr::Assoc` for a member of an associated type). Nothing is formed for a path that is not a dependency's.
+    fn emit_foreign_member(&mut self, full: &str, leaf: &str) {
         let root = full.split("::").next().unwrap_or("");
         if !full.contains("::") || !crate::lang::is_dependency_crate_root(root) {
             return;
@@ -12015,6 +12021,35 @@ impl<'a> CallCollector<'a> {
         self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
             path: format!("{full}::{leaf}"), leaf: leaf.to_string(), str_arg: None,
             path_lits_partial: false, path_lit2: None, typed: true, method: true, is_macro: false });
+    }
+
+    /// SOUNDNESS R1934 — `T::A::f()`: a member called on the ASSOCIATED TYPE of a generic parameter whose bound is a DEPENDENCY trait
+    /// (`T: dep::HasA`, `A` declared in `HasA`). The dependency's declaration of `A` is not in this scan, so the projection's own bound
+    /// is unknown, and the route above forms edges only from a LOCAL trait's declaration: with none the call formed nothing — no edge, no
+    /// key, no `invisible` — and a consumer instantiating `T` with an implementor whose `A` writes read nothing, unchained AND chained
+    /// (EXECUTED `fb15_assoc2_e`). The qself spelling `<T as dep::HasA>::A::f()` already mints `dep#HasA::A::f` and the call
+    /// `dep::HasA::A::f`; this mints exactly that, through the bound's own written qualification. With ONE dependency bound the trait is
+    /// the one `A` is declared in (rustc's own E0221 otherwise); with several, which declares `A` is not known, so the site is disclosed
+    /// as the dispatch it is (`dispatch:<T>::<A>.<member>`, the local-bound reading's own reason) rather than keyed to a guess.
+    fn edge_dep_bound_projection(&mut self, g: &str, assoc: &str, leaf: &str) {
+        let Some(bounds) = self.generic_bounds.get(g).or_else(|| self.impl_generic_bounds.get(g)).cloned() else { return };
+        let Ok(recv) = syn::parse_str::<syn::Expr>(g) else { return };
+        let mut deps: Vec<String> = Vec::new();
+        for b in &bounds {
+            let full = self.recv_trait_full(&recv, b, leaf);
+            let root = full.split("::").next().unwrap_or("");
+            if full.contains("::") && crate::lang::is_dependency_crate_root(root) && !deps.contains(&full) {
+                deps.push(full);
+            }
+        }
+        if crate::lang::reach_debug() {
+            eprintln!("R1934PROJ\t{g}::{assoc}::{leaf}\t{}", deps.len()); // §E1 REACH COUNTER
+        }
+        match deps.len() {
+            0 => {}
+            1 => self.emit_foreign_member(&format!("{}::{assoc}", deps[0]), leaf),
+            _ => self.mark_unresolved(format!("dispatch:{g}::{assoc}.{leaf}")),
+        }
     }
 
     /// SOUNDNESS R1318 (UFCS) — the UFCS spelling of a DRIVING std I/O member on a dispatch-typed first argument:
@@ -12289,6 +12324,8 @@ impl<'a> CallCollector<'a> {
             let local_bound = generic(self, &segs[0]).unwrap_or_default().iter().any(|b| self.local_traits.contains_key(b));
             if ts.is_empty() && local_bound {
                 self.mark_unresolved(format!("dispatch:{}::{assoc}.{leaf}", segs[0]));
+            } else if ts.is_empty() {
+                self.edge_dep_bound_projection(&segs[0], assoc, leaf);
             }
             for t in ts {
                 targets.push((t, None));

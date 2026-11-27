@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev230 (rustagent-floor2, lane rust-floor-hedges-2): SOUNDNESS R1932 / R1934 / R1935 — `private_uses` gained a `NS_FNS_MARK` marker (the free fns
+    // a module body declares): a declared fn twin of a re-export is an arm of the re-export table's key; `T::A::f()` through a dependency bound forms the projection's key and call; a typed method
+    // call below a module whose hidden macro text declares the next segment is hedged; a rev229 entry holds the old values.
     // rev229 (rustagent-floor, lane rust-floor-hedges): SOUNDNESS R1907 / R1915 / R1918 (b) / R1922 / R1923 / R1924 / R1926 — `FileDecls` gained
     // the `macro_rules!` names a `cfg_if!` arm writes (`macro_twins`), a `macro_rules!` body's `mod` names (`macro_hidden_fns`) and the type
     // aliases a carrier arm declares; `#[path]` modules a carrier hosts are recorded as redirected; a relative body or module `use` of a cfg
@@ -799,7 +802,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev229/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev230/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

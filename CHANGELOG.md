@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- ⚠ **Lane rust-floor-hedges-2: three more pre-existing silent under-reports closed (SOUNDNESS R1932, R1934, R1935; R1933 is not a silence; R1917, R1925 left).**
+  R1932 (resolution): an anchored `use crate::tw::g;` (module-level or body-local) of a `#[cfg]` twin whose DECLARED fn arm writes beside a re-export arm that
+  is pure read the re-export arm alone; a declared free fn is now an arm of the re-export table's key (as a declared type already was), so every spelling reads the union. R1934 (resolution to the qself
+  spelling's disclosure): `T::A::f()` through a type parameter bounded by a DEPENDENCY trait formed no edge and no key, unchained and chained; it now forms
+  what `<T as dep::HasA>::A::f()` forms (`dep#HasA::A::f` and the call), and with two dependency bounds it is hedged `dispatch:T::A.f`. R1935 (hedge): a method call
+  on a value typed below a module whose hidden macro text declares the next segment now reads `Unknown` `macro:module items hidden by an unexpanded macro`, as R1923's path
+  call does. Additive; no kill switch.
+
 - ⚠ **Lane rust-floor-hedges: eight pre-existing silent under-reports get a site hedge or a resolution (SOUNDNESS R1907, R1915, R1918 (b), R1922, R1923, R1924, R1926; R1912 and R1918 (a) left).**
   Every one read ABSENT over an executed write on v0.43.0 and main (`soundness/cfgtwin` `fl*` cells and the named residual cells). Resolutions
   (the caller reads the real effect): R1926 (a `use tw::g;` in a body or module, `tw` a `#[cfg]`-twinned module, now follows the module-qualified

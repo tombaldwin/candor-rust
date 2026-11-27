@@ -1,0 +1,34 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_fl34",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_fl34"
+ ],
+ "id": "fl34",
+ "lib": false,
+ "note": "R1934: T::A::f() through a dependency bound reads what the qself spelling reads: chained Unknown (the join), standalone `invisible` + the key; two bounds hedge",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl34_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl34_qself_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl34_sup_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl34_two_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl34_q"
+  }
+ ]
+}

@@ -1,0 +1,29 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl35",
+ "lib": false,
+ "note": "R1935: a method call on a value typed to a type only macro text declares, beside an out-of-line stand-in",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl35_let_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl35_ann_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl35_use_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl35_ufcs_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl35_q"
+  }
+ ]
+}

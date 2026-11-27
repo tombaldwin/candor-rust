@@ -9377,8 +9377,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // `s.rs` is the visible arm's unit alone, while the hidden arm is the one that runs (cfgtwin-shaped; `host::gf()`, a direct
             // child, already read `Unknown` above). The name evidence is the R1901 module fact (`MACRO_DECL_MOD`); the owner evidence is
             // `merged.macro_modules`. Silent over an executed write on 0.43.0 and main (fixture f_rrcfg `f_rrcfg_mod_e`).
-            if !c.is_macro && !c.method && c.path.starts_with("crate::") {
-                let segs: Vec<&str> = c.path.split("::").skip(1).collect();
+            // SOUNDNESS R1935 — …and the METHOD spelling of the same site: a receiver the walk TYPED to a type below that module
+            // (`let t = host::s::T; t.go()`, edge `crate::host::s::T::go`, `c.typed`) names the visible arm's `impl` while the hidden arm's
+            // is the one that runs. An UNTYPED method call (`x.go()` with no type) names no module and stays out.
+            // A typed method call's path is crate-RELATIVE when the type came through a `use` (`host::s::T::go`), `crate::`-rooted when
+            // written out: either way the first module must be one of THIS crate's macro-bearing modules (`macro_modules` below).
+            let r1935_typed = c.method && c.typed && !c.path.starts_with("crate::");
+            if !c.is_macro && (!c.method || c.typed) && (c.path.starts_with("crate::") || r1935_typed) {
+                let segs: Vec<&str> = c.path.split("::").skip(if r1935_typed { 0 } else { 1 }).collect();
                 if segs.len() >= 3 {
                     let mods = &segs[..segs.len() - 1];
                     if (1..mods.len()).any(|n| {

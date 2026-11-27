@@ -904,6 +904,53 @@ use tw_{id}::g as h_{id};
 """, id='fl26f')}, [('fl26f_body_e', 'e', 'use tw_fl26f::g; g()'), ('fl26f_mod_e', 'e', 'h_fl26f()'), ('fl26f_q', 'q', 'use twq_fl26f::g; g()')],
      note='R1926 (orientation 2): a relative `use` of a cfg twin whose DECLARED fn arm writes reads the union, never the re-export arm alone')
 pred('fl26f', 'fl26f_body_e', '-', 'E', 'E'); pred('fl26f', 'fl26f_mod_e', '-', 'E', 'E'); pred('fl26f', 'fl26f_q', '-', '-', '-')
+# fl32: R1932. The ANCHORED `use crate::tw::g;` (module-level and body-local) of a cfg twin, both orientations. fl26f is the relative spelling.
+cell('fl32', {'main.rs': sub("""pub mod imp_{id} { pub fn pur() {} pub fn eff() { EFF } }
+#[cfg(unix)] pub mod tw_{id} { pub fn g() { EFF } }
+#[cfg(not(unix))] pub mod tw_{id} { pub use crate::imp_{id}::pur as g; }
+#[cfg(unix)] pub mod twq_{id} { pub fn g() {} }
+#[cfg(not(unix))] pub mod twq_{id} { pub use crate::imp_{id}::pur as g; }
+#[cfg(unix)] pub mod twr_{id} { pub fn g() {} }
+#[cfg(not(unix))] pub mod twr_{id} { pub use crate::imp_{id}::eff as g; }
+pub mod fac_{id} { pub use crate::imp_{id}::pur as k; pub use crate::imp_{id}::eff as g; }
+pub mod sb_{id} { #[cfg(unix)] pub fn g() { EFF } #[cfg(not(unix))] pub use crate::imp_{id}::pur as g; }
+pub mod sbq_{id} { #[cfg(unix)] pub fn g() {} #[cfg(not(unix))] pub use crate::imp_{id}::pur as g; }
+use crate::tw_{id}::g as h_{id};
+""", id='fl32')}, [('fl32_mod_e', 'e', 'h_fl32()'), ('fl32_body_e', 'e', 'use crate::tw_fl32::g; g()'), ('fl32_q', 'q', 'use crate::twq_fl32::g; g()'),
+                  ('fl32_path_e', 'e', 'crate::tw_fl32::g()'),
+                  ('fl32r_e', 'e', 'use crate::twr_fl32::g; g()'), ('fl32fac_e', 'e', 'use crate::fac_fl32::g; g()'), ('fl32fac_q', 'q', 'use crate::fac_fl32::k; k()'),
+                  ('fl32sb_e', 'e', 'use crate::sb_fl32::g; g()'), ('fl32sb_q', 'q', 'use crate::sbq_fl32::g; g()')],
+     note='R1932: an ANCHORED `use crate::tw::g` of a cfg twin (fn arm writes, re-export arm pure; two modules, or two items in one) reads the union; the other orientation and a plain facade control stay as they were')
+for _p, _e in (('fl32_mod_e', 'E'), ('fl32_body_e', 'E'), ('fl32_path_e', 'E'), ('fl32r_e', 'E'), ('fl32fac_e', 'E')):
+    pred('fl32', _p, '-' if _p in ('fl32_mod_e', 'fl32_body_e') else 'E', '-' if _p in ('fl32_mod_e', 'fl32_body_e') else 'E', _e)
+pred('fl32', 'fl32_q', '-', '-', '-'); pred('fl32', 'fl32fac_q', '-', '-', '-'); pred('fl32', 'fl32sb_e', '-', '-', 'E'); pred('fl32', 'fl32sb_q', '-', '-', '-')
+# fl34: R1934. `T::A::f()` — a member called on the ASSOCIATED TYPE of a generic parameter bounded by a DEPENDENCY trait, instantiated in-crate with a
+# dependency implementor whose `A` writes. The qself spelling is the control that already disclosed; one bound -> the qself's key, two bounds -> a hedge.
+cell('fl34', {'main.rs': sub("""mod g_{id} {
+    use fxdep_{id}::Af;
+    pub fn assoc2<T: fxdep_{id}::HasA>() { T::A::f() }
+    pub fn assoc_q<T: fxdep_{id}::HasA>() { <T as fxdep_{id}::HasA>::A::f() }
+    pub fn assoc_sup<T: fxdep_{id}::Sub>() { T::S::f() }
+    pub fn assoc_two<T: fxdep_{id}::HasA + fxdep_{id}::HasB>() { T::A::f() }
+}
+""", id='fl34')}, [('fl34_e', 'e', 'g_fl34::assoc2::<fxdep_fl34::Imp>()'), ('fl34_qself_e', 'e', 'g_fl34::assoc_q::<fxdep_fl34::Imp>()'),
+                  ('fl34_sup_e', 'e', 'g_fl34::assoc_sup::<fxdep_fl34::Imp>()'), ('fl34_two_e', 'e', 'g_fl34::assoc_two::<fxdep_fl34::Imp>()'),
+                  ('fl34_q', 'q', 'g_fl34::assoc2::<fxdep_fl34::Pur>()')],
+     deps={'fxdep_fl34': '{ path = "fxdep_fl34" }'},
+     extra={'@dep/fxdep_fl34/src/lib.rs': sub("""pub trait Af { fn f(); }
+pub trait HasA { type A: Af; }
+pub trait HasB { type B: Af; }
+pub trait Sup { type S: Af; }
+pub trait Sub: Sup {}
+pub struct Imp; pub struct Aeff; impl Af for Aeff { fn f() { EFF } }
+impl HasA for Imp { type A = Aeff; } impl HasB for Imp { type B = Aeff; } impl Sup for Imp { type S = Aeff; } impl Sub for Imp {}
+pub struct Pur; pub struct Apur; impl Af for Apur { fn f() {} } impl HasA for Pur { type A = Apur; }
+""", id='fl34')}, chain=dict(kind='dep', dep_dir='fxdep_fl34'), hdr=False,
+     note='R1934: T::A::f() through a dependency bound reads what the qself spelling reads: chained Unknown (the join), standalone `invisible` + the key; two bounds hedge')
+for _p, _pub, _cand in (('fl34_e', '-', '-'), ('fl34_qself_e', '-', '-'), ('fl34_sup_e', '-', '-'), ('fl34_two_e', '-', 'U'), ('fl34_q', '-', '-')):
+    pred('fl34', _p, _pub, _pub, _cand)
+for _p, _pub, _cand in (('fl34_e@chained', '-', 'U'), ('fl34_qself_e@chained', 'U', 'U'), ('fl34_sup_e@chained', '-', 'U'), ('fl34_two_e@chained', '-', 'U'), ('fl34_q@chained', '-', 'U')):
+    pred('fl34', _p, _pub, _pub, _cand)
 # fl15g: R1915 must not hedge a generic TYPE PARAMETER head (`T::default()`); fl15 above is the module-head population that stays hedged.
 cell('fl15g', {'main.rs': sub("""mod reexp_{id} { pub use fxdep_{id}::*; }
 mod g_{id} {
@@ -962,6 +1009,22 @@ pub mod host_{id} {{ crate::wcfg_{id}! {{}} pub mod t; }}
      extra={'host_fl23/s.rs': 'pub fn go() {}\n', 'host_fl23/t.rs': 'pub fn pure() {}\n'},
      note='R1923: a nested path into a module only macro text declares, beside an out-of-line stand-in')
 pred('fl23', 'fl23_e', '-', '-', 'U'); pred('fl23', 'fl23_q', '-', '-', '-')
+# fl35: R1935. The METHOD spelling of fl23: a value TYPED to a type declared in the module only macro text declares (`mod s { struct T; impl T { fn go } }`),
+# beside an out-of-line stand-in `s.rs` whose `T::go` is pure. `U` in the visible module `t` is the pure twin (must stay clean).
+cell('fl35', {'main.rs': sub("""#[macro_export] macro_rules! wcfg_{id} {{ () => {{
+    #[cfg(unix)] pub mod s {{ pub struct T; impl T {{ pub fn go(&self) {{ EFF }} }} }}
+    #[cfg(not(unix))] pub mod s;
+}} }}
+pub mod host_{id} {{ crate::wcfg_{id}! {{}} pub mod t; }}
+""".replace('{{', '{').replace('}}', '}'), id='fl35')},
+     [('fl35_let_e', 'e', 'let t = host_fl35::s::T; t.go()'), ('fl35_ann_e', 'e', 'let t: host_fl35::s::T = host_fl35::s::T; t.go()'),
+      ('fl35_use_e', 'e', 'use host_fl35::s::T; T.go()'), ('fl35_ufcs_e', 'e', 'host_fl35::s::T::go(&host_fl35::s::T)'),
+      ('fl35_q', 'q', 'let u = host_fl35::t::U; u.go()')],
+     extra={'host_fl35/s.rs': 'pub struct T; impl T { pub fn go(&self) {} }\n', 'host_fl35/t.rs': 'pub struct U; impl U { pub fn go(&self) {} }\n'},
+     note='R1935: a method call on a value typed to a type only macro text declares, beside an out-of-line stand-in')
+for _p in ('fl35_let_e', 'fl35_ann_e', 'fl35_use_e', 'fl35_ufcs_e'):
+    pred('fl35', _p, '-', '-', 'U')
+pred('fl35', 'fl35_q', '-', '-', '-')
 # fl24a / fl24b: R1924. A `type`-alias self type, and a trait named through a re-export; r7gen / r7memcol are the generic and member-collision shapes.
 cell('fl24a', {'main.rs': sub("""pub trait Tr_{id} { fn m(&self) { eff_{id}() } }
 pub fn eff_{id}() { EFF }

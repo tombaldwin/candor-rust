@@ -1,0 +1,45 @@
+{
+ "chain": null,
+ "deps": [],
+ "id": "fl32",
+ "lib": false,
+ "note": "R1932: an ANCHORED `use crate::tw::g` of a cfg twin (fn arm writes, re-export arm pure; two modules, or two items in one) reads the union; the other orientation and a plain facade control stay as they were",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fl32_mod_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl32_body_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl32_q"
+  },
+  {
+   "kind": "e",
+   "name": "fl32_path_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl32r_e"
+  },
+  {
+   "kind": "e",
+   "name": "fl32fac_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl32fac_q"
+  },
+  {
+   "kind": "e",
+   "name": "fl32sb_e"
+  },
+  {
+   "kind": "q",
+   "name": "fl32sb_q"
+  }
+ ]
+}

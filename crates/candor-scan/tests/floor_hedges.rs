@@ -149,3 +149,101 @@ fn r1924_inheriting_arms_the_identity_refuses_are_disclosed() {
         assert!(pure(&scan(cell), p), "{cell}/{p}: a same-leaf twin of another type must stay clean");
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Lane rust-floor-hedges-2 — SOUNDNESS R1932, R1934, R1935.
+
+#[test]
+fn r1932_an_anchored_use_of_a_cfg_twin_reads_the_declared_arm_beside_the_reexport_arm() {
+    let r = scan("fl32");
+    for p in ["fl32_mod_e", "fl32_body_e", "fl32_path_e"] {
+        assert!(has(&r, p, "Fs"), "{p}: the declared fn arm's write must be read through the anchored `use`: {r:?}");
+    }
+    // the other orientation (re-export arm writes) and a plain single-arm facade keep reading as before; the pure twins stay pure
+    for p in ["fl32r_e", "fl32fac_e", "fl32sb_e"] {
+        assert!(has(&r, p, "Fs"), "{p}: {r:?}");
+    }
+    for p in ["fl32_q", "fl32fac_q", "fl32sb_q"] {
+        assert!(pure(&r, p), "{p}: {r:?}");
+    }
+}
+
+/// Raw `functions[]` rows of `dir`, optionally chained against report files (`CANDOR_DEPS`).
+fn raw(dir: &Path, deps: &[PathBuf]) -> (Vec<PathBuf>, BTreeMap<String, serde_json::Value>) {
+    let d = std::env::temp_dir().join(format!("candor-floor2-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_candor-scan"));
+    cmd.arg(dir).arg("--out").arg(d.join("r"));
+    for k in ["CANDOR_DEPS", "CANDOR_CONFIG", "CANDOR_POLICY"] {
+        cmd.env_remove(k);
+    }
+    if !deps.is_empty() {
+        cmd.env("CANDOR_DEPS", std::env::join_paths(deps).unwrap());
+    }
+    cmd.env("CANDOR_CACHE_DIR", d.join("c"));
+    let o = cmd.output().expect("run candor-scan");
+    let rc = o.status.code().unwrap_or(-1);
+    assert!(rc == 0 || rc == 1, "scan failed: {}", String::from_utf8_lossy(&o.stderr));
+    let mut reports = Vec::new();
+    let mut rows = BTreeMap::new();
+    for e in std::fs::read_dir(&d).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_file() && p.to_string_lossy().ends_with(".scan.json") {
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+            for f in v["functions"].as_array().unwrap() {
+                rows.insert(f["fn"].as_str().unwrap().to_string(), f.clone());
+            }
+            reports.push(p);
+        }
+    }
+    if reports.is_empty() {
+        // `--out <dir>/r` writes `<dir>/r.<pkg>.scan.json` beside the directory, or inside it: look one level down too
+        for e in std::fs::read_dir(d.join("r")).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.to_string_lossy().ends_with(".scan.json") {
+                let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+                for f in v["functions"].as_array().unwrap() {
+                    rows.insert(f["fn"].as_str().unwrap().to_string(), f.clone());
+                }
+                reports.push(p);
+            }
+        }
+    }
+    (reports, rows)
+}
+
+fn strs(v: &serde_json::Value, k: &str) -> Vec<String> {
+    v[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+#[test]
+fn r1934_a_member_called_on_an_associated_type_of_a_dependency_bound_generic_is_disclosed() {
+    let cell = fx("fl34");
+    // UNCHAINED: the unit carries the dependency in `invisible` and the obligation-1 key, exactly as the qself spelling does
+    let (_, rows) = raw(&cell, &[]);
+    for g in ["g_fl34::assoc2", "g_fl34::assoc_q"] {
+        let r = rows.get(g).unwrap_or_else(|| panic!("{g} must have a row: {rows:?}"));
+        assert_eq!(strs(r, "invisible"), ["fxdep_fl34"], "{g}: {r}");
+        assert_eq!(strs(r, "dispatchesOn"), ["fxdep_fl34#HasA::A::f"], "{g}: {r}");
+    }
+    // two dependency bounds: which trait declares `A` is not known, so the site is hedged with a reason that says so
+    let two = &rows["g_fl34::assoc_two"];
+    assert!(strs(two, "inferred").contains(&"Unknown".to_string()) && strs(two, "unknownWhy").iter().any(|w| w == "dispatch:T::A.f"), "{two}");
+    // CHAINED against the dependency's own report: the join is live and the unit reads Unknown, as the qself spelling does
+    let (dep_reports, _) = raw(&cell.join("fxdep_fl34"), &[]);
+    assert!(!dep_reports.is_empty(), "the dependency must produce a report");
+    let (_, chained) = raw(&cell, &dep_reports);
+    for g in ["g_fl34::assoc2", "g_fl34::assoc_q", "g_fl34::assoc_sup"] {
+        assert!(strs(&chained[g], "inferred").contains(&"Unknown".to_string()), "{g} must not read pure when chained: {}", chained[g]);
+    }
+}
+
+#[test]
+fn r1935_a_method_call_on_a_type_only_hidden_macro_text_declares_is_disclosed() {
+    let r = scan("fl35");
+    for p in ["fl35_let_e", "fl35_ann_e", "fl35_use_e", "fl35_ufcs_e"] {
+        assert!(has(&r, p, "Unknown") && why(&r, p, "macro:module items hidden"), "{p}: {r:?}");
+    }
+    assert!(pure(&r, "fl35_q"), "a type in a visible module the text does not declare stays clean: {r:?}");
+}
