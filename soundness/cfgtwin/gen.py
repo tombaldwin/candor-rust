@@ -1838,7 +1838,51 @@ pub fn la2_localmod_proj_e() { g_la2::<ItE_la2>() }
 pub fn la2_localmod_path_e() { g2_la2::<IdE_la2>() }
 """}, [('la2_localmod_proj_e', 'e', None), ('la2_localmod_path_e', 'e', None)], hdr=False, detail=True,
      note='lane L1a round 2: a supertrait rooted at a module this module declares is local')
-for _c in ('bl1', 'bl1b', 'bl2', 'bl2b', 'la2'):
+# bl7, bl10 (Fable's recheck of round 2, `~/candor-handoff/rust-bound-L1a/fable/fx/`): bl7 — a local `inner::Sup` and a dependency `fxdep::Sup`, with the supertrait
+# reached through a parent glob, a `use super::inner`, a `use .. as` alias, `self::`, a LOCAL module RE-EXPORTING the dependency trait (`_reexp_q`: round 2's
+# remaining fabrication), and a cfg pair; bl10 — two dependency supertraits, only one declaring the member
+cell('bl7', {'main.rs': _ALLOW + """pub mod inner_bl7 { pub trait Sup { fn lsf(); } }
+pub mod via_glob_bl7 { use super::*; pub trait LSubG: inner_bl7::Sup {} }
+pub mod via_mod_use_bl7 { use super::inner_bl7; pub trait LSubM: inner_bl7::Sup {} }
+pub mod via_alias_bl7 { use crate::inner_bl7::Sup as DepLike; pub trait LSubA: DepLike {} }
+pub mod reexp_bl7 { pub use fxdep_bl7::Sup; }
+pub trait LSubR_bl7: reexp_bl7::Sup {}
+pub trait LSubSelf_bl7: self::inner_bl7::Sup {}
+#[cfg(unix)] pub trait LSubC_bl7: fxdep_bl7::Sup {}
+#[cfg(not(unix))] pub trait LSubC_bl7: inner_bl7::Sup {}
+pub struct LocLoud_bl7; impl inner_bl7::Sup for LocLoud_bl7 { fn lsf() { EFF } } impl via_glob_bl7::LSubG for LocLoud_bl7 {} impl via_mod_use_bl7::LSubM for LocLoud_bl7 {} impl via_alias_bl7::LSubA for LocLoud_bl7 {} impl LSubSelf_bl7 for LocLoud_bl7 {}
+pub struct DepQuiet_bl7; impl fxdep_bl7::Sup for DepQuiet_bl7 { fn lsf() {} } impl LSubR_bl7 for DepQuiet_bl7 {} impl LSubC_bl7 for DepQuiet_bl7 {}
+pub struct DepLoud_bl7; impl fxdep_bl7::Sup for DepLoud_bl7 { fn lsf() { EFF } } impl LSubR_bl7 for DepLoud_bl7 {}
+fn g_glob<T: via_glob_bl7::LSubG>() { T::lsf() }
+fn g_moduse<T: via_mod_use_bl7::LSubM>() { T::lsf() }
+fn g_alias<T: via_alias_bl7::LSubA>() { T::lsf() }
+fn g_self<T: LSubSelf_bl7>() { T::lsf() }
+fn g_reexp<T: LSubR_bl7>() { T::lsf() }
+fn g_reexpq<T: LSubR_bl7>() { T::lsf() }
+fn g_cfg<T: LSubC_bl7>() { T::lsf() }
+pub fn bl7_glob_e() { g_glob::<LocLoud_bl7>() }
+pub fn bl7_moduse_e() { g_moduse::<LocLoud_bl7>() }
+pub fn bl7_alias_e() { g_alias::<LocLoud_bl7>() }
+pub fn bl7_self_e() { g_self::<LocLoud_bl7>() }
+pub fn bl7_reexp_e() { g_reexp::<DepLoud_bl7>() }
+pub fn bl7_reexp_q() { g_reexpq::<DepQuiet_bl7>() }
+pub fn bl7_cfg_q() { g_cfg::<DepQuiet_bl7>() }
+"""}, [(n_, n_[-1], None) for n_ in ('bl7_glob_e', 'bl7_moduse_e', 'bl7_alias_e', 'bl7_self_e', 'bl7_reexp_e', 'bl7_reexp_q', 'bl7_cfg_q')],
+     deps={'fxdep_bl7': '{ path = "fxdep_bl7" }'}, extra={'@dep/fxdep_bl7/src/lib.rs': 'pub trait Sup { fn lsf(); }\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_bl7'), hdr=False, detail=True,
+     note='Fable L1a recheck: supertrait spellings through re-exports, globs, aliases, self, cfg')
+cell('bl10', {'main.rs': _ALLOW + """pub trait LSub2_bl10: fxdep_bl10::SupA + fxdep_bl10::SupB {}
+pub struct Loud_bl10; impl fxdep_bl10::SupA for Loud_bl10 { fn sa() { EFF } } impl fxdep_bl10::SupB for Loud_bl10 { fn sb() {} } impl LSub2_bl10 for Loud_bl10 {}
+pub struct Quiet_bl10; impl fxdep_bl10::SupA for Quiet_bl10 { fn sa() {} } impl fxdep_bl10::SupB for Quiet_bl10 { fn sb() { EFF } } impl LSub2_bl10 for Quiet_bl10 {}
+fn g_sa<T: LSub2_bl10>() { T::sa() }
+fn g_saq<T: LSub2_bl10>() { T::sa() }
+pub fn bl10_two_e() { g_sa::<Loud_bl10>() }
+pub fn bl10_two_q() { g_saq::<Quiet_bl10>() }
+"""}, [('bl10_two_e', 'e', None), ('bl10_two_q', 'q', None)],
+     deps={'fxdep_bl10': '{ path = "fxdep_bl10" }'}, extra={'@dep/fxdep_bl10/src/lib.rs': 'pub trait SupA { fn sa(); }\npub trait SupB { fn sb(); }\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_bl10'), hdr=False, detail=True,
+     note='Fable L1a recheck: two dependency supertraits, one declaring the member')
+for _c in ('bl1', 'bl1b', 'bl2', 'bl2b', 'la2', 'bl7', 'bl10'):
     for _p, _, _ in CELLS[_c]['probes']:
         pred(_c, _p, 'record', 'record', 'record')
 

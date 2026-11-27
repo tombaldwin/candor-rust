@@ -678,3 +678,12 @@ bl2b	bl2b_declares_e	record	record	record
 bl2b	bl2b_declares_q	record	record	record
 la2	la2_localmod_proj_e	record	record	record
 la2	la2_localmod_path_e	record	record	record
+bl7	bl7_glob_e	record	record	record
+bl7	bl7_moduse_e	record	record	record
+bl7	bl7_alias_e	record	record	record
+bl7	bl7_self_e	record	record	record
+bl7	bl7_reexp_e	record	record	record
+bl7	bl7_reexp_q	record	record	record
+bl7	bl7_cfg_q	record	record	record
+bl10	bl10_two_e	record	record	record
+bl10	bl10_two_q	record	record	record

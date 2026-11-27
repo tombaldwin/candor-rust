@@ -7569,6 +7569,12 @@ pub(crate) fn collect_decls(
                 }
                 let e = local_traits.entry(t.ident.to_string()).or_default();
                 e.count += 1;
+                // SOUNDNESS R1957/R1958 (round 3) — where this trait is declared, crate-root-absolute (`inner::Sup`)
+                let decl_mod = uses.get(crate::lang::MODPATH_KEY).cloned().unwrap_or_default();
+                let dq = qualify(&decl_mod, &t.ident.to_string());
+                if !e.decl_quals.contains(&dq) {
+                    e.decl_quals.push(dq);
+                }
                 for ti in &t.items {
                     // R1037 — an associated type's bounds (`type Tf: Conv;`).
                     if let syn::TraitItem::Type(at) = ti {
@@ -7629,19 +7635,17 @@ pub(crate) fn collect_decls(
                     }
                     let Some(l) = tb.path.segments.last().map(|x| x.ident.to_string()) else { continue };
                     let w = tb.path.segments.iter().map(|x| x.ident.to_string()).collect::<Vec<_>>().join("::");
-                    let full = if tb.path.leading_colon.is_some() { w } else { crate::lang::expand(&w, uses) };
-                    // a path rooted at an item THIS module declares (`id_private::IdPrivate` through `use id_private::IdPrivate`, the
-                    // 2018 uniform-path rule) is the crate's own: marked `self::` so it never reads as a dependency root
-                    let root = full.split("::").next().unwrap_or("");
-                    let own_item = full.contains("::")
-                        && items.iter().any(|it| match it {
-                            syn::Item::Mod(m) => m.ident == root,
-                            syn::Item::Enum(x) => x.ident == root,
-                            syn::Item::Struct(x) => x.ident == root,
-                            syn::Item::Trait(x) => x.ident == root,
-                            _ => false,
-                        });
-                    let full = if own_item { format!("self::{full}") } else { full };
+                    // round 3 — two readings of the written path, `\u{2}`-joined: as `expand` answers it, and taken RELATIVE to the
+                    // declaring module (the 2018 uniform-path rule: `id_private::IdPrivate` names this module's `id_private`). A
+                    // supertrait is the crate-local trait of its leaf only when one reading names that trait's DECLARATION exactly
+                    // (`super_local`); a re-export, an alias, a glob-reached or otherwise unproven path is not.
+                    let full = if tb.path.leading_colon.is_some() {
+                        w
+                    } else {
+                        let x = crate::lang::expand(&w, uses);
+                        let rel = qualify(&decl_mod, &x);
+                        format!("{x}\u{2}{rel}")
+                    };
                     let pair = (l, full);
                     if !e.super_paths.contains(&pair) {
                         e.super_paths.push(pair);

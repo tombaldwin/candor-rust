@@ -906,11 +906,13 @@ impl<'a> super::CallCollector<'a> {
             }
             let Some(lt) = self.local_traits.get(&t) else { continue };
             for sup in &lt.supertraits {
-                // round 2 — a supertrait the declaration wrote through a DEPENDENCY path is foreign, whatever a local trait is called
-                if let Some(w) = self.super_rooted_away(&t, sup) {
+                // round 3 — a supertrait not PROVEN to be the local trait of its leaf (`super_local`) is foreign unless it is std's
+                if self.local_traits.contains_key(sup) && !self.super_local(&t, sup) {
+                    let w = self.super_written(&t, sup).unwrap_or_default();
                     if !matches!(w.split("::").next(), Some("std" | "core" | "alloc")) {
                         return true;
                     }
+                    continue;
                 }
                 if self.local_traits.contains_key(sup) {
                     stack.push((sup.clone(), d + 1));

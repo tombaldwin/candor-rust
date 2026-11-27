@@ -1834,8 +1834,10 @@ pub(crate) struct LocalTrait {
     pub(crate) assoc_types: std::collections::BTreeMap<String, Vec<String>>,
     /// SOUNDNESS R1957/R1958 (round 2) — each supertrait AS WRITTEN at the declaration, expanded through THAT module's `use`
     /// map: `(leaf, path)` (`("Sup", "fxdep::Sup")`). `supertraits` keeps leaves only, so a dependency or std supertrait that
-    /// shares its leaf with a crate-local trait read as the local one; the path decides its origin by ROOT (`super_rooted_away`).
+    /// shares its leaf with a crate-local trait read as the local one; a supertrait is local only when one reading of its path names a declaration (`super_local`).
     pub(crate) super_paths: Vec<(String, String)>,
+    /// SOUNDNESS R1957/R1958 (round 3) — every declaration of this leaf, by its crate-root-absolute path (`inner::Sup`).
+    pub(crate) decl_quals: Vec<String>,
 }
 
 /// The trait indexes Pass A builds (impl universe, local declarations, dispatch-typed fields),

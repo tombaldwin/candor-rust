@@ -1,0 +1,43 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bl7",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bl7"
+ ],
+ "detail": true,
+ "id": "bl7",
+ "lib": false,
+ "note": "Fable L1a recheck: supertrait spellings through re-exports, globs, aliases, self, cfg",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "bl7_glob_e"
+  },
+  {
+   "kind": "e",
+   "name": "bl7_moduse_e"
+  },
+  {
+   "kind": "e",
+   "name": "bl7_alias_e"
+  },
+  {
+   "kind": "e",
+   "name": "bl7_self_e"
+  },
+  {
+   "kind": "e",
+   "name": "bl7_reexp_e"
+  },
+  {
+   "kind": "q",
+   "name": "bl7_reexp_q"
+  },
+  {
+   "kind": "q",
+   "name": "bl7_cfg_q"
+  }
+ ]
+}

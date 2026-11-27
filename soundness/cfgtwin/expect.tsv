@@ -16,7 +16,11 @@ bl1	bl1_collide_e	Fs	-	-	U{inv=fxdep_bl1;key=fxdep_bl1#Sup::lsf}	U0F0	U0F0	U1F0
 bl1	bl1_collide_e@chained	Fs	-	-	U{inv=fxdep_bl1;key=fxdep_bl1#Sup::lsf}	U0F0	U0F0	U1F0
 bl1	bl1_collide_q	none	-	-	U{inv=fxdep_bl1;key=fxdep_bl1#Sup::lsf}	U0F0	U0F0	U1F0
 bl1	bl1_collide_q@chained	none	-	-	U{inv=fxdep_bl1;key=fxdep_bl1#Sup::lsf}	U0F0	U0F0	U1F0
-bl1b	bl1b_stdcollide_q	none	-	-	-	U0F0	U0F0	U0F0
+bl10	bl10_two_e	Fs	-	-	U{inv=fxdep_bl10;key=fxdep_bl10#SupA::sa,fxdep_bl10#SupB::sa}	U0F0	U0F0	U1F0
+bl10	bl10_two_e@chained	Fs	-	-	U{inv=fxdep_bl10;key=fxdep_bl10#SupA::sa,fxdep_bl10#SupB::sa}	U0F0	U0F0	U1F0
+bl10	bl10_two_q	none	-	-	U{inv=fxdep_bl10;key=fxdep_bl10#SupA::sa,fxdep_bl10#SupB::sa}	U0F0	U0F0	U1F0
+bl10	bl10_two_q@chained	none	-	-	U{inv=fxdep_bl10;key=fxdep_bl10#SupA::sa,fxdep_bl10#SupB::sa}	U0F0	U0F0	U1F0
+bl1b	bl1b_stdcollide_q	none	-	-	U	U0F0	U0F0	U0F0
 bl2	bl2_declares_e	Fs	-	-	U{inv=fxdep_bl2;key=fxdep_bl2#SupD::sf}	U0F0	U0F0	U1F0
 bl2	bl2_declares_e@chained	Fs	-	-	E+U{key=fxdep_bl2#SupD::sf}	U0F0	U0F0	U1F1
 bl2	bl2_inherit_e	Fs	-	-	U{inv=fxdep_bl2;key=fxdep_bl2#SupD::sf}	U0F0	U0F0	U1F0
@@ -27,6 +31,20 @@ bl2b	bl2b_declares_q	none	-	-	U{inv=fxdep_bl2b;key=fxdep_bl2b#SupD::sf}	U0F0	U0F
 bl2b	bl2b_declares_q@chained	none	-	-	E+U{key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F1
 bl2b	bl2b_inherit_e	Fs	-	-	U{inv=fxdep_bl2b;key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F0
 bl2b	bl2b_inherit_e@chained	Fs	-	-	E+U{key=fxdep_bl2b#SupD::sf}	U0F0	U0F0	U1F1
+bl7	bl7_alias_e	Fs	-	-	-	U0F0	U0F0	U0F0
+bl7	bl7_alias_e@chained	Fs	-	-	-	U0F0	U0F0	U0F0
+bl7	bl7_cfg_q	none	-	-	U{key=cf_bl7#inner_bl7::Sup::lsf}	U0F0	U0F0	U1F0
+bl7	bl7_cfg_q@chained	none	-	-	U{key=cf_bl7#inner_bl7::Sup::lsf}	U0F0	U0F0	U1F0
+bl7	bl7_glob_e	Fs	-	-	E{key=cf_bl7#inner_bl7::Sup::lsf}	U0F0	U0F0	U0F1
+bl7	bl7_glob_e@chained	Fs	-	-	E{key=cf_bl7#inner_bl7::Sup::lsf}	U0F0	U0F0	U0F1
+bl7	bl7_moduse_e	Fs	-	-	E{key=cf_bl7#inner_bl7::Sup::lsf}	U0F0	U0F0	U0F1
+bl7	bl7_moduse_e@chained	Fs	-	-	E{key=cf_bl7#inner_bl7::Sup::lsf}	U0F0	U0F0	U0F1
+bl7	bl7_reexp_e	Fs	-	-	U	U0F0	U0F0	U1F0
+bl7	bl7_reexp_e@chained	Fs	-	-	U	U0F0	U0F0	U1F0
+bl7	bl7_reexp_q	none	-	-	U	U0F0	U0F0	U1F0
+bl7	bl7_reexp_q@chained	none	-	-	U	U0F0	U0F0	U1F0
+bl7	bl7_self_e	Fs	-	-	E{key=cf_bl7#inner_bl7::Sup::lsf}	U0F0	U0F0	U0F1
+bl7	bl7_self_e@chained	Fs	-	-	E{key=cf_bl7#inner_bl7::Sup::lsf}	U0F0	U0F0	U0F1
 bm1	bm1_b1_meth_e	Fs	E{key=cf_bm1#Lt::lm}	E{key=cf_bm1#Lt::lm}	E{key=cf_bm1#Lt::lm}	U0F1	U0F1	
 bm1	bm1_b1_meth_e@chained	Fs	E{key=cf_bm1#Lt::lm}	E{key=cf_bm1#Lt::lm}	E{key=cf_bm1#Lt::lm}	U0F1	U0F1	
 bm1	bm1_b1_path_e	Fs	E{key=cf_bm1#Lt::lf}	E{key=cf_bm1#Lt::lf}	E{key=cf_bm1#Lt::lf}	U0F1	U0F1	

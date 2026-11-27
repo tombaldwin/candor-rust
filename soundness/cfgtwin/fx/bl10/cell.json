@@ -1,0 +1,23 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bl10",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bl10"
+ ],
+ "detail": true,
+ "id": "bl10",
+ "lib": false,
+ "note": "Fable L1a recheck: two dependency supertraits, one declaring the member",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "bl10_two_e"
+  },
+  {
+   "kind": "q",
+   "name": "bl10_two_q"
+  }
+ ]
+}

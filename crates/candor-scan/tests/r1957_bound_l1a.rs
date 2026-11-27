@@ -244,3 +244,19 @@ fn round2_a_supertrait_is_classified_by_its_written_root_not_its_leaf() {
         assert!(fs(&c, p), "{p} chained: {:?}", row(&c, p));
     }
 }
+
+#[test]
+fn round3_a_supertrait_is_local_only_when_its_written_path_names_the_declaration() {
+    // Fable bl7: `mod reexp { pub use fxdep::Sup; } trait LSubR: reexp::Sup {}` beside a local `inner::Sup` whose implementor writes. The
+    // path's ROOT is a local module but it NAMES the dependency trait; round 2 read it as the local one and charged an executed-pure probe.
+    let r = cell("bl7");
+    for p in ["bl7_reexp_q", "bl7_reexp_e"] {
+        let x = row(&r, p);
+        assert!(!fs(&r, p) && !x.keys.iter().any(|k| k.contains("inner_bl7")), "{p} charged through the local `inner::Sup`: {x:?}");
+        assert!(unknown(&r, p), "{p} must be disclosed: {x:?}");
+    }
+    // paths that DO name the local declaration keep the resolution: through `self::`, `use super::inner`, and a parent glob
+    for p in ["bl7_self_e", "bl7_moduse_e", "bl7_glob_e"] {
+        assert!(fs(&r, p) && key(&r, p, "cf_bl7#inner_bl7::Sup::lsf"), "{p}: {:?}", row(&r, p));
+    }
+}
