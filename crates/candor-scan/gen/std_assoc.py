@@ -10,7 +10,7 @@ read here from rust-src, never from a list of names.
 usage: std_assoc.py <rust-src library dir>  -> lines, sorted, unique:
     I<TAB><type leaf><TAB><fn name>   a STABLE `pub fn` (any receiver) of an inherent `impl <Type>` block
     T<TAB><fn name>                   a fn declared in a `pub trait` body (any receiver)
-    TS<TAB><fn name><TAB><trait>      a fn declared in a SEALED `pub impl(..) trait` body (R1913)
+    TS<TAB><fn name><TAB><trait><TAB><implementor leaves, or ->  a fn declared in a SEALED `pub impl(..) trait` body (R1913)
 The integer types' inherent fns are written inside `int_impl!`/`uint_impl!`, so every `pub fn` in
 `int_macros.rs` / `uint_macros.rs` is filed under every signed / unsigned integer leaf, and every `pub fn` in a
 `macro_rules!` of `core/src/num/mod.rs` that writes an integer impl (`from_str_int_impl!`) under every integer leaf.
@@ -93,7 +93,10 @@ SYS_DIRS = [os.path.join(lib, 'std', 'src', d) for d in ('sys', 'sys_common')]
 def private_platform(root):
     return any(root == d or root.startswith(d + os.sep) for d in SYS_DIRS)
 
-inh = set(); trait_fns = set(); sealed_fns = set()
+inh = set(); trait_fns = set(); sealed_fns = set(); impls_for = {}
+# SOUNDNESS R1913 round 2 — `impl OsStrExt for OsStr`: the NOMINAL std types a trait is implemented for, so a sealed trait's member is
+# std's for `Type::member` only where Type is one of them (`PathBuf::from_bytes` runs a dependency's impl: OsStrExt is not implemented for PathBuf).
+trait_impl = re.compile(r"(?<![A-Za-z0-9_])impl\s*(?:<[^{};]*?>)?\s*(?:unsafe\s+)?(?:const\s+)?(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)\s*(?:<[^{};]*?>)?\s+for\s+&?\s*(?:'\w+\s+)?(?:mut\s+)?(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)")
 for crate in ('core', 'alloc', 'std'):
     for root, dirs, files in os.walk(os.path.join(lib, crate, 'src')):
         dirs[:] = [d for d in dirs if d not in ('tests', 'benches')]
@@ -125,6 +128,8 @@ for crate in ('core', 'alloc', 'std'):
                     for m in pub_fn.finditer(body):
                         if not unstable(body, m.start()):
                             for l in SIGNED + UNSIGNED: inh.add((l, m.group(1)))
+            for ti in trait_impl.finditer(s):
+                impls_for.setdefault(ti.group(1), set()).add(ti.group(2))
             for m in impl_kw.finditer(s):
                 b = s.find('{', m.end()); semi = s.find(';', m.end())
                 if b < 0 or (0 <= semi < b): continue
@@ -256,4 +261,4 @@ for l, n in sorted(inh):
 for n in sorted(trait_fns):
     print(f"T\t{n}")
 for n, tr in sorted(sealed_fns):
-    print(f"TS\t{n}\t{tr}")
+    print(f"TS\t{n}\t{tr}\t{','.join(sorted(impls_for.get(tr, ()))) or '-'}")

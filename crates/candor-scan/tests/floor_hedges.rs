@@ -313,3 +313,21 @@ fn r1913_a_std_path_call_naming_a_sealed_std_trait_member_the_module_imports_is_
     // a GLOB of the std module is not an explicit import of the trait: the join stays (the conservative direction, as before)
     assert!(inf("c_fl41::glob_q").contains(&"Fs".to_string()), "a glob does not prove the std trait is the one in scope: {chained:?}");
 }
+
+#[test]
+fn r1913_round2_the_withholding_needs_the_call_type_and_the_modules_own_import() {
+    // Fable's `fr13` cell: every `_e` runs the DEPENDENCY's impl (executed write) while a sealed std trait is imported somewhere else — for another TYPE
+    // (`PathBuf`), through a crate `pub use` re-export, in the PARENT module, or in a sibling — and must stay charged chained; the `_q` removal targets run
+    // std's (pure) and must not be.
+    let cell = fx("fr13");
+    let (dep_reports, _) = raw(&cell.join("fxdep_fr13"), &[]);
+    assert!(!dep_reports.is_empty(), "the dependency must produce a report");
+    let (_, chained) = raw(&cell, &dep_reports);
+    let fs = |g: &str| chained.get(g).is_some_and(|r| strs(r, "inferred").contains(&"Fs".to_string()));
+    for g in ["a_fr13::e", "g_fr13::e", "i_fr13::e", "j_fr13::e", "p_fr13::e", "o_fr13::inner_fr13::e", "h_fr13::e"] {
+        assert!(fs(g), "{g}: the dependency's member runs and must be charged: {chained:?}");
+    }
+    for g in ["p_fr13::inner2_fr13::q", "h_fr13::q"] {
+        assert!(!fs(g), "{g}: std's sealed member is imported by THIS module/fn, so the dependency join must not charge it: {chained:?}");
+    }
+}

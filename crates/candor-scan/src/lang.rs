@@ -7179,6 +7179,7 @@ pub(crate) fn collect_root_reexports(items: &[syn::Item], include_tests: bool) -
     // `use`-alias case is deliberate: it is the one with a measured defect and a measured fixture.
     let mut _alts = HashMap::new();
     collect_item_uses(items, include_tests, &mut m, &mut _alts);
+    m.remove(R1913_OWN_KEY); // a module's own imports are not a crate-wide re-export
     m
 }
 
@@ -7320,7 +7321,33 @@ pub(crate) fn collect_item_uses(
             }
         }
     }
+    // SOUNDNESS R1913 — this item list's OWN std-rooted `use` paths (plain, ungated items only: a gated or lifted import is not decided here).
+    let mut own: Vec<String> = Vec::new();
+    for it in items {
+        let syn::Item::Use(u) = it else { continue };
+        if !use_item_applies(u, include_tests) || has_cfg(&u.attrs) {
+            continue;
+        }
+        let mut scratch = HashMap::new();
+        let (mut a2, mut s2) = (HashMap::new(), std::collections::HashSet::new());
+        collect_use(&u.tree, String::new(), &mut scratch, &mut a2, &mut s2);
+        for v in scratch.values() {
+            if matches!(v.split("::").next(), Some("std" | "core" | "alloc")) && !own.contains(v) {
+                own.push(v.clone());
+            }
+        }
+    }
+    if own.is_empty() {
+        out.remove(R1913_OWN_KEY);
+    } else {
+        out.insert(R1913_OWN_KEY.to_string(), own.join("\u{1}"));
+    }
 }
+
+/// SOUNDNESS R1913 — the std-rooted `use` paths THIS item list's own `use` items bind (`\u{1}`-joined), NOT the flattened chain `uses` is: a
+/// re-export alias elsewhere in the crate and an enclosing module's imports do not reach it, so it answers "does THIS module import that
+/// std trait". Reset (not inherited) for every item list.
+pub(crate) const R1913_OWN_KEY: &str = "*r1913own";
 
 /// SOUNDNESS R1710 — the kill switch for resolving a RENAMED `extern crate X as Y;` binding to `X` (every route: the
 /// module's own binding, the crate-root extern prelude, `crate::Y`, `self::Y`, and the re-export table's terminal arm).

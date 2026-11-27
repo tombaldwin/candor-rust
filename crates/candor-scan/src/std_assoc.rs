@@ -15,7 +15,7 @@ struct Tbl {
     inherent: std::collections::HashSet<(&'static str, &'static str)>,
     trait_fns: std::collections::HashSet<&'static str>,
     /// SOUNDNESS R1913 — fn name -> the SEALED std traits (`pub impl(..) trait`) that declare it
-    sealed: std::collections::HashMap<&'static str, Vec<&'static str>>,
+    sealed: std::collections::HashMap<&'static str, Vec<(&'static str, Vec<&'static str>)>>,
 }
 
 fn tbl() -> &'static Tbl {
@@ -31,8 +31,8 @@ fn tbl() -> &'static Tbl {
                 ["T", n] => {
                     t.trait_fns.insert(n);
                 }
-                ["TS", n, tr] => {
-                    t.sealed.entry(n).or_default().push(tr);
+                ["TS", n, tr, impls] => {
+                    t.sealed.entry(n).or_default().push((tr, impls.split(',').filter(|i| *i != "-").collect()));
                 }
                 _ => {}
             }
@@ -59,9 +59,9 @@ pub(crate) fn is_std_trait_fn(name: &str) -> bool {
 }
 
 /// SOUNDNESS R1913 — the SEALED std traits (`pub impl(self) trait CommandExt`, `OsStrExt`, `IsTerminal`, ..) that declare a fn of this
-/// name. Not part of `is_std_trait_fn`: a sealed trait's member is std's only where the trait is IMPORTED, so a name-only withholding
-/// (right for `default`, `from_str`, which std implements for its own types under the prelude or a common import) would hide a
-/// dependency trait's member of the same name wherever only the dependency's trait is in scope.
-pub(crate) fn sealed_std_traits(name: &str) -> &'static [&'static str] {
+/// name, each with the NOMINAL std types it is implemented for (empty when the generator found none). Not part of `is_std_trait_fn`: a
+/// sealed trait's member is std's only where the trait is IMPORTED and the call's TYPE implements it, so a name-only withholding would hide a
+/// dependency trait's member of the same name wherever only the dependency's trait is in scope or the type is another one.
+pub(crate) fn sealed_std_traits(name: &str) -> &[(&'static str, Vec<&'static str>)] {
     tbl().sealed.get(name).map(Vec::as_slice).unwrap_or(&[])
 }

@@ -44,6 +44,7 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev233 (rustagent-r1940, round 2): `uses` gains the module's OWN std-rooted `use` paths (`lang::R1913_OWN_KEY`), which the sealed-trait withholding reads. A rev232 entry lacks it.
     // rev232 (rustagent-r1940, lane rust-r1940-r1913): SOUNDNESS R1940 / R1913 — Pass B's `calls`/`dispatch` gain the path call `T::Item::f()` under a bound written on the
     // projection (`where T::Item: Tr`, `T: Iterator<Item: Tr>`, `Item = X`) and the `<T::Item>::f()` spelling; the std-type path marker (`lazy::STD_PATH_JOIN_MARKER`) is
     // withheld where the module imports a SEALED std trait that declares the member (`std_assoc.tsv` `TS` rows). A rev231 entry holds neither. Mandatory.
@@ -807,7 +808,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev232/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev233/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

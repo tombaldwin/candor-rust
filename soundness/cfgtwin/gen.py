@@ -1035,6 +1035,52 @@ impl Parse for String { fn from_str(_s: &str) -> Self { EFF String::new() } }
 """, id='fl41')}, chain=dict(kind='dep', dep_dir='fxdep_fl41'), hdr=False,
      note='R1913: a sealed std trait declares the member and is IMPORTED -> std runs, the dependency join charges a body that does not run; the dependency trait alone in scope joins')
 
+# fr13: R1913 round 2 (Fable's cell). `Type::member` through a dependency trait with a SEALED std trait imported ELSEWHERE: the type does not implement it (`PathBuf`),
+# the import is a crate re-export or the PARENT module's, or a sibling's. Every `_e` runs the dependency's impl (writes) and must read charged chained; every `_q`
+# runs std's (pure) and the removal targets (`outer_q`, `inner2_q`) must read `-` chained. `sliceidx`/`method`/`ufcs` are the unchanged neighbours.
+cell('fr13', {'main.rs': sub("""use std::path::{Path, PathBuf}; use std::ffi::{OsStr, OsString};
+mod a_{id} { use std::os::unix::ffi::OsStrExt; use fxdep_{id}::FromB; pub fn e() { let _ = std::path::PathBuf::from_bytes(b"x"); } }
+mod b_{id} { use std::slice::SliceIndex; use fxdep_{id}::GetX; pub fn e() { let _ = std::path::PathBuf::get("x"); } }
+mod c_{id} { use std::os::unix::ffi::OsStrExt; use fxdep_{id}::AsB; pub fn e() { let _ = std::path::PathBuf::from("x").as_bytes(); } }
+mod d_{id} { use std::os::unix::ffi::OsStrExt; pub fn e() { let _ = <std::ffi::OsStr as fxdep_{id}::FromBOs>::from_bytes(b"x"); } }
+mod o_{id} { use std::os::unix::ffi::OsStrExt; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); }
+    pub mod inner_{id} { use fxdep_{id}::FromBOs; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); } } }
+mod p_{id} { use fxdep_{id}::FromBOs; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); }
+    pub mod inner2_{id} { use std::os::unix::ffi::OsStrExt; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } } }
+mod prelude_{id} { pub use std::os::unix::ffi::OsStrExt; }
+mod f_{id} { use crate::prelude_{id}::OsStrExt; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod g_{id} { use std::os::unix::ffi::OsStrExt as _; use fxdep_{id}::FromB; pub fn e() { let _ = std::path::PathBuf::from_bytes(b"x"); } }
+mod h_{id} { pub fn q() { use std::os::unix::ffi::OsStrExt; let _ = std::ffi::OsStr::from_bytes(b"x"); } pub fn e() { use fxdep_{id}::FromBOs; let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod i_{id} { use std::os::unix::ffi::OsStringExt; use fxdep_{id}::FromB; pub fn e() { let _ = std::path::PathBuf::from_bytes(b"x"); } }
+mod j_{id} { use fxdep_{id}::FromBOs; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+""", id='fr13')},
+     [('fr13_pathbuf_e', 'e', 'a_fr13::e()'),
+      ('fr13_sliceidx_e', 'e', 'b_fr13::e()'),
+      ('fr13_method_e', 'e', 'c_fr13::e()'),
+      ('fr13_ufcs_e', 'e', 'd_fr13::e()'),
+      ('fr13_outer_q', 'q', 'o_fr13::q()'),
+      ('fr13_inner_e', 'e', 'o_fr13::inner_fr13::e()'),
+      ('fr13_outer2_e', 'e', 'p_fr13::e()'),
+      ('fr13_inner2_q', 'q', 'p_fr13::inner2_fr13::q()'),
+      ('fr13_reexp_q', 'q', 'f_fr13::q()'),
+      ('fr13_alias_e', 'e', 'g_fr13::e()'),
+      ('fr13_fnuse_q', 'q', 'h_fr13::q()'),
+      ('fr13_fnuse_e', 'e', 'h_fr13::e()'),
+      ('fr13_othersealed_e', 'e', 'i_fr13::e()'),
+      ('fr13_deponly_e', 'e', 'j_fr13::e()')],
+     deps={'fxdep_fr13': '{ path = "fxdep_fr13" }'},
+     extra={'@dep/fxdep_fr13/src/lib.rs': sub("""pub trait FromB { fn from_bytes(b: &[u8]) -> Self; }
+impl FromB for std::path::PathBuf { fn from_bytes(_b: &[u8]) -> Self { EFF std::path::PathBuf::new() } }
+pub trait GetX { fn get(s: &str) -> Self; }
+impl GetX for std::path::PathBuf { fn get(_s: &str) -> Self { EFF std::path::PathBuf::new() } }
+pub trait AsB { fn as_bytes(&self) -> Vec<u8>; }
+impl AsB for std::path::PathBuf { fn as_bytes(&self) -> Vec<u8> { EFF Vec::new() } }
+pub trait FromBOs { fn from_bytes(b: &[u8]) -> usize; }
+impl FromBOs for std::ffi::OsStr { fn from_bytes(_b: &[u8]) -> usize { EFF 0 } }
+pub trait Marker {}
+""", id='fr13')}, chain=dict(kind='dep', dep_dir='fxdep_fr13'), hdr=False,
+     note='R1913 round 2: the sealed-trait withholding needs the call TYPE to implement the trait and the trait imported by THIS module (not a re-export, not an ancestor)')
+
 # fl15g: R1915 must not hedge a generic TYPE PARAMETER head (`T::default()`); fl15 above is the module-head population that stays hedged.
 cell('fl15g', {'main.rs': sub("""mod reexp_{id} { pub use fxdep_{id}::*; }
 mod g_{id} {

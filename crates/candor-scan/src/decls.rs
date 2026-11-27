@@ -497,6 +497,7 @@ pub(crate) fn submodule_uses(
     include_tests: bool,
 ) -> HashMap<String, String> {
     let mut subuses = uses.clone();
+    subuses.remove(crate::lang::R1913_OWN_KEY); // R1913 — an enclosing module's imports do not reach the child
     // SOUNDNESS R1682 — the parent's `#[cfg]`-duplicated bindings reach the child as their WHOLE arm set, not the arm the
     // parent's map happens to hold (the one written last). See `lang::collect_item_uses`. The reserved keys are the
     // parent scope's fact and do not travel further; the child's own `use` items record its own.

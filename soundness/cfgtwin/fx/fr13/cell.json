@@ -1,0 +1,70 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_fr13",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_fr13"
+ ],
+ "id": "fr13",
+ "lib": false,
+ "note": "R1913 round 2: the sealed-trait withholding needs the call TYPE to implement the trait and the trait imported by THIS module (not a re-export, not an ancestor)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fr13_pathbuf_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_sliceidx_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_method_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_ufcs_e"
+  },
+  {
+   "kind": "q",
+   "name": "fr13_outer_q"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_inner_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_outer2_e"
+  },
+  {
+   "kind": "q",
+   "name": "fr13_inner2_q"
+  },
+  {
+   "kind": "q",
+   "name": "fr13_reexp_q"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_alias_e"
+  },
+  {
+   "kind": "q",
+   "name": "fr13_fnuse_q"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_fnuse_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_othersealed_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13_deponly_e"
+  }
+ ]
+}

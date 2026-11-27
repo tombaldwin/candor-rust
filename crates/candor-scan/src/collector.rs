@@ -7561,7 +7561,7 @@ impl<'a> CallCollector<'a> {
                 // SOUNDNESS R1913 — a SEALED std trait (`CommandExt`, `OsStrExt`, ..) declares the member and this module IMPORTS it: std's
                 // is the member that runs (a dependency trait of the same name in scope beside it would be E0034), so the join would
                 // charge a body that does not run. Only an explicit import counts; a glob, or no import, leaves the join as it was.
-                if self.r1913_sealed_std_imported(&member) {
+                if self.r1913_sealed_std_imported(&member, &leaf) {
                     if crate::lang::reach_debug() || candor_report::env::trace("CANDOR_R1913_INSTR") {
                         eprintln!("R1913SEALED\t{leaf}::{member}"); // §E1 REACH COUNTER
                     }
@@ -7600,16 +7600,21 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    /// SOUNDNESS R1913 — does this module (or the enclosing fn) import, by its written path, a SEALED std trait declaring `member`?
-    fn r1913_sealed_std_imported(&self, member: &str) -> bool {
+    /// SOUNDNESS R1913 — does THIS module's own `use` (or the fn body's) import, by its written path, a SEALED std trait that declares `member` AND is
+    /// implemented for the call's std TYPE (`ty_leaf`)? Only then is std's member the one that runs.
+    fn r1913_sealed_std_imported(&self, member: &str, ty_leaf: &str) -> bool {
         if candor_report::env::switch("CANDOR_R1913_OFF") {
             return false;
         }
-        crate::std_assoc::sealed_std_traits(member).iter().any(|tr| {
+        // the imports that count: THIS module's own `use` items (`lang::R1913_OWN_KEY`) and this fn body's, never the crate's re-export
+        // alias table or an enclosing module's
+        let own = self.uses.get(crate::lang::R1913_OWN_KEY).map(String::as_str).unwrap_or("");
+        crate::std_assoc::sealed_std_traits(member).iter().any(|(tr, impls)| {
             let tail = format!("::{tr}");
-            self.uses.values().chain(self.local_uses.values()).any(|v| {
-                v.ends_with(&tail) && matches!(v.split("::").next(), Some("std" | "core" | "alloc"))
-            })
+            impls.contains(&ty_leaf)
+                && (own.split('\u{1}').chain(self.local_uses.values().map(String::as_str)).any(|v| {
+                    v.ends_with(&tail) && matches!(v.split("::").next(), Some("std" | "core" | "alloc"))
+                }))
         })
     }
 
