@@ -1,0 +1,10 @@
+[package]
+name = "fxdep_l2wp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_l2wd = { path = "../fxdep_l2wd" }
+fxdep_l2wf = { path = "../fxdep_l2wf" }
+
+[workspace]

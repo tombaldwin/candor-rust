@@ -1,0 +1,7 @@
+[package]
+name = "fxdep_l2kd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_l2kf = { path = "../fxdep_l2kf" }

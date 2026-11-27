@@ -1,0 +1,10 @@
+[package]
+name = "cf_l2k"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_l2kd = { path = "fxdep_l2kd" }
+fxdep_l2kf = { path = "fxdep_l2kf" }
+
+[workspace]

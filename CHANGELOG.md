@@ -11,6 +11,21 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **⚠ Lane rust-bound-l2 (a wire key REWRITE, plus two additive routes): a dependency `dispatchesOn` key names the trait that DECLARES the member
+  (SOUNDNESS R1954, R1966, R1976), a local bound's dependency supertraits are asked beside a dependency bound (R1989), and a bound a dependency's
+  root glob brings is keyed (R1968).** A key minted through a subtrait (`X: dep::SubS`, `X::s_fn()` / `x.s_go()` / `where I::Item: SubS`, with
+  `s_fn` declared by `SubS`'s supertrait `BaseS`) published `dep#SubS::s_fn`, a member `SubS` does not have, so a consumer's implementor (keyed under
+  `BaseS`) never joined it: two hops away a writing implementor read `deny Fs` 0. At publication the owning package's LOCK-PINNED source is read
+  (`DepSigs::declaring_trait_locked`, recorded in `dependencySources`), over supertraits in that package, through a module path, and into another
+  package's lock-pinned source; exactly one declaring trait REPLACES the key (`dep#BaseS::s_fn`, `far#Far::ff`), a key the source proves names no
+  declaring trait is dropped only beside a declaring one for the same member (R1976's `SupA + SupB`), and every doubt (no lock, a macro that may
+  declare a trait, a glob, a re-export, a std supertrait) keeps the key as minted. Only the wire value moves; calls, edges and in-scan hedges are as
+  before. `CANDOR_R1954_OFF=1` restores the keys. R1989: `T: dep::Dt + Lt5` (`Lt5: dep::SupD`) now asks `SupD` too (key, call, and the `dispatch:`
+  hedge where this crate implements it) — the in-crate writing implementor read `[]` chained with `deny Unknown` 0; `CANDOR_R1989_OFF=1`. R1968:
+  under `use dep::*`, the path, qself, projection and local-subtrait method spellings formed nothing (`-` chained); one root glob now keys the bound
+  as `dep#Tr`, any other glob shape discloses `dispatch:<X>.<member>`; `CANDOR_R1968_OFF=1`. New cfgtwin cells `l2k` and `l2w` (with their own
+  `Cargo.lock`): 11 consumer probes go `deny Fs` 0 → 1 two hops away, every pure twin stays 0. Cache rev 243.
+
 - **Lane rust-tooling-l3 (additive, tooling): the package edition is read from the CANONICAL path.** `candor-scan .` run from inside a workspace
   member never reached the workspace root (the ancestors of `.` stop at its first component), so an inherited edition (`edition.workspace = true`)
   stayed undecided and R1951's `@<edition>|` marker was withheld; `scan::package_edition_year`, `scan::package_edition_2018` (lane rust-lc1) and the

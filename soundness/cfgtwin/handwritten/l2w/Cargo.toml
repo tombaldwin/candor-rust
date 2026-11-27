@@ -1,0 +1,12 @@
+[package]
+name = "cf_l2w"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_l2wd = { path = "fxdep_l2wd" }
+fxdep_l2wf = { path = "fxdep_l2wf" }
+fxdep_l2wp = { path = "fxdep_l2wp" }
+
+[workspace]
+exclude = ["fxdep_l2wp"]

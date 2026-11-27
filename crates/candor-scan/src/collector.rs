@@ -12419,12 +12419,45 @@ impl<'a> CallCollector<'a> {
         } else {
             String::new()
         };
-        let full = if written.contains("::") {
+        let mut full = if written.contains("::") {
             written
         } else {
             let unit: syn::Expr = syn::parse_quote!(());
             self.recv_trait_full(args.first().unwrap_or(&unit), tr, leaf)
         };
+        // SOUNDNESS R1968 (bound-dispatch L2) — a bound brought in by a DEPENDENCY's glob (`use dep::*; fn p<X: SubS>() { X::s_fn() }`)
+        // stays the bare leaf, so the path and qself spellings formed nothing: no key, no call, no `invisible`, and a consumer whose
+        // implementor writes read `-` chained, `deny Fs` 0 and `deny Unknown` 0 (EXECUTED cfgtwin `wg5g_suppath`, `_supqself`,
+        // `_flatfn`, on 0.43.0 and main), where the method spelling discloses (R1319's glob half). The glob is asked as rustc asks
+        // it (`expand_scoped`): ONE external glob of a dependency's ROOT is the name's origin, and the key is the root spelling
+        // `dep#SubS::s_fn` (publication then names the declaring trait, `scan::r1954_declaring_keys`). Any other glob shape (a
+        // module's glob, `rayon::prelude::*`, whose spelling is not the owner's namespace; two globs) is the disclosure R1319 makes,
+        // naming the generic, whose member it is whichever bound declares it: `dispatch:<X>.<member>`. ADDITIVE.
+        // `CANDOR_R1968_OFF=1` disables it.
+        if !full.contains("::") && !candor_report::env::switch("CANDOR_R1968_OFF") && !crate::lang::is_std_prelude_trait_leaf(tr) {
+            let e = self.expand_scoped(&full);
+            let root = e.split("::").next().unwrap_or("");
+            if e.split("::").count() == 2 && crate::lang::is_known_dep_crate(root) {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1968KEY\t{}::{leaf}\t{e}", segs.first().map(String::as_str).unwrap_or("")); // §E1 REACH COUNTER
+                }
+                full = e;
+            } else if !std_conventionally_pure(tr, leaf)
+                && self.uses.get(crate::lang::GLOB_KEY).is_some_and(|v| {
+                    v.split('\u{1}').any(|g| {
+                        let g = crate::lang::expand(g, &self.uses);
+                        crate::lang::is_known_dep_crate(g.split("::").next().unwrap_or(""))
+                    })
+                })
+            {
+                let head = if p.qself.is_some() { tr.to_string() } else { segs.first().cloned().unwrap_or_else(|| tr.to_string()) };
+                if crate::lang::reach_debug() {
+                    eprintln!("R1968HEDGE\t{head}::{leaf}"); // §E1 REACH COUNTER
+                }
+                self.mark_unresolved(format!("dispatch:{head}.{leaf}"));
+                return;
+            }
+        }
         self.emit_foreign_member(&full, leaf);
     }
 
@@ -12577,7 +12610,25 @@ impl<'a> CallCollector<'a> {
         }
         let alone = pp.traits.is_empty() && pp.typed.is_empty() && !pp.unnamed && !pp.std_declares;
         if pp.deps.len() == 1 && alone {
-            let full = crate::lang::expand(&pp.deps[0].path, &self.uses);
+            let mut full = crate::lang::expand(&pp.deps[0].path, &self.uses);
+            // SOUNDNESS R1968 (bound-dispatch L2, the projection half) — a projection bound brought in by a dependency's glob
+            // (`use dep::*; .. where I::Item: SubS`) stays the bare leaf and formed nothing (cfgtwin `wg5g_proj_e`: `-` chained over
+            // an executed write, 0.43.0 and main). The one external root glob names it, as `route_foreign_generic_member` reads it;
+            // any other glob shape is this branch's own disclosure below. `CANDOR_R1968_OFF=1` disables it.
+            if !full.contains("::") && !candor_report::env::switch("CANDOR_R1968_OFF") {
+                let e = self.expand_scoped(&full);
+                if e.split("::").count() == 2 && crate::lang::is_known_dep_crate(e.split("::").next().unwrap_or("")) {
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1968PROJ\t{g}::{assoc}::{leaf}\t{e}"); // §E1 REACH COUNTER
+                    }
+                    full = e;
+                } else if self.uses.get(crate::lang::GLOB_KEY).is_some_and(|v| {
+                    v.split('\u{1}').any(|gl| crate::lang::is_known_dep_crate(crate::lang::expand(gl, &self.uses).split("::").next().unwrap_or("")))
+                }) {
+                    self.mark_unresolved(format!("dispatch:{g}::{assoc}.{leaf}"));
+                    return;
+                }
+            }
             self.emit_foreign_member(&full, leaf);
         } else if !pp.deps.is_empty() || pp.unnamed {
             self.mark_unresolved(format!("dispatch:{g}::{assoc}.{leaf}"));
@@ -13153,8 +13204,26 @@ impl<'a> CallCollector<'a> {
         // SOUNDNESS R1958 — whether the member must come from a NON-local supertrait: every candidate is a local trait and none of
         // them (with its local supertraits) declares it. A candidate that does, or a dependency bound beside them, may be the one
         // that runs, and a dependency-supertrait key minted then would name a trait that need not declare the member.
+        //
+        // SOUNDNESS R1989 (bound-dispatch L2) — …and with a NON-local bound beside them (`T: dep::Dt + Lt5`, `Lt5: dep::SupD`,
+        // `T::sf()`). The route keyed only `dep#Dt::sf`, a member `Dt` does not declare, and formed nothing for `Lt5`'s dependency
+        // supertrait: an in-crate implementor whose `sf` writes read `[]` chained, `deny Fs` 0 and `deny Unknown` 0 (EXECUTED cfgtwin
+        // `lb3_depsup_e`, on 0.43.0 and main). Which of the two declares the member is the dependency source's to say, and
+        // publication reads it (`scan::r1954_declaring_keys`: the non-declaring key goes where a declaring one stands beside it);
+        // here every dependency supertrait of a local candidate is asked as R1958 asks it, beside the non-local bound's own key.
+        // ADDITIVE: keys, a crate-qualified call and the `dispatch:` hedge, at a site that formed none for the local bound.
+        // `CANDOR_R1989_OFF=1` restores the all-local rule.
+        // A non-local bound admitted beside them is one that roots at a KNOWN dependency (the manifest's set): a std bound (`T: Default
+        // + LSub`, `T::default()`) may be the one declaring the member, and no key could say so.
+        let r1989_off = candor_report::env::switch("CANDOR_R1989_OFF") || boundset_off();
+        let unit: syn::Expr = syn::parse_quote!(());
+        let dep_bound = |t: &str| {
+            let full = self.recv_trait_full(&unit, t, leaf);
+            full.contains("::") && crate::lang::is_known_dep_crate(full.split("::").next().unwrap_or(""))
+        };
         let r1958_dep_super = !targets.is_empty()
-            && targets.iter().all(|(t, c)| c.is_none() && self.local_traits.contains_key(t))
+            && targets.iter().all(|(t, c)| c.is_none() && (self.local_traits.contains_key(t) || (!r1989_off && dep_bound(t))))
+            && targets.iter().any(|(t, _)| self.local_traits.contains_key(t))
             && !targets.iter().any(|(t, _)| self.trait_declares_member(t, leaf, true) || self.r1685_impl_declared(t, leaf));
         // SOUNDNESS R1964 (bound-dispatch L1b, design N8) — `T::lf()` under `T: dep::Dt + Lt` where the LOCAL bound `Lt` declares `lf`
         // (itself or through a proven-local supertrait): every non-local bound was keyed as well, minting `dep#Dt::lf`, a member `Dt`
@@ -16264,6 +16333,7 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
             }
             if !candor_report::env::switch("CANDOR_R1495_OFF") {
                 let mut extra: Vec<String> = Vec::new();
+                let mut extra_of: Vec<(String, String)> = Vec::new(); // (local trait, its non-local supertrait leaf)
                 // SOUNDNESS R1977 (bound-dispatch L1b) — a supertrait whose written path PROVES it a dependency (or std) trait, though a
                 // crate-local trait shares its LEAF (`trait LSub: fxdep::Sup {}` beside `m::Sup`): every index below is leaf-keyed, so
                 // it was walked as the local trait (and `trait_declares_method` dispatched over the local trait's implementors). It is
@@ -16304,8 +16374,29 @@ impl<'a, 'ast> Visit<'ast> for CallCollector<'a> {
                                     })
                                 {
                                     extra.push(s.clone());
+                                    extra_of.push((t.clone(), s.clone()));
                                 }
                             }
+                        }
+                    }
+                }
+                // SOUNDNESS R1968 (bound-dispatch L2, the method half) — a supertrait written by its DEPENDENCY path
+                // (`trait LSubD: dep::BaseS {}`) in a module that imports the dependency by glob (`use dep::*;`) is asked below by its
+                // LEAF, which the `use` map cannot spell, so `x.s_go()` formed nothing: `-` chained over an executed write (cfgtwin
+                // `wg5g_lsdmeth_e`, 0.43.0 and main; the named-import twin `wg5_lsdmeth_e` reads `E+U`). Where the leaf reading is bare
+                // and the declaration's written path PROVES a dependency, that path is the key's, as R1977's collided arm does.
+                // ADDITIVE. `CANDOR_R1968_OFF=1` disables it.
+                if !candor_report::env::switch("CANDOR_R1968_OFF") && !boundset_off() {
+                    for (t, s) in &extra_of {
+                        if self.recv_trait_full(&node.receiver, s, &leaf).contains("::") {
+                            continue;
+                        }
+                        let dps = self.super_dep_paths(t, s);
+                        if crate::lang::reach_debug() && !dps.is_empty() {
+                            eprintln!("R1968METH\t{t}:{s}.{leaf}\t{}", dps.join(",")); // §E1 REACH COUNTER
+                        }
+                        for full in dps {
+                            self.emit_foreign_member(&full, &leaf);
                         }
                     }
                 }

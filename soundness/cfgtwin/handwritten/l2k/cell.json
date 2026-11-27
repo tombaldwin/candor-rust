@@ -1,0 +1,52 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_l2kd",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_l2kd",
+  "fxdep_l2kf"
+ ],
+ "detail": true,
+ "id": "l2k",
+ "lib": false,
+ "note": "bound-dispatch L2: the published dispatchesOn key of each generic reaching a dependency member through a non-declaring trait, with the cell's own Cargo.lock (the lock-pinned source): flat/own control, a macro-declared supertrait (a doubt: key kept)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l2k_suppath_e"
+  },
+  {
+   "kind": "e",
+   "name": "l2k_supmeth_e"
+  },
+  {
+   "kind": "e",
+   "name": "l2k_proj_e"
+  },
+  {
+   "kind": "e",
+   "name": "l2k_deep_e"
+  },
+  {
+   "kind": "e",
+   "name": "l2k_far_e"
+  },
+  {
+   "kind": "e",
+   "name": "l2k_flat_e"
+  },
+  {
+   "kind": "e",
+   "name": "l2k_made_e"
+  },
+  {
+   "kind": "e",
+   "name": "l2k_two_e"
+  },
+  {
+   "kind": "e",
+   "name": "l2k_mixed_e"
+  }
+ ]
+}

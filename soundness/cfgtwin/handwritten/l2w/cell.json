@@ -1,0 +1,154 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_l2wd",
+  "kind": "twohop",
+  "mid_dir": "fxdep_l2wp"
+ },
+ "deps": [
+  "fxdep_l2wd",
+  "fxdep_l2wf",
+  "fxdep_l2wp"
+ ],
+ "detail": true,
+ "id": "l2w",
+ "lib": false,
+ "note": "bound-dispatch L2 (R1954/R1966/R1976/R1989): consumer -> producer (own Cargo.lock) -> dependency (+ a far package); the producer reaches each member through the trait that does NOT declare it (a dependency supertrait, two levels, a cross-module path, another package, a re-export, two local-trait supertraits, a dependency bound beside a local one); the consumer implements the DECLARING trait effectfully (Mine) or purely (Quiet, Q twins)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "l2w_flat_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_flat_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_supmeth_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_supmeth_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_suppath_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_suppath_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_supqself_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_supqself_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_proj_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_deep_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_deep_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_deeppath_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_deeppath_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_far_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_far_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_farpath_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_farpath_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_reexp_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_reexp_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_two_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_two_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_mixed_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_mixed_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_own_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_own_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_gsuppath_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_gsuppath_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_gsupqself_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_gsupqself_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_gproj_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_gproj_q"
+  },
+  {
+   "kind": "e",
+   "name": "l2w_glsdmeth_e"
+  },
+  {
+   "kind": "q",
+   "name": "l2w_glsdmeth_q"
+  }
+ ]
+}

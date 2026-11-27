@@ -10727,10 +10727,14 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
             // naming a package that does not exist. `deps` is Cargo.toml's real dependency set and is
             // only known here. A key no consumer could ever join is not harmless — it is a name collision
             // waiting for a real crate called `io`.
+            let mut fkeys: Vec<String> = Vec::new();
             for member in &f.foreign_dispatch {
                 if member.split_once('#').is_some_and(|(owner, _)| deps.contains(owner)) {
-                    m.entry(f.qual.clone()).or_default().insert(member.clone());
+                    fkeys.push(member.clone());
                 }
+            }
+            for k in r1954_declaring_keys(&fkeys, &deps, &dep_renames, dir, &r1578_sigs, &f.qual) {
+                m.entry(f.qual.clone()).or_default().insert(k);
             }
         }
         m
@@ -13769,6 +13773,115 @@ pub(crate) fn run_with_deps(dir: &str, prefix: String, want_json: bool, include_
     // The final root scan goes through scan_target so `--deps <workspace>` fans out over members
     // too — the nested-package filter would otherwise prune them all into an empty, gate-passing report.
     scan_target(dir, prefix, want_json, include_tests, policy, baseline, &idx, run)
+}
+
+/// Bound-dispatch L2 (SOUNDNESS R1954 / R1966 / R1976) — A FOREIGN `dispatchesOn` KEY NAMES THE TRAIT THAT DECLARES THE MEMBER.
+///
+/// A dependency key is minted from the trait the CALL went through: the bound (`T: dep::SubD`, `T::sf()` / `t.sm()`), a projection's
+/// bound, a local trait's dependency supertraits. When `sf` is declared by a SUPERTRAIT (`trait SubD: SupD { }`), the key
+/// `dep#SubD::sf` names a member `SubD` does not have, and a consumer publishes its implementor under the declaring trait
+/// (`dep#SupD::sf`): the ⟨0.39⟩ obligation-3 join never matched, so a consumer whose implementor writes a file read `deny Fs` 0
+/// two hops away (EXECUTED cfgtwin `wg5_suppath` / `wg5_supmeth`: `U` chained, `deny Fs` 0, while the `<X as BaseS>::s_fn()`
+/// control keyed `BaseS` reads `E+U`, 1). SPEC §4's value rule (a consumer MUST be able to join it against the producing
+/// package's entry keys) already excludes such a key; R1794 rewrote the LOCAL ones and left this side open.
+///
+/// The authority is the owning package's LOCK-PINNED source (`DepSigs::declaring_trait_locked`, the ⟨0.42⟩ rule; recorded in
+/// `dependencySources`), walked over supertraits within the package and into another package's lock-pinned source:
+///   * the key's trait declares the member, or any doubt — kept, byte for byte;
+///   * exactly ONE supertrait declares it (in a package this crate depends on) — the key is REPLACED by that trait's key,
+///     `<package>#<declaration qual>::<member>`. The old key is unjoinable by the same read (its trait declares no such member,
+///     so no implementor can be keyed under it), so no consumer loses a join;
+///   * PROVABLY no trait in the closure declares it (R549's class) — kept, EXCEPT where this fn carries another key for the same
+///     member that names a declaring trait: the second bound's key beside the right one (R1976: `trait LSub2: dep::SupA +
+///     dep::SupB`, `T::sa()` keyed both). Never the row's only key: what a non-declaring key alone means is R549's, not this.
+///
+/// Only the wire value moves: the calls, edges and the in-scan hedges that read `foreign_dispatch` are untouched.
+/// `CANDOR_R1954_OFF=1` restores the keys as minted.
+fn r1954_declaring_keys(
+    keys: &[String],
+    deps: &HashSet<String>,
+    dep_renames: &HashMap<String, String>,
+    dir: &str,
+    sigs: &std::cell::RefCell<crate::depsig::DepSigs>,
+    qual: &str,
+) -> Vec<String> {
+    use crate::depsig::KeyDecl;
+    if keys.is_empty() || candor_report::env::switch("CANDOR_R1954_OFF") {
+        return keys.to_vec();
+    }
+    // (key, answer): `None` keeps the key unread
+    let mut read: Vec<(String, Option<KeyDecl>)> = Vec::new();
+    for k in keys {
+        let Some((owner, path)) = k.split_once('#') else {
+            read.push((k.clone(), None));
+            continue;
+        };
+        let Some((tpath, member)) = path.rsplit_once("::") else {
+            read.push((k.clone(), None));
+            continue;
+        };
+        // only a plain trait path: a projection key (`HasA::A::f`, a capitalised segment before the trait) and an
+        // alternative-spelling key (a control character) are not a trait's path this reading places
+        let segs: Vec<&str> = tpath.split("::").collect();
+        let plain = !k.chars().any(char::is_control)
+            && segs[..segs.len() - 1].iter().all(|s| s.chars().next().is_some_and(|c| c.is_lowercase() || c == '_'));
+        if !plain {
+            read.push((k.clone(), None));
+            continue;
+        }
+        let real = dep_renames.get(owner).map(String::as_str).unwrap_or(owner);
+        let a = sigs.borrow_mut().declaring_trait_locked(dir, owner, real, tpath, member);
+        read.push((k.clone(), a));
+    }
+    let mut out: Vec<String> = Vec::new();
+    // the members this fn's keys name a DECLARING trait for, after the rewrite
+    let mut declared_members: HashSet<String> = HashSet::new();
+    let mut pending_drop: Vec<(String, String)> = Vec::new(); // (key, member)
+    for (k, a) in &read {
+        let (owner, member) = match k.split_once('#') {
+            Some((o, p)) => (o, p.rsplit("::").next().unwrap_or(p)),
+            None => (k.as_str(), ""),
+        };
+        match a {
+            Some(KeyDecl::Own) => {
+                declared_members.insert(member.to_string());
+                out.push(k.clone());
+            }
+            Some(KeyDecl::Moved(v)) if v.len() == 1 && deps.contains(&v[0].0) => {
+                let nk = format!("{}#{}::{member}", v[0].0, v[0].1);
+                if crate::lang::reach_debug() {
+                    eprintln!("R1954KEY\t{qual}\t{k}\t{nk}"); // §E1 REACH COUNTER (the rewritten key)
+                }
+                let pk = sigs.borrow().l2_packages(owner, v);
+                for p in pk {
+                    sigs.borrow_mut().note_typed(&p);
+                }
+                declared_members.insert(member.to_string());
+                out.push(nk);
+            }
+            Some(KeyDecl::Moved(v)) => {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1954KEEP\t{qual}\t{k}\t{v:?}"); // §E1 REACH COUNTER (several declarers, or one outside the manifest)
+                }
+                out.push(k.clone());
+            }
+            Some(KeyDecl::NotDeclared) => pending_drop.push((k.clone(), member.to_string())),
+            None => out.push(k.clone()),
+        }
+    }
+    for (k, member) in pending_drop {
+        if declared_members.contains(&member) {
+            if crate::lang::reach_debug() {
+                eprintln!("R1976DROP\t{qual}\t{k}"); // §E1 REACH COUNTER (a non-declaring key beside a declaring one)
+            }
+            if let Some(o) = k.split_once('#').map(|x| x.0) {
+                sigs.borrow_mut().note_typed(o);
+            }
+            continue;
+        }
+        out.push(k);
+    }
+    out
 }
 
 /// SOUNDNESS R1743 — A CHAINED ENTRY KEYED UNDER A FACADE, JOINED BY A CONSUMER THAT SPELLS THE OWNER. Every producer that

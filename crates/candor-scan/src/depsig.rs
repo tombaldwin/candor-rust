@@ -522,6 +522,19 @@ fn generic_params(scopes: &[&syn::Generics]) -> HashSet<String> {
         .collect()
 }
 
+/// Bound-dispatch L2 — `SrcIndex::trait_declarers`'s answer for one trait of one source.
+#[derive(Clone, Debug, Default)]
+struct DeclRead {
+    /// the trait asked about, by its crate-root-relative qual (`de::DeserializeOwned`)
+    start: String,
+    /// it declares the member itself
+    own: bool,
+    /// supertraits of THIS source that declare it, by qual
+    found: Vec<String>,
+    /// supertrait paths of another package (`num_traits::Zero`), to be read there
+    ask: Vec<String>,
+}
+
 impl SrcIndex {
     /// SOUNDNESS F1 (Fable REVIEW rust0416) — when `leaf` does NOT declare `member`, is `member` declared by the BOUND of one
     /// of `leaf`'s associated types (`trait Store { type T: Tx; }`, `t.commit()` on `<S as Store>::T`)? That is the shape the
@@ -1016,6 +1029,338 @@ impl SrcIndex {
             }
         }
         answer
+    }
+
+    /// Bound-dispatch L2 (SOUNDNESS R1954 / R1966 / R1976) — WHICH TRAIT OF THIS SOURCE DECLARES `member` when a call reaches it
+    /// through trait `leaf` (declared in module `want_mod` where the leaf is declared more than once)? `trait_answer`'s question
+    /// with the declaring trait's IDENTITY as the answer, under the same proof discipline: `None` is a doubt (an unparsed file or
+    /// a macro that may declare a trait, a macro item in a trait body, a supertrait path this reading cannot place — a glob, a
+    /// re-export, an alias, a generic — or a std supertrait that declares the member, which has no key spelling). Otherwise
+    /// `Some(DeclRead)`: `own` when `leaf` itself declares it; `found` the crate-root-relative quals (`de::Deserialize`) of the
+    /// supertraits of this source that declare it; `ask` the supertrait paths of ANOTHER package (`num_traits::Zero`, as this
+    /// source's `use` map spells them) whose declarations the caller must read in that package. `found` and `ask` both empty is
+    /// a PROOF that no trait in the closure declares the member.
+    fn trait_declarers(&self, leaf: &str, want_mod: Option<&str>, member: &str) -> Option<DeclRead> {
+        let why = |t: &str| {
+            if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
+                eprintln!("DSL2WHY\t{leaf}.{member}\t{t}"); // §E1 — which doubt kept the key
+            }
+        };
+        if self.unparsed.iter().any(|(_, w)| w.contains(leaf)) {
+            why("unparsed");
+            return None;
+        }
+        type Mod = Option<String>;
+        struct V<'a> {
+            stack: Vec<String>,
+            base: Option<&'a str>,
+            reliable: bool,
+            traits: Vec<(Mod, &'a syn::ItemTrait)>,
+            uses: HashMap<Mod, HashMap<String, Vec<String>>>,
+            globs: HashSet<Mod>,
+            mods: HashSet<(Mod, String)>,
+            macro_any: bool,
+            macro_names: HashSet<String>,
+        }
+        impl V<'_> {
+            fn module(&self) -> Mod {
+                if !self.reliable {
+                    return None;
+                }
+                self.base.map(|b| {
+                    let mut v: Vec<&str> = if b.is_empty() { vec![] } else { vec![b] };
+                    v.extend(self.stack.iter().map(String::as_str));
+                    v.join("::")
+                })
+            }
+            fn use_tree(&mut self, t: &syn::UseTree, pre: &mut Vec<String>) {
+                match t {
+                    syn::UseTree::Path(p) => {
+                        pre.push(p.ident.to_string());
+                        self.use_tree(&p.tree, pre);
+                        pre.pop();
+                    }
+                    syn::UseTree::Name(n) => {
+                        let mut v = pre.clone();
+                        let nm = n.ident.to_string();
+                        if nm == "self" {
+                            if let Some(l) = v.last().cloned() {
+                                self.uses.entry(self.module()).or_default().insert(l, v);
+                            }
+                        } else {
+                            v.push(nm.clone());
+                            self.uses.entry(self.module()).or_default().insert(nm, v);
+                        }
+                    }
+                    syn::UseTree::Rename(r) => {
+                        let mut v = pre.clone();
+                        if r.ident != "self" {
+                            v.push(r.ident.to_string());
+                        }
+                        self.uses.entry(self.module()).or_default().insert(r.rename.to_string(), v);
+                    }
+                    syn::UseTree::Glob(_) => {
+                        // a glob of std (prelude-shaped names only, `std_name_provable` guards a local shadow) or of this crate's own
+                        // modules (a local trait of a std name is in `local_names`, same guard) cannot bring ANOTHER package's trait
+                        if !pre.first().is_some_and(|r| matches!(r.as_str(), "std" | "core" | "alloc" | "crate" | "self" | "super")) {
+                            self.globs.insert(self.module());
+                        }
+                    }
+                    syn::UseTree::Group(g) => g.items.iter().for_each(|i| self.use_tree(i, pre)),
+                }
+            }
+            fn mac(&mut self, ts: &proc_macro2::TokenStream) {
+                let toks: Vec<proc_macro2::TokenTree> = ts.clone().into_iter().collect();
+                for (i, t) in toks.iter().enumerate() {
+                    match t {
+                        proc_macro2::TokenTree::Ident(id) if id == "trait" => match toks.get(i + 1) {
+                            Some(proc_macro2::TokenTree::Ident(n)) => {
+                                self.macro_names.insert(n.to_string());
+                            }
+                            Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '$' => self.macro_any = true,
+                            _ => {}
+                        },
+                        proc_macro2::TokenTree::Group(g) => self.mac(&g.stream()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        impl<'a> Visit<'a> for V<'a> {
+            fn visit_item_mod(&mut self, i: &'a syn::ItemMod) {
+                if i.attrs.iter().any(|a| a.path().is_ident("path")) {
+                    self.reliable = false;
+                }
+                self.mods.insert((self.module(), i.ident.to_string()));
+                if i.content.is_some() {
+                    self.stack.push(i.ident.to_string());
+                    syn::visit::visit_item_mod(self, i);
+                    self.stack.pop();
+                }
+            }
+            fn visit_item_trait(&mut self, t: &'a syn::ItemTrait) {
+                self.traits.push((self.module(), t));
+                syn::visit::visit_item_trait(self, t);
+            }
+            fn visit_item_use(&mut self, u: &'a syn::ItemUse) {
+                self.use_tree(&u.tree, &mut Vec::new());
+            }
+            fn visit_item_fn(&mut self, _: &'a syn::ItemFn) {} // an item inside a body is reachable by no path
+            fn visit_impl_item_fn(&mut self, _: &'a syn::ImplItemFn) {}
+            fn visit_macro(&mut self, m: &'a syn::Macro) {
+                self.mac(&m.tokens);
+            }
+            fn visit_item_macro(&mut self, m: &'a syn::ItemMacro) {
+                self.mac(&m.mac.tokens);
+            }
+        }
+        let mut v = V {
+            stack: Vec::new(), base: None, reliable: !self.path_attr, traits: Vec::new(), uses: HashMap::new(),
+            globs: HashSet::new(), mods: HashSet::new(), macro_any: false, macro_names: HashSet::new(),
+        };
+        for (f, m) in self.files.iter().zip(self.file_mods.iter()) {
+            v.base = m.as_deref();
+            v.stack.clear();
+            v.visit_file(f);
+        }
+        // a macro that may declare a trait of any name (`trait $t`) is a doubt about every trait here
+        if v.macro_any {
+            why("macro-any-trait");
+            return None;
+        }
+        let decls = |m: &Mod, l: &str| -> Vec<(Mod, &syn::ItemTrait)> {
+            v.traits.iter().filter(|(tm, t)| t.ident == l && (m.is_none() || tm == m)).map(|(tm, t)| (tm.clone(), *t)).collect()
+        };
+        let qual = |m: &Mod, l: &str| -> Option<String> {
+            m.as_ref().map(|m| if m.is_empty() { l.to_string() } else { format!("{m}::{l}") })
+        };
+        let start = {
+            let all = decls(&None, leaf);
+            match all.len() {
+                0 => {
+                    why("no-decl");
+                    return None; // re-exported from elsewhere, or macro-made: not read here
+                }
+                1 => all[0].clone(),
+                _ => {
+                    let w: Vec<_> = all.into_iter().filter(|(m, _)| m.as_deref() == want_mod).collect();
+                    let [one] = w.as_slice() else {
+                        why("ambiguous-start");
+                        return None;
+                    };
+                    one.clone()
+                }
+            }
+        };
+        enum Res {
+            Here(Mod, String),
+            Ext(String),
+            Std(String),
+        }
+        // one written supertrait path, read in module `m`; `None` a doubt
+        fn resolve(v: &V<'_>, ix: &SrcIndex, m: &Mod, segs: &[String], depth: usize) -> Option<Res> {
+            let (first, last) = (segs.first()?, segs.last()?);
+            if depth > 6 {
+                return None;
+            }
+            let parent = |m: &Mod| -> Mod { m.as_ref().and_then(|m| if m.is_empty() { None } else { Some(m.rsplit_once("::").map(|x| x.0.to_string()).unwrap_or_default()) }) };
+            let join = |base: Mod, mid: &[String]| -> Mod {
+                base.map(|b| {
+                    let mut p: Vec<String> = if b.is_empty() { vec![] } else { vec![b] };
+                    p.extend(mid.iter().cloned());
+                    p.join("::")
+                })
+            };
+            if segs.len() == 1 {
+                if let Some(u) = v.uses.get(m).and_then(|u| u.get(first.as_str())) {
+                    if u.len() == 1 && u[0] == *first {
+                        return None;
+                    }
+                    let u = u.clone();
+                    return resolve(v, ix, m, &u, depth + 1);
+                }
+                if m.is_some() && v.traits.iter().any(|(tm, t)| tm == m && t.ident == first.as_str()) {
+                    return Some(Res::Here(m.clone(), first.clone()));
+                }
+                if v.globs.contains(m) || m.is_none() {
+                    return None; // a glob (or an unplaceable module) may bring any trait of this name
+                }
+                if std_trait_members(first).is_some() && ix.std_name_provable(first) {
+                    return Some(Res::Std(first.clone()));
+                }
+                return None;
+            }
+            let mid = &segs[1..segs.len() - 1];
+            match first.as_str() {
+                "std" | "core" | "alloc" if ix.std_name_provable(first) => Some(Res::Std(last.clone())),
+                "std" | "core" | "alloc" => None,
+                "crate" => Some(Res::Here(join(Some(String::new()), mid), last.clone())),
+                "self" => Some(Res::Here(join(m.clone(), mid), last.clone())),
+                "super" => {
+                    // `super::super::X`
+                    let mut base = parent(m);
+                    let mut rest = &segs[1..];
+                    while rest.first().is_some_and(|s| s == "super") {
+                        base = parent(&base);
+                        rest = &rest[1..];
+                    }
+                    if rest.is_empty() {
+                        return None;
+                    }
+                    Some(Res::Here(join(base, &rest[..rest.len() - 1]), last.clone()))
+                }
+                "Self" => None,
+                f => {
+                    if let Some(u) = v.uses.get(m).and_then(|u| u.get(f)) {
+                        let mut p = u.clone();
+                        p.extend(segs[1..].iter().cloned());
+                        return resolve(v, ix, m, &p, depth + 1);
+                    }
+                    if v.mods.contains(&(m.clone(), f.to_string())) && m.is_some() {
+                        return Some(Res::Here(join(m.clone(), &segs[..segs.len() - 1]), last.clone()));
+                    }
+                    if ix.extern_roots.contains(f) && !ix.local_names.contains(f) {
+                        return Some(Res::Ext(segs.join("::")));
+                    }
+                    None
+                }
+            }
+        }
+        let mut out = DeclRead { start: qual(&start.0, leaf)?, own: false, found: Vec::new(), ask: Vec::new() };
+        let mut work: Vec<((Mod, &syn::ItemTrait), usize)> = vec![(start, 0)];
+        let mut seen: HashSet<(Mod, String)> = HashSet::new();
+        while let Some(((m, t), d)) = work.pop() {
+            if d > 16 || !seen.insert((m.clone(), t.ident.to_string())) {
+                continue;
+            }
+            if v.macro_names.contains(&t.ident.to_string()) {
+                why("macro-trait");
+                return None; // a macro may declare (more of) this trait
+            }
+            let mut declares = false;
+            for it in &t.items {
+                match it {
+                    syn::TraitItem::Fn(f) if f.sig.ident == member => declares = true,
+                    syn::TraitItem::Fn(_) | syn::TraitItem::Const(_) | syn::TraitItem::Type(_) => {}
+                    _ => {
+                        why("macro-item");
+                        return None; // a macro item (or an unparsed one) may declare anything
+                    }
+                }
+            }
+            if declares {
+                if d == 0 {
+                    out.own = true;
+                    return Some(out);
+                }
+                let q = qual(&m, &t.ident.to_string())?;
+                if !out.found.contains(&q) {
+                    out.found.push(q);
+                }
+                continue;
+            }
+            let mut bounds: Vec<&syn::TypeParamBound> = t.supertraits.iter().collect();
+            if let Some(w) = &t.generics.where_clause {
+                for p in &w.predicates {
+                    if let syn::WherePredicate::Type(pt) = p {
+                        if matches!(&pt.bounded_ty, syn::Type::Path(tp) if tp.qself.is_none() && tp.path.is_ident("Self")) {
+                            bounds.extend(pt.bounds.iter());
+                        }
+                    }
+                }
+            }
+            let gp = generic_params(&[&t.generics]);
+            for b in bounds {
+                let syn::TypeParamBound::Trait(tb) = b else { continue };
+                if matches!(tb.modifier, syn::TraitBoundModifier::Maybe(_)) {
+                    continue; // `?Sized`
+                }
+                let segs: Vec<String> = tb.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                if segs.first().is_some_and(|f| gp.contains(f)) {
+                    why("generic-super");
+                    return None;
+                }
+                let r = if tb.path.leading_colon.is_some() {
+                    let f = segs.first()?;
+                    if matches!(f.as_str(), "std" | "core" | "alloc") {
+                        Some(Res::Std(segs.last()?.clone()))
+                    } else {
+                        Some(Res::Ext(segs.join("::")))
+                    }
+                } else {
+                    resolve(&v, self, &m, &segs, 0)
+                };
+                let Some(r) = r else {
+                    why(&format!("unplaced-super:{}", segs.join("::")));
+                    return None;
+                };
+                match r {
+                    Res::Std(l) => match std_trait_has(&l, member, 0) {
+                        Some(false) => {}
+                        a => {
+                            why(&format!("std-super:{l}:{a:?}"));
+                            return None; // std declares it (no key can name a std member), or a std trait this list does not know
+                        }
+                    },
+                    Res::Ext(p) => {
+                        if !out.ask.contains(&p) {
+                            out.ask.push(p);
+                        }
+                    }
+                    Res::Here(hm, hl) => {
+                        // exactly the declaration the path names: a path that names none here is a `pub use` re-export
+                        // (possibly of ANOTHER package's same-leaf trait, Fable `bl7_reexp_q`), never read by its leaf
+                        let mut ds = if hm.is_some() { decls(&hm, &hl) } else { Vec::new() };
+                        if ds.len() != 1 {
+                            why(&format!("super-not-at-path:{hm:?}::{hl}"));
+                            return None;
+                        }
+                        work.push((ds.remove(0), d + 1));
+                    }
+                }
+            }
+        }
+        Some(out)
     }
 
     fn build(src: &Path) -> Option<SrcIndex> {
@@ -1823,6 +2168,23 @@ pub(crate) struct DepSigs {
     facades: HashMap<String, Option<std::rc::Rc<Facade>>>,
     /// SOUNDNESS R1739 — `facade_at` answers per SOURCE DIRECTORY, for `distinct_in_tree` (never for a join)
     facades_at: HashMap<std::path::PathBuf, Option<std::rc::Rc<Facade>>>,
+    /// Bound-dispatch L2 — `declaring_trait_locked` answers, per (alias, trait path, member)
+    l2decl: HashMap<(String, String, String), Option<KeyDecl>>,
+}
+
+/// `DepSigs::l2_read`: (the asked trait declares the member itself, its qual, the declaring traits as `(package, qual)`).
+type L2Read = (bool, String, Vec<(String, String)>);
+
+/// Bound-dispatch L2 (SOUNDNESS R1954 / R1966 / R1976) — what the LOCK-PINNED source of the package a `dispatchesOn` key names
+/// says about the key's trait and member (`DepSigs::declaring_trait_locked`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum KeyDecl {
+    /// the trait the key names declares the member: the key is the declaring trait's
+    Own,
+    /// it does not; these supertraits do, as `(package, crate-root-relative qual)` (`("serde_core", "de::Deserialize")`)
+    Moved(Vec<(String, String)>),
+    /// PROOF: neither the trait nor any trait in its supertrait closure declares the member
+    NotDeclared,
 }
 
 /// SOUNDNESS R1715 — the re-export surface of the package whose source is at `src_dir` (its manifest's `[lib] path`, or
@@ -3576,6 +3938,79 @@ impl DepSigs {
         }
         let _ = v.1;
         Some(false)
+    }
+
+    /// Bound-dispatch L2 (SOUNDNESS R1954 / R1966 / R1976) — WHICH TRAIT DECLARES `member`, for a `dispatchesOn` key minted as
+    /// `<alias>#<trait_path>::<member>`, read from the LOCK-PINNED source of `alias` (the owner's ⟨0.42⟩ rule, as
+    /// `trait_declares_locked`) and, for a supertrait of another package, from THAT package's lock-pinned source (the same
+    /// Cargo.lock). `None` is every doubt (`SrcIndex::trait_declarers`): no lock-pinned source, a source over `TRAIT_SRC_CAP`, a
+    /// trait or supertrait this reading cannot place, a macro that may declare one, a std supertrait that declares the member,
+    /// and a package reached more than three hops away. The packages read are recorded with `note_typed` by the caller.
+    pub(crate) fn declaring_trait_locked(&mut self, dir: &str, alias: &str, real: &str, trait_path: &str, member: &str) -> Option<KeyDecl> {
+        let k = (alias.to_string(), trait_path.to_string(), member.to_string());
+        if let Some(v) = self.l2decl.get(&k) {
+            return v.clone();
+        }
+        let v = self.l2_read(dir, alias, real, trait_path, member, 0).map(|(own, _, found)| {
+            if own {
+                KeyDecl::Own
+            } else if found.is_empty() {
+                KeyDecl::NotDeclared
+            } else {
+                KeyDecl::Moved(found)
+            }
+        });
+        if candor_report::env::trace("CANDOR_DEPSIG_INSTR") {
+            eprintln!("DSL2\t{alias}#{trait_path}::{member}\t{v:?}"); // §E1 REACH COUNTER
+        }
+        self.l2decl.insert(k, v.clone());
+        v
+    }
+
+    /// The packages `declaring_trait_locked` read for one key's answer (the key's own, and every other package it walked into).
+    pub(crate) fn l2_packages(&self, alias: &str, found: &[(String, String)]) -> Vec<String> {
+        let mut v = vec![alias.to_string()];
+        for (p, _) in found {
+            if !v.contains(p) {
+                v.push(p.clone());
+            }
+        }
+        v
+    }
+
+    /// `(own, the asked trait's qual, the declaring traits)` for one package, recursing into `ask`.
+    fn l2_read(&mut self, dir: &str, alias: &str, real: &str, trait_path: &str, member: &str, depth: usize) -> Option<L2Read> {
+        if depth > 3 {
+            return None;
+        }
+        let src = self.lock_source(dir, alias, real)?;
+        if src_bytes(&src.dir) > TRAIT_SRC_CAP && !self.idx.contains_key(src.dir.as_path()) {
+            return None;
+        }
+        let (leaf, want_mod) = match trait_path.rsplit_once("::") {
+            Some((m, l)) => (l, Some(m)),
+            None => (trait_path, None),
+        };
+        let r = self.index(&src.dir)?.trait_declarers(leaf, want_mod, member)?;
+        if r.own {
+            return Some((true, r.start, Vec::new()));
+        }
+        let mut found: Vec<(String, String)> = r.found.iter().map(|q| (alias.to_string(), q.clone())).collect();
+        for p in &r.ask {
+            let (root, rest) = p.split_once("::")?;
+            if root == alias || root == real {
+                return None; // the package naming itself by its crate name: not a path this reading places
+            }
+            let (own, start, sub) = self.l2_read(dir, root, root, rest, member, depth + 1)?;
+            if own {
+                found.push((root.to_string(), start));
+            } else {
+                found.extend(sub);
+            }
+        }
+        found.sort();
+        found.dedup();
+        Some((false, r.start, found))
     }
 
     pub(crate) fn conversion_targets(&mut self, dir: &str, alias: &str, real: &str, callee: &str, pos: usize) -> ConvTargets {
