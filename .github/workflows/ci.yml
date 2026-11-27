@@ -221,6 +221,27 @@ jobs:
       - name: Test (unit + smoke)
         run: cargo test --workspace
 
+      # THE GENERATED STD TABLES MUST REPRODUCE FROM RUST-SRC. `src/std_bounds.tsv` and `src/std_assoc.tsv` are derived from the rust-src of
+      # the toolchain named on their first line (a different toolchain is REFUSED, exit 2, not compared), so this leg installs THAT toolchain
+      # with `rust-src` (ci/std-tables-check.sh) rather than floating `stable`: a stable bump must not turn this red, and a table regenerated on a different std must.
+      # The repo's own `rust-toolchain` (the nightly) still runs the generator's cargo test; `STD_BOUNDS_TOOLCHAIN` only picks the rust-src.
+      # When the tables are regenerated for a newer std, change the version here with them.
+      - name: Std tables reproduce from the pinned rust-src (std_bounds / std_assoc)
+        run: bash ci/std-tables-check.sh
+
+      # The std_assoc generator's own checks must be able to FAIL: each scope row kind (P, G, N, TC) is dropped in turn and the generator must
+      # refuse (exit 3), while the undropped run passes.
+      - name: Std scope table generator selftest (it must be able to FAIL)
+        run: STD_BOUNDS_TOOLCHAIN=1.99.1 bash crates/candor-scan/gen/std_assoc.sh --selftest
+
+      # The cfg-twin matrix is rendered by `gen.py` (generated cells) plus `handwritten/` (verbatim cells); `--check` fails when the checked-in
+      # `fx/` differs from a fresh render, so a lane that edits a fixture only in `fx/` (a render would replace it) is caught here.
+      - name: Attack-matrix fixtures reproduce from their generators (cfgtwin)
+        run: python3 soundness/cfgtwin/gen.py --check
+
+      - name: Attack-matrix fixtures reproduce from their generators (macropath)
+        run: python3 soundness/macropath/gen.py --check
+
       # SPEC §3.1 ⟨0.24⟩'s ACCEPTANCE TEST for `gate --report`, and it is BYTE-LEVEL: the verdict the
       # verb writes over a report MUST be byte-equal to the one `candor-scan --policy` wrote while
       # producing it. It needs BOTH binaries, so it cannot live in `cargo test` (`CARGO_BIN_EXE_*` is
