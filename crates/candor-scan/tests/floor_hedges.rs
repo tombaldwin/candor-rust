@@ -327,9 +327,8 @@ fn r1913_round2_the_withholding_needs_the_call_type_and_the_modules_own_import()
     for g in ["a_fr13::e", "g_fr13::e", "i_fr13::e", "j_fr13::e", "p_fr13::e", "o_fr13::inner_fr13::e", "h_fr13::e"] {
         assert!(fs(g), "{g}: the dependency's member runs and must be charged: {chained:?}");
     }
-    for g in ["p_fr13::inner2_fr13::q"] {
-        assert!(!fs(g), "{g}: std's sealed member is imported by THIS module/fn, so the dependency join must not charge it: {chained:?}");
-    }
+    let g = "p_fr13::inner2_fr13::q";
+    assert!(!fs(g), "{g}: std's sealed member is imported by THIS module, so the dependency join must not charge it: {chained:?}");
 }
 
 #[test]
