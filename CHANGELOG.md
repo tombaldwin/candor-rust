@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **⚠ Lane rust-bound-l3 (2/2, a removal): a GLOB of a std module that brings a sealed trait withholds the dependency join, and the sealed-trait
+  match is by the trait's canonical path (SOUNDNESS R1956, R1963).** `use std::os::unix::ffi::*` / `use std::os::unix::prelude::*` beside a dependency
+  trait no longer charges the dependency's impl for `OsStr::from_bytes` / `OsString::from_vec` / `ExitStatus::from_raw` where std's sealed member
+  runs (pure, executed): the module's OWN glob counts where the generated `G` rows say it brings the trait on every target the module exists on, and
+  the trait is implemented for the call's type by an ungated impl (`TC`). A fn-body, enclosing-module, re-exported, cfg-gated or macro-written glob does
+  not count. The R1913 rows (`TS`, keyed by trait LEAF) are replaced by `TC`/`N`, keyed by the canonical path: unix's and windows' `OsStrExt` are two
+  traits, and the leaf match withheld windows' `encode_wide` under unix's import, where the dependency's runs (a silence on main since R1913; v0.43.0
+  charges it). `CANDOR_R1913_OFF=1` restores every withheld join. New cfgtwin cell `l3g` (executed); `fl41_glob_q` and `bm3_sealed_via_prelude_glob_q`
+  no longer charge. Cache rev242.
+
 - **⚠ Lane rust-bound-l3 (1/2, additive): the std-type path rule decides a std-trait-named member by SCOPE, not by name (SOUNDNESS R1951,
   R1962).** `Ty::m(..)` on a std type with no inherent `m`, where some std trait declares `m`, used to be withheld from the chained dependency join BY
   NAME, so a dependency trait's impl that runs read silent: `String::from_str` with only a dependency `Parse` imported, `Instant::default()` (Default is

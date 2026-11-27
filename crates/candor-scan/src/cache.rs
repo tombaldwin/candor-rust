@@ -44,6 +44,9 @@ thread_local! {
 /// that feeds it changes; the embedded scanner version + include-tests flag make a binary upgrade or a
 /// scope change invalidate every entry automatically. A mismatch on read = full re-derivation.
 pub(crate) fn cache_schema(include_tests: bool) -> String {
+    // rev242 (rustagent-boundl3, 2/2): SOUNDNESS R1956/R1963 — a module's OWN std glob is recorded in `lang::R1913_OWN_KEY` as `<module>::*` and withholds the
+    // std-type path marker where it brings a sealed std trait implemented for the type; the sealed match is by the trait's canonical path. A rev241 entry has no
+    // glob there (an over-charge) and matches a sealed trait by LEAF (a silence for another platform's member). Mandatory.
     // rev241 (rustagent-boundl3): SOUNDNESS R1951/R1962 — Pass B's std-type path marker for a member a std trait declares is decided by SCOPE (a std trait
     // implemented for the type and in scope withholds; none carries the marker, `@<edition>|` when only a later edition's prelude would bring one); a rev240
     // entry withholds it by NAME, the silence this closes. Mandatory.
@@ -821,7 +824,7 @@ pub(crate) fn cache_schema(include_tests: bool) -> String {
     // stop. Discard those wholesale rather than trust the default.
     // rev7: FnInfo gained `ret_bound_type` (⟨typeSurface.returns⟩). A rev6 entry deserializes it as
     // None, which would silently publish an EMPTY type surface off a warm cache.
-    format!("scan-{}/rev241/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
+    format!("scan-{}/rev242/tests={}", env!("CARGO_PKG_VERSION"), include_tests)
 }
 
 /// A stable 64-bit FNV-1a content hash, hex — no extra dependency, deterministic across runs and hosts

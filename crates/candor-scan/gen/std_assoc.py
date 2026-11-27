@@ -10,8 +10,8 @@ read here from rust-src, never from a list of names.
 usage: std_assoc.py <rust-src library dir>  -> lines, sorted, unique:
     I<TAB><type leaf><TAB><fn name>   a STABLE `pub fn` (any receiver) of an inherent `impl <Type>` block
     T<TAB><fn name>                   a fn declared in a `pub trait` body (any receiver)
-    TS<TAB><fn name><TAB><trait><TAB><implementor leaves, or ->  a fn declared in a SEALED `pub impl(..) trait` body (R1913)
-    P/TC/N/G rows                     the std trait scope facts (R1951/R1956, see the block before the output)
+    P/TC/N/G rows                     the std trait scope facts (R1951/R1956, see the block before the output); the R1913 `TS` rows
+                                      (sealed fns keyed by trait LEAF) were replaced by `TC`, keyed by the trait's canonical path
 The integer types' inherent fns are written inside `int_impl!`/`uint_impl!`, so every `pub fn` in
 `int_macros.rs` / `uint_macros.rs` is filed under every signed / unsigned integer leaf, and every `pub fn` in a
 `macro_rules!` of `core/src/num/mod.rs` that writes an integer impl (`from_str_int_impl!`) under every integer leaf.
@@ -525,8 +525,6 @@ for l, n in sorted(inh):
     print(f"I\t{l}\t{n}")
 for n in sorted(trait_fns):
     print(f"T\t{n}")
-for n, tr in sorted(sealed_fns):
-    print(f"TS\t{n}\t{tr}\t{','.join(sorted(impls_for.get(tr, ()))) or '-'}")
 
 for ed, n in sorted(P_rows):
     print(f"P\t{ed}\t{n}")

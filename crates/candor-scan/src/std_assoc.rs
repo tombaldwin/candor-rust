@@ -14,8 +14,14 @@ static TABLE: &str = include_str!("std_assoc.tsv");
 struct Tbl {
     inherent: std::collections::HashSet<(&'static str, &'static str)>,
     trait_fns: std::collections::HashSet<&'static str>,
-    /// SOUNDNESS R1913 — fn name -> the SEALED std traits (`pub impl(..) trait`) that declare it
+    /// SOUNDNESS R1913 / R1956 — fn name -> the SEALED std traits (`pub impl(..) trait`) that declare it, each by its CANONICAL path (the
+    /// declaring module: unix's and windows' `OsStrExt` are two traits with different members), with the std types an ungated stable impl
+    /// in the declaring file implements it for (`TC` rows)
     sealed: std::collections::HashMap<&'static str, Vec<(&'static str, Vec<&'static str>)>>,
+    /// SOUNDNESS R1913 — a path a `use` can name a sealed trait by -> its canonical path (`N` rows)
+    sealed_named: std::collections::HashMap<&'static str, &'static str>,
+    /// SOUNDNESS R1956 — a std module -> the sealed traits `use <module>::*` brings into scope on every target the module exists on (`G` rows)
+    sealed_glob: std::collections::HashMap<&'static str, Vec<&'static str>>,
     /// SOUNDNESS R1951 — trait leaf -> the first edition whose prelude imports it (`P` rows)
     prelude: std::collections::HashMap<&'static str, u16>,
 }
@@ -27,6 +33,8 @@ fn tbl() -> &'static Tbl {
             inherent: Default::default(),
             trait_fns: Default::default(),
             sealed: Default::default(),
+            sealed_named: Default::default(),
+            sealed_glob: Default::default(),
             prelude: Default::default(),
         };
         for l in TABLE.lines().filter(|l| !l.starts_with('#')) {
@@ -38,8 +46,14 @@ fn tbl() -> &'static Tbl {
                 ["T", n] => {
                     t.trait_fns.insert(n);
                 }
-                ["TS", n, tr, impls] => {
+                ["TC", n, tr, impls] => {
                     t.sealed.entry(n).or_default().push((tr, impls.split(',').filter(|i| *i != "-").collect()));
+                }
+                ["N", path, tr] => {
+                    t.sealed_named.insert(path, tr);
+                }
+                ["G", module, tr] => {
+                    t.sealed_glob.entry(module).or_default().push(tr);
                 }
                 ["P", ed, leaf] => {
                     if let Ok(e) = ed.parse::<u16>() {
@@ -72,11 +86,25 @@ pub(crate) fn is_std_trait_fn(name: &str) -> bool {
 }
 
 /// SOUNDNESS R1913 — the SEALED std traits (`pub impl(self) trait CommandExt`, `OsStrExt`, `IsTerminal`, ..) that declare a fn of this
-/// name, each with the NOMINAL std types it is implemented for (empty when the generator found none). Not part of `is_std_trait_fn`: a
-/// sealed trait's member is std's only where the trait is IMPORTED and the call's TYPE implements it, so a name-only withholding would hide a
-/// dependency trait's member of the same name wherever only the dependency's trait is in scope or the type is another one.
+/// name, each by its canonical path and with the NOMINAL std types an ungated, stable impl implements it for (empty when the generator found
+/// none). Not part of `is_std_trait_fn`: a sealed trait's member is std's only where THAT trait is in scope and the call's TYPE implements
+/// it, so a name-only withholding would hide a dependency trait's member of the same name wherever only the dependency's trait is in scope,
+/// the type is another one, or the trait in scope is another platform's trait of the same leaf (windows' `OsStrExt` has no `from_bytes`).
 pub(crate) fn sealed_std_traits(name: &str) -> &[(&'static str, Vec<&'static str>)] {
     tbl().sealed.get(name).map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// SOUNDNESS R1913 — the canonical sealed trait a `use` of this std path names (`std::os::unix::prelude::OsStrExt` ->
+/// `std::os::unix::ffi::os_str::OsStrExt`), or `None` (not a sealed trait, or a path the generator did not see: no withholding).
+pub(crate) fn sealed_named(path: &str) -> Option<&'static str> {
+    tbl().sealed_named.get(path).copied()
+}
+
+/// SOUNDNESS R1956 — the canonical sealed traits `use <module>::*` brings into scope (`std::os::unix::prelude` -> `OsStrExt`, `OsStringExt`,
+/// `CommandExt`, `ExitStatusExt` of unix). Only ungated, stable declarations and re-exports are listed, so the glob brings each on every
+/// target where the module exists — which is every target the importing code compiles on.
+pub(crate) fn sealed_glob(module: &str) -> &[&'static str] {
+    tbl().sealed_glob.get(module).map(Vec::as_slice).unwrap_or(&[])
 }
 
 /// SOUNDNESS R1951 — the first edition (2015, 2021, 2024) whose prelude imports a std trait of this leaf, or `None` (in no prelude). Read
@@ -98,6 +126,20 @@ mod tests {
         assert_eq!(super::prelude_since("Future"), Some(2024));
         assert_eq!(super::prelude_since("FromStr"), None);
         assert_eq!(super::prelude_since("SliceIndex"), None);
+    }
+
+    #[test]
+    fn sealed_traits_are_keyed_by_their_canonical_path() {
+        let unix = "std::os::unix::ffi::os_str::OsStrExt";
+        assert_eq!(super::sealed_named("std::os::unix::ffi::OsStrExt"), Some(unix));
+        assert_eq!(super::sealed_named("std::os::unix::prelude::OsStrExt"), Some(unix));
+        assert_eq!(super::sealed_named("std::os::windows::ffi::OsStrExt"), Some("std::os::windows::ffi::OsStrExt"));
+        assert!(super::sealed_glob("std::os::unix::prelude").contains(&unix));
+        assert!(super::sealed_glob("std::os::unix::ffi").contains(&unix));
+        assert!(!super::sealed_glob("std::os::unix::fs").contains(&unix));
+        // `from_bytes` is unix's OsStrExt's, implemented for OsStr; `encode_wide` is windows' only
+        assert!(super::sealed_std_traits("from_bytes").iter().any(|(t, i)| *t == unix && i.contains(&"OsStr")));
+        assert!(super::sealed_std_traits("encode_wide").iter().all(|(t, _)| *t != unix));
     }
 
     #[test]

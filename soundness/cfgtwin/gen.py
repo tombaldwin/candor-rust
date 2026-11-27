@@ -1962,6 +1962,52 @@ mod b { use std::iter::FromIterator; #[allow(unused_imports)] use DEP::Other; pu
 pub fn l3e_fromiter_2018_e() { a::e() }
 pub fn l3e_fromiter_import_2018_q() { b::q() }
 """, _l3s_dep, 'lane L3, edition 2018: FromIterator is not in the 2018 prelude, so only an import brings the std trait (R1962)', edition='2018')
+_l3g_dep = """pub trait FromB { fn from_bytes(b: &[u8]) -> Self; }
+pub trait FromBOs { fn from_bytes(b: &[u8]) -> usize; }
+pub trait Enc { fn encode_wide(&self) -> usize; }
+pub trait FromRawX { fn from_raw(r: i32) -> Self; }
+pub trait FromV { fn from_vec(v: Vec<u8>) -> Self; }
+impl FromV for std::ffi::OsString { fn from_vec(_v: Vec<u8>) -> Self { EFF std::ffi::OsString::new() } }
+pub trait Marker {}
+impl FromB for std::path::PathBuf { fn from_bytes(_b: &[u8]) -> Self { EFF std::path::PathBuf::new() } }
+impl FromBOs for std::ffi::OsStr { fn from_bytes(_b: &[u8]) -> usize { EFF 0 } }
+impl Enc for std::ffi::OsStr { fn encode_wide(&self) -> usize { EFF 0 } }
+impl FromRawX for std::process::ExitStatus { fn from_raw(_r: i32) -> Self { EFF <std::process::ExitStatus as std::os::unix::process::ExitStatusExt>::from_raw(0) } }
+"""
+bm_cell('l3g', """use std::ffi::{OsStr, OsString};
+mod a { use std::os::unix::ffi::*; #[allow(unused_imports)] use DEP::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod b { use std::os::unix::prelude::*; #[allow(unused_imports)] use DEP::Marker; pub fn q() { let _ = std::ffi::OsString::from_vec(vec![]); } }
+mod c { #[allow(unused_imports)] use std::os::unix::ffi::*; use DEP::FromB; pub fn e() { let _ = std::path::PathBuf::from_bytes(b"x"); } }
+mod d { use DEP::FromBOs; pub fn e() { { #[allow(unused_imports)] use std::os::unix::ffi::*; } let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod e { #[allow(unused_imports)] use std::os::unix::ffi::*; pub mod inner { use DEP::FromBOs; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); } } }
+mod pre { #[allow(unused_imports)] pub use std::os::unix::ffi::*; }
+mod f { use DEP::FromBOs; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod g { use crate::pre::*; #[allow(unused_imports)] use DEP::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod h { #[cfg(not(unix))] use std::os::unix::ffi::*; use DEP::FromBOs; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod i { #[allow(unused_imports)] use std::os::unix::fs::*; use DEP::FromBOs; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod j { #[allow(unused_imports)] use std::os::unix::ffi::OsStrExt; use DEP::Enc; pub fn e() { let _ = std::ffi::OsStr::encode_wide(std::ffi::OsStr::new("x")); } }
+mod k { #[allow(unused_imports)] use std::os::unix::prelude::*; use DEP::Enc; pub fn e() { let _ = std::ffi::OsStr::encode_wide(std::ffi::OsStr::new("x")); } }
+mod l { use std::os::unix::{ffi::*, fs::*}; #[allow(unused_imports)] use DEP::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod m { use std::os::unix::process::*; #[allow(unused_imports)] use DEP::Marker; pub fn q() { let _ = std::process::ExitStatus::from_raw(0); } }
+mod m2 { use DEP::FromRawX; pub fn e() { let _ = std::process::ExitStatus::from_raw(0); } }
+mod n { use ::std::os::unix::ffi::*; #[allow(unused_imports)] use DEP::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+pub fn l3g_glob_ffi_q() { a::q() }
+pub fn l3g_glob_prelude_q() { b::q() }
+pub fn l3g_glob_othertype_e() { c::e() }
+pub fn l3g_glob_block_e() { d::e() }
+pub fn l3g_glob_parent_e() { e::inner::e() }
+pub fn l3g_glob_reexp_elsewhere_e() { f::e() }
+pub fn l3g_glob_localreexp_q() { g::q() }
+pub fn l3g_glob_cfgout_e() { h::e() }
+pub fn l3g_glob_notexported_e() { i::e() }
+pub fn l3g_named_otherplatform_e() { j::e() }
+pub fn l3g_glob_otherplatform_e() { k::e() }
+pub fn l3g_glob_grouped_q() { l::q() }
+pub fn l3g_glob_process_q() { m::q() }
+pub fn l3g_process_deponly_e() { m2::e() }
+pub fn l3g_glob_leadingcolon_q() { n::q() }
+""", _l3g_dep, 'lane L3: a glob of a std module that brings a sealed trait withholds the join where std runs (R1956/R1963); every shape where the dependency runs keeps it')
+
 
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):

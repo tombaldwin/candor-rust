@@ -134,3 +134,37 @@ fn r1951_design_cells_close() {
     let r = chained("fr13", &[]);
     assert!(has(&r, "fr13_sliceidx_e", "Fs"), "{:?}", row(&r, "fr13_sliceidx_e"));
 }
+
+#[test]
+fn r1956_a_glob_of_a_std_module_that_brings_the_sealed_trait_withholds_the_join() {
+    let removed = ["l3g_glob_ffi_q", "l3g_glob_prelude_q", "l3g_glob_grouped_q", "l3g_glob_leadingcolon_q", "l3g_glob_process_q"];
+    // every shape where the DEPENDENCY's member runs keeps the join (each read `-` on the first, name-only R1913 cut or would under a
+    // glob rule that ignored the type, the scope or the trait's platform)
+    let kept = [
+        "l3g_glob_othertype_e",       // OsStrExt is not implemented for PathBuf
+        "l3g_glob_block_e",           // the glob is in an inner block; the call is outside it
+        "l3g_glob_parent_e",          // the glob is the PARENT module's; Rust does not inherit it
+        "l3g_glob_reexp_elsewhere_e", // a `pub use std::os::unix::ffi::*` in another module
+        "l3g_glob_cfgout_e",          // `#[cfg(not(unix))]` on the glob
+        "l3g_glob_notexported_e",     // `std::os::unix::fs::*` does not export OsStrExt
+        "l3g_named_otherplatform_e",  // unix's OsStrExt imported; `encode_wide` is windows' OsStrExt's
+        "l3g_glob_otherplatform_e",   // the same through `std::os::unix::prelude::*`
+        "l3g_process_deponly_e",      // ExitStatus::from_raw with only the dependency's trait
+    ];
+    let r = chained("l3g", &[]);
+    for p in removed {
+        assert!(!has(&r, p, "Fs"), "{p} runs std's (sealed) member: {:?}", row(&r, p));
+    }
+    for p in kept {
+        assert!(has(&r, p, "Fs"), "{p} runs the dependency's member: {:?}", row(&r, p));
+    }
+    for (cell, p) in [("fl41", "fl41_glob_q"), ("bm3", "bm3_sealed_via_prelude_glob_q")] {
+        let r = chained(cell, &[]);
+        assert!(!has(&r, p, "Fs"), "{p}: {:?}", row(&r, p));
+    }
+    // the removal's kill switch restores the join (the over-charge main reads) on every removed probe
+    let r = chained("l3g", &[("CANDOR_R1913_OFF", "1")]);
+    for p in removed {
+        assert!(has(&r, p, "Fs"), "{p} under CANDOR_R1913_OFF: {:?}", row(&r, p));
+    }
+}

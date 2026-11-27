@@ -7649,21 +7649,26 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    /// SOUNDNESS R1913 — does THIS module's own `use` import, by its written path, a SEALED std trait that declares `member` AND is
-    /// implemented for the call's std TYPE (`ty_leaf`)? Only then is std's member the one that runs.
+    /// SOUNDNESS R1913 / R1956 — does THIS module's own `use` bring into scope a SEALED std trait that declares `member` AND is implemented
+    /// for the call's std TYPE (`ty_leaf`) by an ungated impl? Only then is std's member the one that runs (a dependency trait with the same
+    /// member applicable beside it would be rustc E0034). The trait is matched by its CANONICAL path (`std_assoc::sealed_named`): unix's and
+    /// windows' `OsStrExt` are different traits, so a leaf match withheld `OsStr::encode_wide` under unix's import, where the dependency's runs.
+    /// R1956: a GLOB of a std module that brings the trait on every target it exists on (`use std::os::unix::prelude::*`,
+    /// `std::os::unix::ffi::*`; `std_assoc::sealed_glob`) counts like the named import. Only the module's OWN `use` items count
+    /// (`lang::R1913_OWN_KEY`, globs recorded as `<module>::*`) — never a fn body's (`local_uses` is flat over the whole body, so a `use` in
+    /// an inner block, closure or nested fn would cover a call outside it), the crate's re-export alias table or an enclosing module's; a gated
+    /// (`#[cfg]`) or macro-written `use` is not recorded there either. `CANDOR_R1913_OFF` disables the withholding (both halves).
     fn r1913_sealed_std_imported(&self, member: &str, ty_leaf: &str) -> bool {
         if candor_report::env::switch("CANDOR_R1913_OFF") {
             return false;
         }
-        // the imports that count: THIS module's own `use` items (`lang::R1913_OWN_KEY`) ONLY — never a fn body's (`local_uses` is flat over the whole
-        // body, so a `use` in an inner block, closure or nested fn would cover a call outside it), the crate's re-export alias table or an enclosing module's
         let own = self.uses.get(crate::lang::R1913_OWN_KEY).map(String::as_str).unwrap_or("");
         crate::std_assoc::sealed_std_traits(member).iter().any(|(tr, impls)| {
-            let tail = format!("::{tr}");
             impls.contains(&ty_leaf)
-                && (own.split('\u{1}').any(|v| {
-                    v.ends_with(&tail) && matches!(v.split("::").next(), Some("std" | "core" | "alloc"))
-                }))
+                && own.split('\u{1}').any(|v| match v.strip_suffix("::*") {
+                    Some(module) => crate::std_assoc::sealed_glob(module).contains(tr),
+                    None => crate::std_assoc::sealed_named(v) == Some(*tr),
+                })
         })
     }
 

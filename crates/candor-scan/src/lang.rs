@@ -7359,9 +7359,20 @@ pub(crate) fn collect_item_uses(
         let mut scratch = HashMap::new();
         let (mut a2, mut s2) = (HashMap::new(), std::collections::HashSet::new());
         collect_use(&u.tree, String::new(), &mut scratch, &mut a2, &mut s2);
-        for v in scratch.values() {
-            if matches!(v.split("::").next(), Some("std" | "core" | "alloc")) && !own.contains(v) {
-                own.push(v.clone());
+        for (k, v) in &scratch {
+            // SOUNDNESS R1956 — a glob is recorded as `<module>::*` (`ALLGLOB_KEY` holds every glob of the item, `\u{1}`-joined), so the
+            // sealed-trait withholding can tell `use std::os::unix::ffi::*` from `use std::os::unix::ffi;` (a module import brings no trait)
+            let vs: Vec<String> = if k == ALLGLOB_KEY {
+                v.split('\u{1}').map(|g| format!("{g}::*")).collect()
+            } else if k.starts_with('*') {
+                Vec::new()
+            } else {
+                vec![v.clone()]
+            };
+            for v in vs {
+                if matches!(v.split("::").next(), Some("std" | "core" | "alloc")) && !own.contains(&v) {
+                    own.push(v);
+                }
             }
         }
     }

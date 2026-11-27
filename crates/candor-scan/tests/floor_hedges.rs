@@ -310,8 +310,10 @@ fn r1913_a_std_path_call_naming_a_sealed_std_trait_member_the_module_imports_is_
     for g in ["b_fl41::std_q", "d_fl41::alias_q"] {
         assert!(!inf(g).contains(&"Fs".to_string()), "{g}: std's sealed member is the one imported, so the dependency's write must not be charged: {chained:?}");
     }
-    // a GLOB of the std module is not an explicit import of the trait: the join stays (the conservative direction, as before)
-    assert!(inf("c_fl41::glob_q").contains(&"Fs".to_string()), "a glob does not prove the std trait is the one in scope: {chained:?}");
+    // SOUNDNESS R1956 (lane rust-bound-l3) — a GLOB of the std module that brings the sealed trait on every target the module exists on
+    // (`use std::os::unix::ffi::*`, the generated `G` rows) puts std's member in scope as surely as the named import: std's runs (pure, executed),
+    // so the dependency's write is no longer charged. This assertion read the opposite while the glob kept the join (an over-charge).
+    assert!(!inf("c_fl41::glob_q").contains(&"Fs".to_string()), "c_fl41::glob_q: the glob brings std's sealed member: {chained:?}");
 }
 
 #[test]

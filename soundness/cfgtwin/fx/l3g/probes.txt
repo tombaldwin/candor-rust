@@ -1,0 +1,15 @@
+l3g_glob_ffi_q
+l3g_glob_prelude_q
+l3g_glob_othertype_e
+l3g_glob_block_e
+l3g_glob_parent_e
+l3g_glob_reexp_elsewhere_e
+l3g_glob_localreexp_q
+l3g_glob_cfgout_e
+l3g_glob_notexported_e
+l3g_named_otherplatform_e
+l3g_glob_otherplatform_e
+l3g_glob_grouped_q
+l3g_glob_process_q
+l3g_process_deponly_e
+l3g_glob_leadingcolon_q

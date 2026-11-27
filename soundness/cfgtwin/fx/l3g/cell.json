@@ -1,0 +1,75 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_l3g",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_l3g"
+ ],
+ "detail": true,
+ "id": "l3g",
+ "lib": false,
+ "note": "lane L3: a glob of a std module that brings a sealed trait withholds the join where std runs (R1956/R1963); every shape where the dependency runs keeps it",
+ "probes": [
+  {
+   "kind": "q",
+   "name": "l3g_glob_ffi_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3g_glob_prelude_q"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_glob_othertype_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_glob_block_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_glob_parent_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_glob_reexp_elsewhere_e"
+  },
+  {
+   "kind": "q",
+   "name": "l3g_glob_localreexp_q"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_glob_cfgout_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_glob_notexported_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_named_otherplatform_e"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_glob_otherplatform_e"
+  },
+  {
+   "kind": "q",
+   "name": "l3g_glob_grouped_q"
+  },
+  {
+   "kind": "q",
+   "name": "l3g_glob_process_q"
+  },
+  {
+   "kind": "e",
+   "name": "l3g_process_deponly_e"
+  },
+  {
+   "kind": "q",
+   "name": "l3g_glob_leadingcolon_q"
+  }
+ ]
+}
