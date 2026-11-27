@@ -3256,6 +3256,18 @@ pub(crate) fn dep_crates_cell() -> &'static std::sync::RwLock<std::collections::
     DEP_CRATES.get_or_init(|| std::sync::RwLock::new(Default::default()))
 }
 
+/// Does a LEADING `::` in a path name an extern crate (the package is proven edition 2018+)? In edition 2015 it names the crate ROOT,
+/// so a `::m::Sup` there is the crate's own `m`. Installed beside `DEP_CRATES`; `false` (the 2015 reading) wherever no scan installed it.
+static LEADING_COLON_EXTERN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_leading_colon_extern(v: bool) {
+    LEADING_COLON_EXTERN.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn leading_colon_is_extern() -> bool {
+    LEADING_COLON_EXTERN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Is `root` a crate this scan's manifests declare as a dependency (`DEP_CRATES`)?
 pub(crate) fn is_known_dep_crate(root: &str) -> bool {
     dep_crates_cell().read().is_ok_and(|s| s.contains(root))

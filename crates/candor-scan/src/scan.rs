@@ -1556,6 +1556,22 @@ fn build_type_surface(
     candor_report::TypeSurface { returns: map, ..Default::default() }
 }
 
+/// Is the package at `dir` PROVEN edition 2018 or later: the nearest manifest with a `[package]` table at or above it, or — `edition.workspace
+/// = true` — the nearest `[workspace.package]` above that (`rroot::manifest_edition`)? An edition the manifests do not prove reads `false`
+/// (a `[package]` with no `edition` is 2015).
+fn package_edition_2018(dir: &Path) -> bool {
+    let mut inherit = false;
+    for d in dir.ancestors() {
+        let Ok(t) = std::fs::read_to_string(d.join("Cargo.toml")) else { continue };
+        match crate::rroot::manifest_edition(&t, inherit) {
+            crate::rroot::Edition::Skip => {}
+            crate::rroot::Edition::Inherit => inherit = true,
+            crate::rroot::Edition::Is(m) => return m,
+        }
+    }
+    false
+}
+
 /// One crate scan, end to end (parse -> passes -> report -> receipt -> policy gate). Returns the
 /// process exit code. Factored out of `main` so `--deps` can scan a dependency tree IN-PROCESS —
 /// candor-scan's own self-gate (`deny Exec`) rightly forbids the spawn-yourself shortcut.
@@ -2223,6 +2239,8 @@ pub(crate) fn scan_one(dir: &str, opts: ScanOpts, run: &crate::gate::RunToken)
     };
     // SOUNDNESS R1980 (bound-dispatch L1b) — the manifest's dependency names, for deciding a written supertrait path's origin in Pass B
     *crate::lang::dep_crates_cell().write().unwrap() = r1657s2_deps.clone();
+    // SOUNDNESS (lane rust-lc1) — whether a leading `::` in a path names an EXTERN crate (edition 2018+) or the crate root (2015)
+    crate::lang::set_leading_colon_extern(package_edition_2018(Path::new(dir)));
     let r1657s2_names = install_reexport_names(&merged);
     // R99 (SHAPE 2) — SECOND MERGE, over decls whose type paths have been re-expanded against the
     // crate-wide alias map that only exists once the first merge is done. Pass A walks each file in

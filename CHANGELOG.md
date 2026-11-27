@@ -11,6 +11,14 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **⚠ Lane rust-lc1: a supertrait written with a LEADING `::` names an extern crate, never a same-named local module's trait (edition 2018+).** `trait LSub:
+  ::dep::Sup {}` beside a crate-local `pub mod dep { pub trait Sup }` was read as the LOCAL trait (the recorded path dropped its `::` and the origin
+  check matched the local declaration), so an executed-pure program instantiating only the dependency's implementor read `Fs` through the local trait's
+  writing implementor (introduced by L1a, on main only; v0.43.0 reads it silent). It now keys the dependency (`dep#Sup::m`) and discloses `Unknown` with
+  `invisible: [dep]`, like the unprefixed `dep::Sup` spelling. Direction: a local charge can only become a disclosure. Edition 2015 keeps the local reading (a
+  leading `::` is the crate root there; the package's manifest edition decides). New cfgtwin cells `lc1`, `lc1e15` (executed). `CANDOR_BOUNDSET_OFF=1` restores
+  main's reading; cache rev240.
+
 - **⚠ Lane rust-bound-l1b: bound / projection dispatch REMOVALS — a supertrait's origin is decided by what its written path names, and three
   over-wide answers are narrowed (SOUNDNESS R1953, R1964, R1977, R1980; R1975 closed by the same resolution).** A supertrait path is resolved once
   (`super_origins`): a crate-local declaration it names exactly (an alias's target included), a std root, a KNOWN dependency crate (the manifest's

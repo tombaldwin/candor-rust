@@ -1,0 +1,20 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_lc1e15",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_lc1e15"
+ ],
+ "detail": true,
+ "edition": "2015",
+ "id": "lc1e15",
+ "lib": false,
+ "note": "lane rust-lc1, edition 2015: a leading `::` is the crate ROOT, so the local trait is what is named (the local reading must stay)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "lc1e15_root_e"
+  }
+ ]
+}

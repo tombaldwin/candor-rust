@@ -1,0 +1,9 @@
+[package]
+name = "cf_lc1e15"
+version = "0.1.0"
+edition = "2015"
+
+[dependencies]
+fxdep_lc1e15 = { path = "fxdep_lc1e15" }
+
+[workspace]

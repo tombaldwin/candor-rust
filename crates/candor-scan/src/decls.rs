@@ -7639,8 +7639,10 @@ pub(crate) fn collect_decls(
                     // declaring module (the 2018 uniform-path rule: `id_private::IdPrivate` names this module's `id_private`). A
                     // supertrait is the crate-local trait of its leaf only when one reading names that trait's DECLARATION exactly
                     // (`super_local`); a re-export, an alias, a glob-reached or otherwise unproven path is not.
+                    // a LEADING `::` is kept on the recorded path: in edition 2018+ it names an extern crate, never a local module
+                    // (`super_origins`); readers that do not decide the origin strip it (`super_written`, `super_local_r3`).
                     let full = if tb.path.leading_colon.is_some() {
-                        w
+                        format!("::{w}")
                     } else {
                         let x = crate::lang::expand(&w, uses);
                         let rel = qualify(&decl_mod, &x);

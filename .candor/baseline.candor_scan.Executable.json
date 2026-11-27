@@ -17942,6 +17942,28 @@
       ]
     },
     {
+      "fn": "scan::package_edition_2018",
+      "loc": "crates/candor-scan/src/scan.rs:1562:1: 1562:44",
+      "inferred": [
+        "Fs"
+      ],
+      "direct": [
+        "Fs"
+      ],
+      "declared": [],
+      "undeclared": [
+        "Fs"
+      ],
+      "overdeclared": [],
+      "hash": "4018dd54cea55e3f887fcdc6039fd8f6",
+      "fs": [
+        "read"
+      ],
+      "incomplete": [
+        "Fs"
+      ]
+    },
+    {
       "fn": "scan::r1578_resolve",
       "loc": "crates/candor-scan/src/scan.rs:1197:1: 1204:19",
       "inferred": [

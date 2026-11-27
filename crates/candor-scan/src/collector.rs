@@ -10376,6 +10376,7 @@ impl<'a> CallCollector<'a> {
         let (Some(lt), Some(st)) = (self.local_traits.get(t), self.local_traits.get(s)) else { return false };
         lt.super_paths.iter().filter(|(l, _)| l == s).any(|(_, p)| {
             p.split('\u{2}').any(|c| {
+                let c = c.trim_start_matches("::");
                 let c = c.strip_prefix("crate::").unwrap_or(c);
                 st.decl_quals.iter().any(|q| q == c)
             })
@@ -10420,13 +10421,17 @@ impl<'a> CallCollector<'a> {
 
     /// One reading of a written supertrait path (`super_origins`). `None` when undecided.
     fn classify_super_reading(&self, c: &str, depth: usize) -> Option<SupOrigin> {
+        // A LEADING `::` names an EXTERN crate in edition 2018+ (`::fxdep::Sup` is the dependency even beside a local `mod fxdep`), so such a
+        // path is never a crate-local declaration, and never reaches the local re-export / alias table either. In edition 2015 it names the
+        // crate root, so the local reading stands there (`lang::leading_colon_is_extern`, installed from the package's manifest).
+        let extern_root = c.starts_with("::") && crate::lang::leading_colon_is_extern();
         let c = c.trim_start_matches("::");
         let c = c.strip_prefix("crate::").unwrap_or(c);
         if c.is_empty() || depth > 4 {
             return None;
         }
         let leaf = c.rsplit("::").next().unwrap_or(c);
-        if self.local_traits.get(leaf).is_some_and(|lt| lt.decl_quals.iter().any(|q| q == c)) {
+        if !extern_root && self.local_traits.get(leaf).is_some_and(|lt| lt.decl_quals.iter().any(|q| q == c)) {
             return Some(SupOrigin::Local(leaf.to_string()));
         }
         let root = c.split("::").next().unwrap_or("");
@@ -10435,6 +10440,9 @@ impl<'a> CallCollector<'a> {
         }
         if c.contains("::") && !matches!(root, "self" | "super" | "Self") && crate::lang::is_known_dep_crate(root) {
             return Some(SupOrigin::Dep(c.to_string()));
+        }
+        if extern_root {
+            return None;
         }
         // the crate's re-export / alias table, longest prefix first (`reexp::Sup` -> `fxdep::Sup`, `facade::sub::Sup`)
         let segs: Vec<&str> = c.split("::").collect();
@@ -10552,7 +10560,7 @@ impl<'a> CallCollector<'a> {
     /// The written path of `t`'s supertrait `s` as `expand` read it at the declaration (the first reading), when one was recorded.
     fn super_written(&self, t: &str, s: &str) -> Option<String> {
         let lt = self.local_traits.get(t)?;
-        lt.super_paths.iter().find(|(l, _)| l == s).map(|(_, p)| p.split('\u{2}').next().unwrap_or(p).to_string())
+        lt.super_paths.iter().find(|(l, _)| l == s).map(|(_, p)| p.split('\u{2}').next().unwrap_or(p).trim_start_matches("::").to_string())
     }
 
     /// SOUNDNESS R1794 — the LOCAL trait(s) that DECLARE `leaf` for a call dispatched on `tr`: `tr` itself when it does
