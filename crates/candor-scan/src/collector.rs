@@ -10294,6 +10294,34 @@ impl<'a> CallCollector<'a> {
             || lt.supertraits.iter().any(|s| self.trait_declares_method(s, leaf, depth + 1))
     }
 
+    /// SOUNDNESS R1957 — THE MEMBER TEST, parameterised by spelling. A method call can name only a method (`methods`); a PATH call
+    /// (`T::m()`, `S::open(p)`) can name a method OR an associated fn (`assoc`). Both kinds are inherited from a LOCAL supertrait
+    /// exactly alike, but the path arms asked `trait_declares_method` (methods only, with supertraits) or `lt.assoc` (own only), so
+    /// `T::lsf()` under `T: LSub` with `fn lsf();` declared in `LSup` was no member of anything and formed nothing: no edge, no key,
+    /// no `invisible` (EXECUTED `bm1_b5_localsup_e`, `bd1_*`: written, `-` standalone and chained on 0.43.0 and main), while
+    /// `t.lsm()` and `<T as LSup>::lsf()` read `Fs`. `assoc = false` is `trait_declares_method`.
+    pub(crate) fn trait_declares_member(&self, tr: &str, leaf: &str, assoc: bool) -> bool {
+        if self.trait_declares_method(tr, leaf, 0) {
+            return true;
+        }
+        if !assoc {
+            return false;
+        }
+        let mut stack = vec![(tr.to_string(), 0usize)];
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        while let Some((t, d)) = stack.pop() {
+            if d > 16 || !seen.insert(t.clone()) {
+                continue;
+            }
+            let Some(lt) = self.local_traits.get(&t) else { continue };
+            if lt.assoc.contains(leaf) {
+                return true;
+            }
+            stack.extend(lt.supertraits.iter().map(|s| (s.clone(), d + 1)));
+        }
+        false
+    }
+
     /// SOUNDNESS R1794 — the LOCAL trait(s) that DECLARE `leaf` for a call dispatched on `tr`: `tr` itself when it does
     /// (or, with `assoc`, declares it as an associated fn), else the nearest supertraits along every local path that do (a
     /// diamond can name two). `[tr]` when none is found, which is the old key.
@@ -11628,6 +11656,7 @@ impl<'a> CallCollector<'a> {
         // the sub's impls (which provide the super method) resolve it via `trait_impls[tr]` below.
         if !(self.trait_declares_method(tr, leaf, 0)
             || (assoc && lt.assoc.contains(leaf))
+            || self.trait_declares_member(tr, leaf, assoc) // R1957: an associated fn a LOCAL supertrait declares
             || (assoc && self.r1685_impl_declared(tr, leaf))
             || (assoc && self.r1754_mbe_declares(self.r1748_named.as_deref(), tr, leaf)))
         {
@@ -11666,7 +11695,7 @@ impl<'a> CallCollector<'a> {
             && !candor_report::env::switch("CANDOR_R1723_OFF")
         {
             let sups: Vec<String> =
-                lt.supertraits.iter().filter(|s| s.as_str() != tr && self.trait_declares_method(s, leaf, 0)).cloned().collect();
+                lt.supertraits.iter().filter(|s| s.as_str() != tr && self.trait_declares_member(s, leaf, assoc)).cloned().collect();
             for s in sups {
                 if candor_report::env::trace("CANDOR_R1723_INSTR") {
                     eprintln!("R1723BLANKET\t{tr}\t{s}\t{leaf}"); // §E1 REACH COUNTER
@@ -11685,7 +11714,8 @@ impl<'a> CallCollector<'a> {
         // (member declared on the bound trait itself) reads 1 (EXECUTED, Fable's `sup/` fixture, 0.42.0 and main). The
         // dispatch itself is unchanged (`trait_impls[tr]`, every implementor of `tr` implements its supertraits); only the
         // reachability fact is minted on the declaring trait(s). `CANDOR_R1794_OFF=1` restores the bound trait's key.
-        let r1685_branch = !self.trait_declares_method(tr, leaf, 0) && !(assoc && lt.assoc.contains(leaf));
+        let r1685_branch = !self.trait_declares_method(tr, leaf, 0) && !(assoc && lt.assoc.contains(leaf))
+            && !self.trait_declares_member(tr, leaf, assoc);
         let key_traits: Vec<String> = if r1685_branch || candor_report::env::switch("CANDOR_R1794_OFF") {
             vec![tr.to_string()]
         } else {
@@ -12037,6 +12067,62 @@ impl<'a> CallCollector<'a> {
         self.emit_foreign_member(&full, leaf);
     }
 
+    /// SOUNDNESS R1958 — `T::sf()` under `T: LSubD` where the LOCAL trait `LSubD` (and every local supertrait) declares no `sf`, and a
+    /// DEPENDENCY supertrait may (`trait LSubD: dep::SupD {}`). The member test found nothing, so the call formed nothing — no edge,
+    /// no key, no `invisible` — standalone and chained (EXECUTED `bm1_b5_localsub_depsup_e`, wg5 `lsdpath`), while the method
+    /// spelling `t.sm()` keys `dep#SupD::sm` (R1495) and the qself spelling `<T as SupD>::sf()` keys `dep#SupD::sf`. This forms what
+    /// the method spelling forms, by the same rule: each DEPENDENCY supertrait in the local closure is asked through the foreign
+    /// route (its key and crate-qualified call), and where THIS crate implements that supertrait itself, the site discloses the
+    /// dispatch it cannot bound (`dispatch:<Sup>.<member>`, R1495's reason) — where that implementor's impl declares the member (one
+    /// that inherits the dependency's default runs the body the key's join reaches: R1605's spliced `impl EntityTrait`). A std supertrait is not this route's (the std-origin
+    /// arm, a SPEC question). Additive: the site formed nothing. `CANDOR_R1657BP_OFF=1` disables it with the rest of the probe.
+    fn r1958_dep_super_member(
+        &mut self,
+        p: &syn::ExprPath,
+        segs: &[String],
+        tr: &str,
+        leaf: &str,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+    ) {
+        if crate::bound_proj::bp_off() {
+            return;
+        }
+        let mut deps: Vec<String> = Vec::new();
+        let mut stack = vec![(tr.to_string(), 0usize)];
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        while let Some((t, d)) = stack.pop() {
+            if d > 16 || !seen.insert(t.clone()) {
+                continue;
+            }
+            let Some(lt) = self.local_traits.get(&t) else { continue };
+            for s in &lt.supertraits {
+                if self.local_traits.contains_key(s) {
+                    stack.push((s.clone(), d + 1));
+                    continue;
+                }
+                let full = crate::lang::expand(s, &self.uses);
+                let root = full.split("::").next().unwrap_or("");
+                if full.contains("::") && crate::lang::is_dependency_crate_root(root) && !deps.contains(s) {
+                    deps.push(s.clone());
+                }
+            }
+        }
+        if crate::lang::reach_debug() && !deps.is_empty() {
+            eprintln!("R1958DEPSUP\t{tr}::{leaf}\t{}", deps.join(",")); // §E1 REACH COUNTER
+        }
+        for s in &deps {
+            self.route_foreign_generic_member(p, segs, s, leaf, args);
+            // only an in-crate implementor whose impl DECLARES the member (or may: an opaque block) runs a body the dependency's
+            // report cannot answer; one that inherits the dependency's default runs the body the key's join already reaches
+            let own_body = self.trait_impls.get(s.as_str()).is_some_and(|v| {
+                v.iter().any(|ty| !crate::model::impl_does_not_declare(self.impl_members, s, ty.rsplit("::").next().unwrap_or(ty), leaf))
+            });
+            if own_body {
+                self.mark_unresolved(format!("dispatch:{s}.{leaf}"));
+            }
+        }
+    }
+
     /// The ⟨0.39⟩ obligation-1 key and the crate-qualified call for a member `leaf` written under the dependency path `full`
     /// (`dep::Tr`, or `dep::Tr::Assoc` for a member of an associated type). Nothing is formed for a path that is not a dependency's.
     fn emit_foreign_member(&mut self, full: &str, leaf: &str) {
@@ -12066,8 +12152,22 @@ impl<'a> CallCollector<'a> {
     /// list is unknown — is keyed like the qself spelling `<T::Item as dep::Tr>::f()` when it is the one bound that could declare `f`,
     /// else disclosed as `dispatch:<T>::<Item>.<f>` (R1934's reason). Additive: it only adds edges, keys and hedges to a site that formed none.
     /// `CANDOR_R1657BP_OFF=1` disables it with the rest of the probe.
-    fn r1940_projection_bounds(&mut self, g: &str, assoc: &str, leaf: &str, targets: &mut Vec<(String, Option<String>)>) {
-        let pp = self.bp_path_projection(g, assoc, leaf);
+    ///
+    /// SOUNDNESS R1961 — a written binding to a STD type (`T: Iterator<Item = String>`, `T::Item::f()`) is the call `String::f()`, and
+    /// a dependency trait in scope may be what runs it. The typed call alone is std's own by the classifier's rule, so the site formed
+    /// nothing a chained join could answer, where the concrete spelling `String::f()` carries R1757's join marker (EXECUTED
+    /// `bm2_bind_stdty_scope_e`). The binding is now asked of that route too, with the call's arguments, under every one of its own
+    /// rules (an inherent, a std-trait name, a sealed import, `CANDOR_R1757_OFF`). Unchained the marker adds nothing.
+    fn r1940_projection_bounds(
+        &mut self,
+        g: &str,
+        via: Option<&str>,
+        assoc: &str,
+        leaf: &str,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+        targets: &mut Vec<(String, Option<String>)>,
+    ) {
+        let pp = self.bp_path_projection(g, via, assoc, leaf);
         if crate::lang::reach_debug() {
             eprintln!("R1940PROJ\t{g}::{assoc}::{leaf}\ttyped={}\tlocal={}\tdeps={}\tunnamed={}", pp.typed.len(), pp.traits.len(), pp.deps.len(), pp.unnamed); // §E1 REACH COUNTER
         }
@@ -12075,6 +12175,12 @@ impl<'a> CallCollector<'a> {
             self.calls.push(Call { sp: None, assoc_via: None, cside: None, prov: None, exact_ty: None, recv_form: 0, dot: false, argc: 0, entropy_arg: false,
                 path: crate::lang::alias_join(t, &[leaf]), leaf: leaf.to_string(), str_arg: None, typed: true, method: true,
                 is_macro: false, path_lits_partial: false, path_lit2: None });
+            if let Ok(ep) = syn::parse_str::<syn::ExprPath>(&format!("{t}::{leaf}")) {
+                if crate::lang::reach_debug() {
+                    eprintln!("R1961BIND\t{g}::{assoc}::{leaf}\t{t}"); // §E1 REACH COUNTER (asked; R1757SITE counts what it forms)
+                }
+                self.r1757_std_type_dep_path(&ep, args);
+            }
         }
         for t in &pp.traits {
             if !targets.iter().any(|(x, c)| x == t && c.is_none()) {
@@ -12319,6 +12425,20 @@ impl<'a> CallCollector<'a> {
         args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
         str_arg: Option<String>,
     ) {
+        self.route_trait_member_path_via(p, path, leaf, args, str_arg, None);
+    }
+
+    /// `via`: the trait a QUALIFIED projection was written through (`<T as HasL>::A::lf()` re-routed as `T::A::lf()` with
+    /// `via = HasL`, SOUNDNESS R1959): the projection's declared bounds are read off that bound of `T` only.
+    fn route_trait_member_path_via(
+        &mut self,
+        p: &syn::ExprPath,
+        path: &str,
+        leaf: &str,
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+        str_arg: Option<String>,
+        via: Option<String>,
+    ) {
         // The WRITTEN segments, unless the callee is a one-segment binding the caller already resolved
         // through `fn_alias` (`let f = Dsl::limit; f(s)`) — then the resolved path is what was written.
         let segs: Vec<String> = if p.path.segments.len() >= 2 || p.qself.is_some() {
@@ -12339,6 +12459,40 @@ impl<'a> CallCollector<'a> {
                     let leaf_id = &p.path.segments[0].ident;
                     let np: syn::ExprPath = syn::parse_quote!(#a::#b::#leaf_id);
                     self.route_trait_member_path(&np, &format!("{a}::{b}::{leaf_id}"), leaf, args, str_arg);
+                    return;
+                }
+            }
+        }
+        // SOUNDNESS R1959 — `<T as HasL>::A::lf()`: the QUALIFIED projection, one segment past the trait, is the same call as
+        // `T::A::lf()` with the projection read through `HasL`. The qself arm below took the segment before the member (`A`) for the
+        // trait, so for a crate-local or std `HasL` it formed nothing — no edge, no key, no `invisible` — while `T::A::lf()` and
+        // `<T::A as Lt>::lf()` read `Fs` (EXECUTED `bm2_localdecl_qa_e`, `wg1_qa_e`: written, `-` standalone and chained on 0.43.0 and
+        // main). Re-routed as the path spelling with `via`. A DEPENDENCY `HasL` is left to the qself arm, which already mints
+        // `dep#HasL::A::lf` through the written path (the trait that declares `A`). `CANDOR_R1657BP_OFF=1` disables it.
+        if let Some(q) = p.qself.as_ref().filter(|q| q.position >= 1 && p.path.segments.len() == q.position + 2) {
+            let g = match &*q.ty {
+                syn::Type::Path(tp) if tp.qself.is_none() => tp.path.get_ident().map(|i| i.to_string()),
+                _ => None,
+            };
+            let all_plain = p.path.segments.iter().skip(q.position).all(|s| s.arguments.is_none());
+            if let Some(g) = g.filter(|g| {
+                all_plain
+                    && !crate::bound_proj::bp_off()
+                    && (self.generic_bounds.contains_key(g) || self.impl_generic_bounds.contains_key(g))
+            }) {
+                let via_written = segs[..q.position].join("::");
+                let via_full = crate::lang::expand(&via_written, &self.uses);
+                let via_dep = via_full.contains("::")
+                    && crate::lang::is_dependency_crate_root(via_full.split("::").next().unwrap_or(""));
+                if !via_dep {
+                    let via_leaf = segs[q.position - 1].clone();
+                    let gi = syn::Ident::new(&g, proc_macro2::Span::call_site());
+                    let (a, m) = (&p.path.segments[q.position].ident, &p.path.segments[q.position + 1].ident);
+                    let np: syn::ExprPath = syn::parse_quote!(#gi::#a::#m);
+                    if crate::lang::reach_debug() {
+                        eprintln!("R1959QA\t{g}::{a}::{m}\tvia={via_leaf}"); // §E1 REACH COUNTER
+                    }
+                    self.route_trait_member_path_via(&np, &format!("{g}::{a}::{m}"), leaf, args, str_arg, Some(via_leaf));
                     return;
                 }
             }
@@ -12403,9 +12557,15 @@ impl<'a> CallCollector<'a> {
             // and a wider set (every local trait declaring `conv`) would charge an unrelated trait's impls:
             // that case is DISCLOSED instead (the call names a body this scan cannot pick).
             let assoc = &segs[1];
+            // R1959 — written through a trait (`<T as HasL>::A`), that trait declares `A` (rustc rejects the qualified spelling
+            // through a trait that does not, E0576), whether or not it is a DIRECT bound of `T` (`T: Sub`, `Sub: HasL`)
+            let via_bounds: Vec<String> = match &via {
+                Some(v) => vec![v.clone()],
+                None => generic(self, &segs[0]).unwrap_or_default(),
+            };
             let mut ts: Vec<String> = Vec::new();
-            for b in generic(self, &segs[0]).unwrap_or_default() {
-                if let Some(lt) = self.local_traits.get(&b) {
+            for b in &via_bounds {
+                if let Some(lt) = self.local_traits.get(b) {
                     for l in lt.assoc_types.get(assoc).into_iter().flatten() {
                         if !ts.contains(l) {
                             ts.push(l.clone());
@@ -12413,16 +12573,16 @@ impl<'a> CallCollector<'a> {
                     }
                 }
             }
-            let local_bound = generic(self, &segs[0]).unwrap_or_default().iter().any(|b| self.local_traits.contains_key(b));
+            let local_bound = via_bounds.iter().any(|b| self.local_traits.contains_key(b));
             if ts.is_empty() && local_bound {
                 self.mark_unresolved(format!("dispatch:{}::{assoc}.{leaf}", segs[0]));
-            } else if ts.is_empty() {
+            } else if ts.is_empty() && via.is_none() {
                 self.edge_dep_bound_projection(&segs[0], assoc, leaf);
             }
             for t in ts {
                 targets.push((t, None));
             }
-            self.r1940_projection_bounds(&segs[0], assoc, leaf, &mut targets);
+            self.r1940_projection_bounds(&segs[0], via.as_deref(), assoc, leaf, args, &mut targets);
         }
         if targets.is_empty() && p.qself.is_none() {
             // `Tr::m(x)` (or `Self::m(x)` in a default body, which `expand` has already turned into the
@@ -12602,6 +12762,12 @@ impl<'a> CallCollector<'a> {
                 }
             }
         }
+        // SOUNDNESS R1958 — whether the member must come from a NON-local supertrait: every candidate is a local trait and none of
+        // them (with its local supertraits) declares it. A candidate that does, or a dependency bound beside them, may be the one
+        // that runs, and a dependency-supertrait key minted then would name a trait that need not declare the member.
+        let r1958_dep_super = !targets.is_empty()
+            && targets.iter().all(|(t, c)| c.is_none() && self.local_traits.contains_key(t))
+            && !targets.iter().any(|(t, _)| self.trait_declares_member(t, leaf, true) || self.r1685_impl_declared(t, leaf));
         for (tr, concrete) in targets {
             if concrete.is_none() && self.local_traits.get(&tr).is_none() {
                 self.route_foreign_generic_member(p, &segs, &tr, leaf, args);
@@ -12611,8 +12777,15 @@ impl<'a> CallCollector<'a> {
             let is_method = self.trait_declares_method(&tr, leaf, 0)
                 || self.r1685_impl_declared(&tr, leaf)
                 || self.r1754_mbe_declares(named.get(&tr).cloned().flatten().as_deref(), &tr, leaf);
-            let is_assoc = lt.assoc.contains(leaf);
+            // SOUNDNESS R1957 — an associated fn a LOCAL SUPERTRAIT declares is this bound's member too (`T::lsf()` under `T: LSub`).
+            let is_assoc = lt.assoc.contains(leaf) || self.trait_declares_member(&tr, leaf, true);
+            if !is_method && is_assoc && !lt.assoc.contains(leaf) && crate::lang::reach_debug() {
+                eprintln!("R1957SUP\t{tr}::{leaf}"); // §E1 REACH COUNTER (the changed branch only)
+            }
             if !is_method && !is_assoc {
+                if r1958_dep_super && p.qself.is_none() && segs.len() >= 2 && generic(self, &segs[0]).is_some() {
+                    self.r1958_dep_super_member(p, &segs, &tr, leaf, args);
+                }
                 continue; // not this trait's member — a blanket/unrelated name, left as it was
             }
             if candor_report::env::trace("CANDOR_VEINC_INSTR") {

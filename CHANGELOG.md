@@ -11,6 +11,16 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **Lane rust-bound-l1a: path spellings of a trait member reached through a bound or a projection, which formed nothing, now form what their sibling spellings
+  form (SOUNDNESS R1952, R1957–R1961; additive: each adds an edge, a key or a hedge at a site that had none).** `T::lsf()` with the associated fn declared in a
+  LOCAL supertrait of the bound dispatches over the bound's implementors and keys the declaring trait (one member test for path calls, supertraits included:
+  R1957). `T::sf()` under a local bound whose DEPENDENCY supertrait declares the member keys that supertrait and discloses where this crate implements it, as the
+  method spelling does (R1958). `<T as Tr>::A::f()` is read as `T::A::f()` through `Tr` (R1959). `<T as Iterator>::next(&mut t)` and `<R as Read>::read(..)`
+  reach the caller hooks the UFCS spelling reaches (R1960). A written `Item = String` binding asks the std-type join route the concrete `String::f()` asks
+  (R1961). A projection bound's trait is classified by its resolved root, so `where T::Item: dep::Error` is a dependency bound, not std's (R1952). The
+  receiver and path projection arms now share one fact source (`bp_proj_facts`). New cfgtwin cell `la1` (18 probes). `CANDOR_R1657BP_OFF=1` disables R1952,
+  R1958–R1960; cache rev235.
+
 - **Lane rust-bound-l0: the bound / projection dispatch acceptance matrix, and a reader fix in the soundness runner (test instruments only; no engine change, no verdict moves).**
   `soundness/cfgtwin` gains cells bm1-bm4, bd1, bd2, wg1, wg2, wg3, wg5, wg5g, wc1, wc3 (     173 executed probes, each also read chained; the two-hop W-g5 chain is a new `twohop` chain kind; a cell can set
   `edition`, `nocompile` and `detail`, which records the join KEY in each reading). `run.py reading()` printed a row with empty `inferred` that carries `invisible` or

@@ -386,6 +386,34 @@ pub(crate) struct PathProj {
     pub(crate) unnamed: bool,
 }
 
+/// SOUNDNESS R1957–R1959 / R1952 — THE PROJECTION'S FACTS, asked once by both spellings (Fable review (d): merge the FACT half, keep
+/// two renderings). `<g as via>::assoc`: the written BINDINGS on the bounds of `g` through which `assoc` is reached, the bounds
+/// WRITTEN on the projection (design step 1(a): `where g::assoc: B`, `g: Tr<assoc: B>`), and the bounds the declaring LOCAL trait
+/// puts on it (step 1(b): `type assoc: B;`). Facts only: which of them a spelling answers, and how, is its adapter's.
+#[derive(Debug, Default)]
+pub(crate) struct ProjFacts {
+    /// what a written `assoc = X` binding names, as written (generics first), deduplicated
+    pub(crate) bindings: Vec<Val>,
+    /// step 1(a), in written order
+    pub(crate) written: Vec<TraitRef>,
+    /// step 1(b), leaves not already in `written`
+    pub(crate) declared: Vec<TraitRef>,
+}
+
+/// Where a WRITTEN bound's trait comes from, decided by its RESOLVED ROOT through the module's `use` map — never by its leaf, so a
+/// dependency trait named `Error`, `Read`, `Sub` or `Pointee` is a dependency's (SOUNDNESS R1952).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// a crate-local trait (by leaf) whose written path does not root at a dependency
+    Local,
+    /// rooted at a dependency crate: the expanded path (`fxdep::Error`); `local` when a crate-local trait shares the leaf
+    Dep { full: String, local: bool },
+    /// a std trait leaf or a marker (`Send`, `Sized`, ..), with no dependency root
+    Std,
+    /// a bare leaf no `use` roots and no local or std trait declares
+    Unrooted,
+}
+
 /// A member every type has through a std blanket impl (or through `&C`, which is `Clone`/`Borrow`/`Into`-able whatever `C`
 /// is): Rust's probe finds it at the autoref step, BEFORE any `Deref` step, so the Target is never consulted.
 fn universal_member(leaf: &str) -> bool {
@@ -693,6 +721,49 @@ impl<'a> super::CallCollector<'a> {
         }
     }
 
+    /// The projection's facts (see `ProjFacts`). `via`: the trait the projection was written through (`<g as via>::assoc`), which
+    /// limits the bounds of `g` whose bindings and declarations count; `Target` reaches `Deref`'s through `DerefMut` too.
+    pub(crate) fn bp_proj_facts(&self, g: &str, via: Option<&str>, assoc: &str) -> ProjFacts {
+        let bound_tr = |t: &TraitRef| via.is_none_or(|x| x == t.leaf || (assoc == "Target" && matches!(t.leaf.as_str(), "Deref" | "DerefMut")));
+        let mut f = ProjFacts::default();
+        for t in self.bp.env.bounds(g).iter().filter(|t| bound_tr(t)) {
+            for (n, ty) in &t.bindings {
+                if n == assoc {
+                    let v = self.bp_written(ty);
+                    if !f.bindings.contains(&v) {
+                        f.bindings.push(v);
+                    }
+                }
+            }
+        }
+        f.written = self.bp.env.of_projection.get(&(g.to_string(), assoc.to_string())).cloned().unwrap_or_default();
+        for t in self.bp.env.bounds(g).iter().filter(|t| bound_tr(t)) {
+            let Some(lt) = self.local_traits.get(&t.leaf) else { continue };
+            for b in lt.assoc_types.get(assoc).into_iter().flatten() {
+                if !f.written.iter().chain(f.declared.iter()).any(|x| &x.leaf == b) {
+                    f.declared.push(TraitRef { leaf: b.clone(), path: b.clone(), args: Vec::new(), bindings: Vec::new() });
+                }
+            }
+        }
+        f
+    }
+
+    /// A written bound's origin, by its RESOLVED ROOT (`Origin`).
+    pub(crate) fn bp_origin(&self, t: &TraitRef) -> Origin {
+        let full = crate::lang::expand(&t.path, &self.uses);
+        let dep = full.contains("::") && crate::lang::is_dependency_crate_root(full.split("::").next().unwrap_or(""));
+        let local = self.local_traits.contains_key(&t.leaf);
+        if dep {
+            Origin::Dep { full, local }
+        } else if local {
+            Origin::Local
+        } else if crate::std_bounds::is_std_trait_leaf(&t.leaf) || matches!(t.leaf.as_str(), "Send" | "Sync" | "Unpin" | "Sized" | "Copy") {
+            Origin::Std
+        } else {
+            Origin::Unrooted
+        }
+    }
+
     /// Design step 4, THE PROJECTION ARM (R1795): the member `leaf` on a value of `<g as tr>::assoc`. Three sources, in this
     /// order: a written BINDING on a bound of `g` (`C: Has2<A = Conn>`, `C: Deref<Target = X>`) — the projection IS that
     /// type; else the projection's BOUND SET, from a `where` clause (`where C::A: Tr`, `where C::Target: Tr`) and from the
@@ -702,18 +773,8 @@ impl<'a> super::CallCollector<'a> {
         if depth > MAX_DEREF {
             return None;
         }
-        let bound_tr = |t: &TraitRef| tr.is_none_or(|x| x == t.leaf || (assoc == "Target" && matches!(t.leaf.as_str(), "Deref" | "DerefMut")));
-        let mut bindings: Vec<Val> = Vec::new();
-        for t in self.bp.env.bounds(g).iter().filter(|t| bound_tr(t)) {
-            for (n, ty) in &t.bindings {
-                if n == assoc {
-                    let v = self.bp_written(ty);
-                    if !bindings.contains(&v) {
-                        bindings.push(v);
-                    }
-                }
-            }
-        }
+        let facts = self.bp_proj_facts(g, tr, assoc);
+        let bindings = facts.bindings;
         if !bindings.is_empty() {
             let mut a = Ans::default();
             let mut answered = false;
@@ -726,15 +787,8 @@ impl<'a> super::CallCollector<'a> {
             a.facts.insert("projection");
             return answered.then_some(a);
         }
-        let mut bset: Vec<TraitRef> = self.bp.env.of_projection.get(&(g.to_string(), assoc.to_string())).cloned().unwrap_or_default();
-        for t in self.bp.env.bounds(g).iter().filter(|t| bound_tr(t)) {
-            let Some(lt) = self.local_traits.get(&t.leaf) else { continue };
-            for b in lt.assoc_types.get(assoc).into_iter().flatten() {
-                if !bset.iter().any(|x| &x.leaf == b) {
-                    bset.push(TraitRef { leaf: b.clone(), path: b.clone(), args: Vec::new(), bindings: Vec::new() });
-                }
-            }
-        }
+        let mut bset: Vec<TraitRef> = facts.written;
+        bset.extend(facts.declared);
         if bset.is_empty() {
             return None;
         }
@@ -763,30 +817,43 @@ impl<'a> super::CallCollector<'a> {
     /// edge, no key and no disclosure (EXECUTED `fl40_*`). The sources are the receiver spelling's own (`bp_member_proj`, R1795): a written
     /// binding, then the projection's bound set; the difference is the MEMBER TEST, because an associated fn with no receiver (`f()`, the
     /// usual path-call member) is in the trait's `assoc`, not its `methods` (`declaring_traits(.., true)`).
-    pub(crate) fn bp_path_projection(&self, g: &str, assoc: &str, leaf: &str) -> PathProj {
+    ///
+    /// The facts are `bp_proj_facts` (the receiver arm's own): `via` (R1959) limits the bindings to the bound the projection was
+    /// written through. Only step 1(a) is read here; step 1(b), a local trait's own `type A: B`, is the R1037 arm's, whose member
+    /// rendering dispatches over the BOUND and keys the declaring trait, where this arm's `declaring_traits` rendering dispatches over
+    /// the declaring trait's implementors (R1953): reading 1(b) here would widen that over-charge to the population R1037 answers
+    /// exactly. Each written bound's origin is its RESOLVED ROOT (`bp_origin`, R1952): a dependency trait named like a std one
+    /// (`dep::Error`, `dep::Read`, `dep::Sub`) was read as std by its leaf and dropped, standalone and chained (EXECUTED `fr40_depsup_e`,
+    /// `wg3_{err,read,ptr}_proj_e`).
+    pub(crate) fn bp_path_projection(&self, g: &str, via: Option<&str>, assoc: &str, leaf: &str) -> PathProj {
         let mut out = PathProj::default();
         if bp_off() || universal_member(leaf) {
             return out;
         }
-        for t in self.bp.env.bounds(g) {
-            for (n, ty) in &t.bindings {
-                if n == assoc {
-                    match self.bp_written(ty) {
-                        Val::Nominal(x) => {
-                            if !out.typed.contains(&x) {
-                                out.typed.push(x);
-                            }
-                        }
-                        _ => out.unnamed = true, // bound to a generic / dyn / opaque type this route does not name
+        let facts = self.bp_proj_facts(g, via, assoc);
+        for v in facts.bindings {
+            match v {
+                Val::Nominal(x) => {
+                    if !out.typed.contains(&x) {
+                        out.typed.push(x);
                     }
                 }
+                _ => out.unnamed = true, // bound to a generic / dyn / opaque type this route does not name
             }
         }
         if !out.typed.is_empty() || out.unnamed {
             return out; // a written binding IS the projection's type; its bound set is not consulted (as `bp_member_proj`)
         }
-        for t in self.bp.env.of_projection.get(&(g.to_string(), assoc.to_string())).into_iter().flatten() {
+        for t in &facts.written {
             let l = t.leaf.as_str();
+            let origin = self.bp_origin(t);
+            if let Origin::Dep { local: false, .. } = origin {
+                if crate::lang::reach_debug() && (crate::std_bounds::is_std_trait_leaf(l) || matches!(l, "Send" | "Sync" | "Unpin" | "Sized" | "Copy")) {
+                    eprintln!("R1952ROOT\t{g}::{assoc}::{leaf}\t{}", t.path); // §E1 REACH COUNTER (the changed branch only)
+                }
+                out.deps.push(t.clone());
+                continue;
+            }
             if self.local_traits.contains_key(l) {
                 if self.local_declares_member(l, leaf, 0) {
                     // the DECLARING trait(s): `T::Item: Sub` with `Sub: Lt` and `lf` declared in `Lt` dispatches over `Lt`'s implementors
@@ -797,6 +864,10 @@ impl<'a> super::CallCollector<'a> {
                     }
                 } else if self.local_trait_has_foreign_super(l) {
                     out.unnamed = true; // a dependency supertrait whose member list is unknown may declare it
+                }
+                // a dependency trait sharing the leaf (`dep::Lt` beside a local `Lt`) is a candidate as well: its key, beside today's
+                if matches!(origin, Origin::Dep { .. }) {
+                    out.deps.push(t.clone());
                 }
             } else if crate::std_bounds::is_std_trait_leaf(l) || matches!(l, "Send" | "Sync" | "Unpin" | "Sized" | "Copy") {
                 // a std bound is not this route's to answer (the receiver spelling's R1286 hedge is for driving I/O members of a

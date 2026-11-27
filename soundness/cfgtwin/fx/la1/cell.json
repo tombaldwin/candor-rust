@@ -1,0 +1,87 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_la1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_la1"
+ ],
+ "detail": true,
+ "id": "la1",
+ "lib": false,
+ "note": "lane L1a: the spellings beside R1952 and R1957-R1961 that the design matrix does not hold",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "la1_bindstd_e"
+  },
+  {
+   "kind": "q",
+   "name": "la1_bindstd_q"
+  },
+  {
+   "kind": "e",
+   "name": "la1_concrete_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_qa_std_e"
+  },
+  {
+   "kind": "q",
+   "name": "la1_qa_std_q"
+  },
+  {
+   "kind": "e",
+   "name": "la1_qa_sup_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_qa_dep_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_qa_bind_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_qa_where_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_n2proj_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_n2guard_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_n1two_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_n1proj_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_qself_read_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_ufcs_read_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_r1952_bare_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_r1952_bare2_e"
+  },
+  {
+   "kind": "e",
+   "name": "la1_collide_e"
+  }
+ ]
+}

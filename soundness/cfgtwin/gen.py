@@ -1681,6 +1681,96 @@ w5_cell('wg5', False)
 w5_cell('wg5g', True)
 
 
+# la1 (lane L1a, rust-bound-l1a): the spellings beside each L1a row that the design matrix does not hold, each a one-variable fixture with executed ground truth.
+#   R1961 (N5)  a written `Item = String` binding with a dependency trait in scope and a member no std trait names (`T::Item::f()`), beside its concrete control
+#               `String::f()` (bm3_path_dt_e); bm2_bind_stdty_scope_e's `from_str` is withheld by NAME on the concrete spelling too (R1951, lane L3)
+#   R1959 (N3)  `<T as Tr>::A::f()` through a STD trait, through a trait that is not a DIRECT bound, through a DEPENDENCY trait (W-p1, kept), over a written binding
+#               and over a `where` bound on the qualified projection
+#   R1958 (N2)  the projection form (`type A: LSubD;`), and the GUARD: a second local bound that declares the member, so no dependency-supertrait key may be minted
+#   R1957 (N1)  two supertrait hops, and the projection form (`type A: LSub;`)
+#   R1960 (N4)  the qualified spelling of a driving std I/O member (`<R as Read>::read`) beside its UFCS control
+#   R1952       a bare IMPORTED dependency `Error`, and a dependency trait sharing a LOCAL trait's leaf (`dep::Lt` beside `trait Lt`)
+_la1_dep = """pub trait Dt { fn f(); }
+pub trait SupD { fn sf(); }
+pub trait NoSf {}
+pub trait HasA { type A; }
+pub trait Error { fn ef(); }
+pub trait Lt { fn lf(); }
+pub struct DImpE; impl Dt for DImpE { fn f() { EFF } } impl Error for DImpE { fn ef() { EFF } } impl Lt for DImpE { fn lf() { EFF } }
+pub struct DHas; impl HasA for DHas { type A = DImpE; }
+impl Dt for String { fn f() { EFF } }
+impl Dt for u16 { fn f() {} }
+"""
+cell('la1', {'main.rs': _ALLOW + """use fxdep_la1::{SupD, HasA};
+pub trait Lt { fn lf(); }
+pub trait HasL { type A: Lt; }  pub trait HasLS: HasL {}
+pub trait HasX { type A; }
+pub trait LSup { fn lsf(); } pub trait LMid: LSup {} pub trait LSub2: LMid {} pub trait LSub: LSup {}
+pub trait HasS { type A: LSub; }
+pub trait LSubD: fxdep_la1::SupD {}  pub trait HasD { type A: LSubD; }
+pub trait LSubN: fxdep_la1::NoSf {}  pub trait LsfHave { fn sf(); }
+pub struct LoudL; impl Lt for LoudL { fn lf() { EFF } }
+pub struct QuietL_la1; impl Lt for QuietL_la1 { fn lf() {} }
+pub struct HL; impl HasL for HL { type A = LoudL; } impl HasLS for HL {}
+pub struct HX; impl HasX for HX { type A = LoudL; }
+pub struct ItL; impl Iterator for ItL { type Item = LoudL; fn next(&mut self) -> Option<LoudL> { None } }
+pub struct LS2; impl LSup for LS2 { fn lsf() { EFF } } impl LMid for LS2 {} impl LSub2 for LS2 {} impl LSub for LS2 {}
+pub struct HS; impl HasS for HS { type A = LS2; }
+pub struct LDS; impl fxdep_la1::SupD for LDS { fn sf() { EFF } } impl LSubD for LDS {}
+pub struct HD; impl HasD for HD { type A = LDS; }
+pub struct LN; impl fxdep_la1::NoSf for LN {} impl LSubN for LN {} impl LsfHave for LN { fn sf() { EFF } }
+pub struct ItS; impl Iterator for ItS { type Item = String; fn next(&mut self) -> Option<String> { None } }
+pub struct ItU; impl Iterator for ItU { type Item = u16; fn next(&mut self) -> Option<u16> { None } }
+pub struct ItDE; impl Iterator for ItDE { type Item = fxdep_la1::DImpE; fn next(&mut self) -> Option<fxdep_la1::DImpE> { None } }
+pub struct Rd; impl std::io::Read for Rd { fn read(&mut self, _b: &mut [u8]) -> std::io::Result<usize> { EFF Ok(0) } }
+fn g_bindstd<T: Iterator<Item = String>>() { use fxdep_la1::Dt; T::Item::f() }
+fn g_bindstdq<T: Iterator<Item = u16>>() { use fxdep_la1::Dt; T::Item::f() }
+fn g_concrete() { use fxdep_la1::Dt; String::f() }
+fn g_qa_std<T: Iterator>() where T::Item: Lt { <T as Iterator>::Item::lf() }
+fn g_qa_stdq<T: Iterator>() where T::Item: Lt { <T as Iterator>::Item::lf() }
+fn g_qa_sup<T: HasLS>() { <T as HasL>::A::lf() }
+fn g_qa_dep<T: HasA>() where T::A: fxdep_la1::Dt { use fxdep_la1::Dt; <T as HasA>::A::f() }
+fn g_qa_bind<T: HasX<A = LoudL>>() { <T as HasX>::A::lf() }
+fn g_qa_where<T: HasX>() where T::A: Lt { <T as HasX>::A::lf() }
+fn g_n2proj<T: HasD>() { T::A::sf() }
+fn g_n2guard<T: LSubN + LsfHave>() { T::sf() }
+fn g_n1two<T: LSub2>() { T::lsf() }
+fn g_n1proj<T: HasS>() { T::A::lsf() }
+fn g_qself_read<R: std::io::Read>(mut r: R) { let mut b = [0u8; 1]; let _ = <R as std::io::Read>::read(&mut r, &mut b); }
+fn g_ufcs_read<R: std::io::Read>(mut r: R) { let mut b = [0u8; 1]; let _ = std::io::Read::read(&mut r, &mut b); }
+fn g_r1952_bare<I: Iterator>() where I::Item: fxdep_la1::Error { use fxdep_la1::Error; I::Item::ef() }
+fn g_r1952_bare2<I: Iterator>() where I::Item: Error { I::Item::ef() }
+fn g_collide<I: Iterator>() where I::Item: fxdep_la1::Lt { use fxdep_la1::Lt as DLt; I::Item::lf() }
+use fxdep_la1::Error;
+pub fn la1_bindstd_e() { g_bindstd::<ItS>() }
+pub fn la1_bindstd_q() { g_bindstdq::<ItU>() }
+pub fn la1_concrete_e() { g_concrete() }
+pub fn la1_qa_std_e() { g_qa_std::<ItL>() }
+pub fn la1_qa_std_q() { g_qa_stdq::<std::iter::Empty<QuietL_la1>>() }
+pub fn la1_qa_sup_e() { g_qa_sup::<HL>() }
+pub fn la1_qa_dep_e() { g_qa_dep::<fxdep_la1::DHas>() }
+pub fn la1_qa_bind_e() { g_qa_bind::<HX>() }
+pub fn la1_qa_where_e() { g_qa_where::<HX>() }
+pub fn la1_n2proj_e() { g_n2proj::<HD>() }
+pub fn la1_n2guard_e() { g_n2guard::<LN>() }
+pub fn la1_n1two_e() { g_n1two::<LS2>() }
+pub fn la1_n1proj_e() { g_n1proj::<HS>() }
+pub fn la1_qself_read_e() { g_qself_read(Rd) }
+pub fn la1_ufcs_read_e() { g_ufcs_read(Rd) }
+pub fn la1_r1952_bare_e() { g_r1952_bare::<ItDE>() }
+pub fn la1_r1952_bare2_e() { g_r1952_bare2::<ItDE>() }
+pub fn la1_collide_e() { g_collide::<ItDE>() }
+"""},
+     [(n_, n_[-1], None) for n_ in ('la1_bindstd_e', 'la1_bindstd_q', 'la1_concrete_e', 'la1_qa_std_e', 'la1_qa_std_q', 'la1_qa_sup_e', 'la1_qa_dep_e',
+                                    'la1_qa_bind_e', 'la1_qa_where_e', 'la1_n2proj_e', 'la1_n2guard_e', 'la1_n1two_e', 'la1_n1proj_e', 'la1_qself_read_e',
+                                    'la1_ufcs_read_e', 'la1_r1952_bare_e', 'la1_r1952_bare2_e', 'la1_collide_e')],
+     deps={'fxdep_la1': '{ path = "fxdep_la1" }'}, extra={'@dep/fxdep_la1/src/lib.rs': _la1_dep},
+     chain=dict(kind='dep', dep_dir='fxdep_la1'), hdr=False, detail=True,
+     note='lane L1a: the spellings beside R1952 and R1957-R1961 that the design matrix does not hold')
+for _p, _, _ in CELLS['la1']['probes']:
+    pred('la1', _p, 'record', 'record', 'record')
+
+
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):
     arms = ''.join('        "%s" => %s%s(),\n' % (p, crate_ref, p) for p, _, _ in c['probes'])

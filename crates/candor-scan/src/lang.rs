@@ -10683,6 +10683,28 @@ pub(crate) fn generic_operator_uses(
         fn plain(&self, n: &str) -> bool {
             self.params.get(&self.name(n)).is_some_and(|(_, e)| !e)
         }
+        /// SOUNDNESS R1318 (UFCS) — `std::io::Read::read_exact(r, buf)` on a parameter is the method spelling `r.read_exact(buf)`,
+        /// and runs the same required member of the argument's own impl. `segs` is the written trait path and member (the
+        /// qualified spelling's path after its qself, R1960).
+        fn r1318_ufcs_io(&mut self, segs: &[String], t: &str, m: &str, c: &syn::ExprCall) {
+            let std_path = segs.len() == 2 || (segs.len() == 4 && segs[0] == "std" && segs[1] == "io");
+            if std_path && matches!(t, "Read" | "Write" | "BufRead" | "Seek") {
+                if let Some(n) = c.args.first().and_then(operand) {
+                    if self.plain(&n) {
+                        for h in crate::std_bounds::method_hooks(
+                            crate::std_bounds::Recv::Implementor,
+                            m,
+                            c.args.len().saturating_sub(1),
+                            Some(&[t.to_string()]),
+                        ) {
+                            if h.slot == crate::std_bounds::Slot::SelfRecv {
+                                self.hit_named(&n, h.trait_leaf, h.member, m);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         /// CALL-TARGET ROUND 2 — a std shape this expression spells or a `let` recorded, with the plain PARAMETERS that
         /// fill its elements (`vec![x]`, `[&x, &x]`, `Some(x)`, `(1, x)`, `Box::new(x)`, `HashSet::new()`).
         fn shape_of(&self, e: &syn::Expr) -> Option<(String, Vec<String>)> {
@@ -10951,14 +10973,28 @@ pub(crate) fn generic_operator_uses(
         fn visit_expr_call(&mut self, c: &'x syn::ExprCall) {
             // CALL-TARGET ROUND 2 — a std PATH call (`std::mem::take(&mut x)`, `std::cmp::max(&a, &b)`, `std::io::copy(r,
             // &mut w)`, `Path::new(&x)`, `Vec::from_iter(i)`, `Clone::clone(&x)`) whose bounded argument is a parameter.
+            // SOUNDNESS R1960 — the QUALIFIED spelling `<T as Iterator>::next(&mut t)` is the UFCS call `Iterator::next(&mut t)`: the
+            // path after the qself is the trait and the member, and the first argument is the receiver. It was asked of no hook (the
+            // arm below read `qself.is_none()` only), so a caller handing `g` an effectful iterator was charged nothing for the
+            // qualified spelling while the UFCS and method spellings charged it (EXECUTED `bm1_b3_qself_next_e`: written, `-`
+            // standalone and chained on 0.43.0 and main; `bm1_b3_ufcs_next_e` `Fs`). Only the trait-member hooks read it.
+            let qtrait = |p: &syn::ExprPath| {
+                p.qself.as_ref().is_some_and(|q| q.position >= 1 && q.position + 1 == p.path.segments.len())
+                    && !crate::bound_proj::bp_off()
+            };
             if let syn::Expr::Path(p) = &*c.func {
-                if p.qself.is_none() && p.path.segments.len() >= 2 {
+                if (p.qself.is_none() || qtrait(p)) && p.path.segments.len() >= 2 {
                     let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
                     let name = segs[segs.len() - 1].clone();
                     let owner = segs[segs.len() - 2].clone();
                     let args: Vec<&syn::Expr> = c.args.iter().collect();
                     let std_root = matches!(segs[0].as_str(), "std" | "core" | "alloc");
-                    if owner.chars().next().is_some_and(|ch| ch.is_lowercase()) {
+                    if p.qself.is_some() && crate::lang::reach_debug() {
+                        eprintln!("R1960QSELF\t{owner}::{name}"); // §E1 REACH COUNTER (asked; a hit needs a hook and a plain parameter)
+                    }
+                    if p.qself.is_some() && !crate::std_bounds::is_std_trait_leaf(&owner) {
+                        // a qualified spelling reaches only the trait-member hooks below
+                    } else if owner.chars().next().is_some_and(|ch| ch.is_lowercase()) {
                         if std_root {
                             let hooks = crate::std_bounds::fn_hooks(&owner, &name, args.len());
                             self.hit_hooks(&hooks, None, None, &args, &name);
@@ -10982,6 +11018,13 @@ pub(crate) fn generic_operator_uses(
                 }
             }
             if let syn::Expr::Path(p) = &*c.func {
+                if qtrait(p) {
+                    // R1960 — the qualified spelling of a driving std I/O member (`<R as Read>::read_exact(r, buf)`): R1318's hook below
+                    let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
+                    if let [.., t, m] = segs.as_slice() {
+                        self.r1318_ufcs_io(&segs, t, m, c);
+                    }
+                }
                 if p.qself.is_none() {
                     let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
                     let target = match segs.as_slice() {
@@ -10997,23 +11040,7 @@ pub(crate) fn generic_operator_uses(
                     // SOUNDNESS R1318 (UFCS) — `std::io::Read::read_exact(r, buf)` on a parameter is the method spelling
                     // `r.read_exact(buf)`, and runs the same required member of the argument's own impl.
                     if let [.., t, m] = segs.as_slice() {
-                        let std_path = segs.len() == 2 || (segs.len() == 4 && segs[0] == "std" && segs[1] == "io");
-                        if std_path && matches!(t.as_str(), "Read" | "Write" | "BufRead" | "Seek") {
-                            if let Some(n) = c.args.first().and_then(operand) {
-                                if self.plain(&n) {
-                                    for h in crate::std_bounds::method_hooks(
-                                        crate::std_bounds::Recv::Implementor,
-                                        m,
-                                        c.args.len().saturating_sub(1),
-                                        Some(std::slice::from_ref(t)),
-                                    ) {
-                                        if h.slot == crate::std_bounds::Slot::SelfRecv {
-                                            self.hit_named(&n, h.trait_leaf, h.member, m);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        self.r1318_ufcs_io(&segs, t, m, c);
                     }
                 }
             }
