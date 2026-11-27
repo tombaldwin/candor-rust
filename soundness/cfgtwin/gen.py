@@ -1081,6 +1081,53 @@ pub trait Marker {}
 """, id='fr13')}, chain=dict(kind='dep', dep_dir='fxdep_fr13'), hdr=False,
      note='R1913 round 2: the sealed-trait withholding needs the call TYPE to implement the trait and the trait imported by THIS module (not a re-export, not an ancestor)')
 
+# R1913 round 3 (Fable fr13k)
+cell('fr13k', {'main.rs': sub("""#[macro_export] macro_rules! imp_{id} { () => { use std::os::unix::ffi::OsStrExt; } }
+mod k1_{id} { use fxdep_{id}::FromBOs; pub fn e() { { use std::os::unix::ffi::OsStrExt; let _ = std::ffi::OsStr::new("a").as_bytes().len(); } let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod k2_{id} { use fxdep_{id}::FromBOs; pub fn e() { fn helper() -> usize { use std::os::unix::ffi::OsStrExt; std::ffi::OsStr::new("a").as_bytes().len() } helper(); let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod k3_{id} { use fxdep_{id}::FromBOs; pub fn e() { let c = || { use std::os::unix::ffi::OsStrExt; std::ffi::OsStr::new("a").as_bytes().len() }; c(); let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod k4_{id} { #[cfg(not(unix))] use std::os::unix::ffi::OsStrExt; use fxdep_{id}::FromBOs; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod k5_{id} { #[cfg(unix)] use std::os::unix::ffi::OsStrExt; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod k6_{id} { use fxdep_{id}::FromBOs; pub mod inner { use super::*; pub fn e() { let _ = std::ffi::OsStr::from_bytes(b"x"); } } }
+mod k7_{id} { use std::os::unix::ffi::OsStrExt; pub mod inner { use super::*; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } } }
+mod k8_{id} { crate::imp_{id}!(); #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod k9_{id} { use std::os::unix::ffi::{OsStrExt, OsStringExt}; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod k10_{id} { pub(crate) use std::os::unix::ffi::OsStrExt; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+mod k11_{id} { use crate::k10_{id}::OsStrExt; #[allow(unused_imports)] use fxdep_{id}::Marker; pub fn q() { let _ = std::ffi::OsStr::from_bytes(b"x"); } }
+""", id='fr13k')},
+     [('fr13k_block_e', 'e', 'k1_fr13k::e()'),
+      ('fr13k_nestedfn_e', 'e', 'k2_fr13k::e()'),
+      ('fr13k_closure_e', 'e', 'k3_fr13k::e()'),
+      ('fr13k_cfgout_e', 'e', 'k4_fr13k::e()'),
+      ('fr13k_cfgin_q', 'q', 'k5_fr13k::q()'),
+      ('fr13k_globdep_e', 'e', 'k6_fr13k::inner::e()'),
+      ('fr13k_globstd_q', 'q', 'k7_fr13k::inner::q()'),
+      ('fr13k_macrouse_q', 'q', 'k8_fr13k::q()'),
+      ('fr13k_grouped_q', 'q', 'k9_fr13k::q()'),
+      ('fr13k_pubcrate_q', 'q', 'k10_fr13k::q()'),
+      ('fr13k_viareexp_q', 'q', 'k11_fr13k::q()')],
+     deps={'fxdep_fr13k': '{ path = "fxdep_fr13k" }'},
+     extra={'@dep/fxdep_fr13k/src/lib.rs': sub("""pub trait FromB { fn from_bytes(b: &[u8]) -> Self; }
+impl FromB for std::path::PathBuf { fn from_bytes(_b: &[u8]) -> Self { EFF std::path::PathBuf::new() } }
+pub trait FromBOs { fn from_bytes(b: &[u8]) -> usize; }
+impl FromBOs for std::ffi::OsStr { fn from_bytes(_b: &[u8]) -> usize { EFF 0 } }
+pub trait Marker {}
+""", id='fr13k')}, chain=dict(kind='dep', dep_dir='fxdep_fr13k'), hdr=False,
+     note='R1913 round 3 (Fable fr13k). Fn-body, cfg, glob, macro, grouped and re-export spellings of a sealed-trait import beside a dependency trait. Only a MODULE-level own `use` counts: a std `use` in an inner block, closure or nested fn does not cover a call outside it.')
+
+# R1913 round 3 (Fable fr13l)
+cell('fr13l', {'main.rs': sub("""mod a_{id} { use std::slice::SliceIndex; use fxdep_{id}::GetU; pub fn e() { let _ = usize::get(1u8); } }
+mod b_{id} { use std::slice::SliceIndex; use std::ops::Range; use fxdep_{id}::GetU; pub fn e() { let _ = Range::<usize>::get(1u8); } }
+""", id='fr13l')},
+     [('fr13l_usize_e', 'e', 'a_fr13l::e()'),
+      ('fr13l_range_e', 'e', 'b_fr13l::e()')],
+     deps={'fxdep_fr13l': '{ path = "fxdep_fr13l" }'},
+     extra={'@dep/fxdep_fr13l/src/lib.rs': sub("""pub trait GetU { fn get(x: u8) -> usize; }
+impl GetU for usize { fn get(_x: u8) -> usize { EFF 0 } }
+impl GetU for std::ops::Range<usize> { fn get(_x: u8) -> usize { EFF 0 } }
+""", id='fr13l')}, chain=dict(kind='dep', dep_dir='fxdep_fr13l'), hdr=False,
+     note='R1913 round 3 (Fable fr13l). SliceIndex is #[unstable], so std never runs through `usize::get`/`Range::get` and the dependency impl runs (executed Fs). Reads - on every arm today by NAME (neighbour b, pre-existing); main reading pinned; it must read E once b is resolved.')
+
 # fl15g: R1915 must not hedge a generic TYPE PARAMETER head (`T::default()`); fl15 above is the module-head population that stays hedged.
 cell('fl15g', {'main.rs': sub("""mod reexp_{id} { pub use fxdep_{id}::*; }
 mod g_{id} {

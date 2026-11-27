@@ -1,0 +1,11 @@
+fr13k_block_e
+fr13k_nestedfn_e
+fr13k_closure_e
+fr13k_cfgout_e
+fr13k_cfgin_q
+fr13k_globdep_e
+fr13k_globstd_q
+fr13k_macrouse_q
+fr13k_grouped_q
+fr13k_pubcrate_q
+fr13k_viareexp_q

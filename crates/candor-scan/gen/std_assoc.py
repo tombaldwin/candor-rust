@@ -31,7 +31,8 @@ any_fn = re.compile(r'\bfn\s+([A-Za-z_][A-Za-z0-9_]*)')
 # fns are NOT filed as `T` rows (a `T` row withholds the dependency join BY NAME, which is right for `default`/`from_str`, traits std
 # implements for its own types and which the prelude or a common import brings into scope): a sealed std trait's member is std's only
 # where that trait is IMPORTED, and a dependency trait's member of the same name runs where only the dependency's is. They are filed as
-# `TS<TAB>fn<TAB>trait` rows, which a consumer asks beside the module's imports.
+# `TS<TAB>fn<TAB>trait` rows, which a consumer asks beside the module's imports. A sealed trait whose member (or the trait) is `#[unstable]` is dropped: rustc ignores
+# an unstable candidate where a stable one applies, so std's member never runs through that name from user code (`SliceIndex::get`).
 pub_trait = re.compile(r'\bpub\s+(impl\s*\([^)]*\)\s+)?(?:(?:const|unsafe|auto)\s+)*trait\s+([A-Za-z_][A-Za-z0-9_]*)')
 impl_kw = re.compile(r'(?<![A-Za-z0-9_])impl(?![A-Za-z0-9_])')
 SIGNED = ['i8', 'i16', 'i32', 'i64', 'i128', 'isize']
@@ -110,7 +111,7 @@ for crate in ('core', 'alloc', 'std'):
                     if b < 0: continue
                     e = block_end(s, b)
                     for m in any_fn.finditer(s[b:e+1]):
-                        (sealed_fns.add((m.group(1), t.group(2))) if t.group(1) else trait_fns.add(m.group(1)))
+                        (None if (t.group(1) and (unstable(s, t.start()) or unstable(s[b:e+1], m.start()))) else sealed_fns.add((m.group(1), t.group(2))) if t.group(1) else trait_fns.add(m.group(1)))
                 continue
             if f in ('int_macros.rs', 'uint_macros.rs'):
                 leaves = SIGNED if f == 'int_macros.rs' else UNSIGNED
@@ -143,7 +144,7 @@ for crate in ('core', 'alloc', 'std'):
                 if b < 0: continue
                 e = block_end(s, b)
                 for m in any_fn.finditer(s[b:e+1]):
-                    (sealed_fns.add((m.group(1), t.group(2))) if t.group(1) else trait_fns.add(m.group(1)))
+                    (None if (t.group(1) and (unstable(s, t.start()) or unstable(s[b:e+1], m.start()))) else sealed_fns.add((m.group(1), t.group(2))) if t.group(1) else trait_fns.add(m.group(1)))
 # ROUND 3 — INHERENT IMPLS A `macro_rules!` WRITES. std writes many inherent impls inside macros whose self type is a
 # macro parameter (`atomic_int!` -> `impl $atomic_type { pub const fn new(..) }`), and names the type only at the
 # invocation (`atomic_int! { .., i8 AtomicI8 }`); an alias family is minted the same way (`nonzero_integer! { Self =

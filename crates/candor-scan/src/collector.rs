@@ -7600,19 +7600,19 @@ impl<'a> CallCollector<'a> {
         }
     }
 
-    /// SOUNDNESS R1913 — does THIS module's own `use` (or the fn body's) import, by its written path, a SEALED std trait that declares `member` AND is
+    /// SOUNDNESS R1913 — does THIS module's own `use` import, by its written path, a SEALED std trait that declares `member` AND is
     /// implemented for the call's std TYPE (`ty_leaf`)? Only then is std's member the one that runs.
     fn r1913_sealed_std_imported(&self, member: &str, ty_leaf: &str) -> bool {
         if candor_report::env::switch("CANDOR_R1913_OFF") {
             return false;
         }
-        // the imports that count: THIS module's own `use` items (`lang::R1913_OWN_KEY`) and this fn body's, never the crate's re-export
-        // alias table or an enclosing module's
+        // the imports that count: THIS module's own `use` items (`lang::R1913_OWN_KEY`) ONLY — never a fn body's (`local_uses` is flat over the whole
+        // body, so a `use` in an inner block, closure or nested fn would cover a call outside it), the crate's re-export alias table or an enclosing module's
         let own = self.uses.get(crate::lang::R1913_OWN_KEY).map(String::as_str).unwrap_or("");
         crate::std_assoc::sealed_std_traits(member).iter().any(|(tr, impls)| {
             let tail = format!("::{tr}");
             impls.contains(&ty_leaf)
-                && (own.split('\u{1}').chain(self.local_uses.values().map(String::as_str)).any(|v| {
+                && (own.split('\u{1}').any(|v| {
                     v.ends_with(&tail) && matches!(v.split("::").next(), Some("std" | "core" | "alloc"))
                 }))
         })

@@ -1,0 +1,58 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_fr13k",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_fr13k"
+ ],
+ "id": "fr13k",
+ "lib": false,
+ "note": "R1913 round 3 (Fable fr13k). Fn-body, cfg, glob, macro, grouped and re-export spellings of a sealed-trait import beside a dependency trait. Only a MODULE-level own `use` counts: a std `use` in an inner block, closure or nested fn does not cover a call outside it.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fr13k_block_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13k_nestedfn_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13k_closure_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13k_cfgout_e"
+  },
+  {
+   "kind": "q",
+   "name": "fr13k_cfgin_q"
+  },
+  {
+   "kind": "e",
+   "name": "fr13k_globdep_e"
+  },
+  {
+   "kind": "q",
+   "name": "fr13k_globstd_q"
+  },
+  {
+   "kind": "q",
+   "name": "fr13k_macrouse_q"
+  },
+  {
+   "kind": "q",
+   "name": "fr13k_grouped_q"
+  },
+  {
+   "kind": "q",
+   "name": "fr13k_pubcrate_q"
+  },
+  {
+   "kind": "q",
+   "name": "fr13k_viareexp_q"
+  }
+ ]
+}

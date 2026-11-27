@@ -1,0 +1,22 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_fr13l",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_fr13l"
+ ],
+ "id": "fr13l",
+ "lib": false,
+ "note": "R1913 round 3 (Fable fr13l). SliceIndex is #[unstable], so std never runs through `usize::get`/`Range::get` and the dependency impl runs (executed Fs). Reads - on every arm today by NAME (neighbour b, pre-existing); main reading pinned; it must read E once b is resolved.",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "fr13l_usize_e"
+  },
+  {
+   "kind": "e",
+   "name": "fr13l_range_e"
+  }
+ ]
+}

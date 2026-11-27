@@ -327,7 +327,23 @@ fn r1913_round2_the_withholding_needs_the_call_type_and_the_modules_own_import()
     for g in ["a_fr13::e", "g_fr13::e", "i_fr13::e", "j_fr13::e", "p_fr13::e", "o_fr13::inner_fr13::e", "h_fr13::e"] {
         assert!(fs(g), "{g}: the dependency's member runs and must be charged: {chained:?}");
     }
-    for g in ["p_fr13::inner2_fr13::q", "h_fr13::q"] {
+    for g in ["p_fr13::inner2_fr13::q"] {
         assert!(!fs(g), "{g}: std's sealed member is imported by THIS module/fn, so the dependency join must not charge it: {chained:?}");
+    }
+}
+
+#[test]
+fn r1913_round3_only_a_module_level_import_counts_not_a_body_scoped_one() {
+    // `fr13k`: a std `use` inside an inner block, a closure or a nested fn does not cover a call outside it, so the dependency's impl (executed write)
+    // must stay charged; a module-level grouped / `pub(crate)` / re-exported import runs std's (pure) and is removed. `fr13l`: SliceIndex is unstable.
+    let cell = fx("fr13k");
+    let (dep_reports, _) = raw(&cell.join("fxdep_fr13k"), &[]);
+    let (_, chained) = raw(&cell, &dep_reports);
+    let fs = |g: &str| chained.get(g).is_some_and(|r| strs(r, "inferred").contains(&"Fs".to_string()));
+    for g in ["k1_fr13k::e", "k2_fr13k::e", "k3_fr13k::e", "k4_fr13k::e", "k6_fr13k::inner::e"] {
+        assert!(fs(g), "{g}: the dependency's member runs and must be charged: {chained:?}");
+    }
+    for g in ["k9_fr13k::q", "k10_fr13k::q", "k11_fr13k::q"] {
+        assert!(!fs(g), "{g}: std's sealed member is imported at module level: {chained:?}");
     }
 }
