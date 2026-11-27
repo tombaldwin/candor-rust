@@ -1,0 +1,35 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bd1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bd1"
+ ],
+ "detail": true,
+ "id": "bd1",
+ "lib": false,
+ "note": "N1 (an associated fn declared in a local SUPERtrait) through `where T: LSub`, `impl<T: LSub> W<T>` and a generic method; `Self::lsf()` in a subtrait default (W-g4)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "bd1_where_e"
+  },
+  {
+   "kind": "q",
+   "name": "bd1_where_q"
+  },
+  {
+   "kind": "e",
+   "name": "bd1_implgen_e"
+  },
+  {
+   "kind": "e",
+   "name": "bd1_method_gen_e"
+  },
+  {
+   "kind": "e",
+   "name": "bd1_selfdef_e"
+  }
+ ]
+}

@@ -1,0 +1,59 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bm3",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bm3"
+ ],
+ "detail": true,
+ "id": "bm3",
+ "lib": false,
+ "note": "design bm3: a concrete std type and the scope of a trait name (R1757/R1913/R1951/R1956, N6/N7)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "bm3_prelude_name_not_impl_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm3_nonprelude_name_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm3_std_trait_in_scope_q"
+  },
+  {
+   "kind": "q",
+   "name": "bm3_sealed_via_prelude_glob_q"
+  },
+  {
+   "kind": "e",
+   "name": "bm3_sealed_name_dep_only_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm3_dep_glob_prelude_name_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm3_qself_named_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm3_qself_dt_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm3_path_dt_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm3_meth_dt_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm3_path_dt_q"
+  }
+ ]
+}

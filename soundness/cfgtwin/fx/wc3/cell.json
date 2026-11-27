@@ -1,0 +1,20 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_wc3",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_wc3"
+ ],
+ "detail": true,
+ "id": "wc3",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "W-c3: std FromStr `as _` beside a dependency trait declaring from_str: rustc E0034 (compile-fails cell; documents resolver rule 1b)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "wc3_fromstr_as_e"
+  }
+ ]
+}

@@ -1,0 +1,131 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bm1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bm1"
+ ],
+ "detail": true,
+ "id": "bm1",
+ "lib": false,
+ "note": "design bm1: a generic head T, bound shapes (local / dependency / std / mixed / supertrait) x implementor location x spelling (path, method, qself, UFCS)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "bm1_b1_path_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm1_b1_path_q"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b1_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b1_qself_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b1_ufcs_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b1_stdimpl_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b2_path_incrate_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm1_b2_path_incrate_q"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b2_path_depty_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b2_path_stdty_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm1_b2_path_stdty_q"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b2_meth_incrate_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b2_qself_incrate_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b2_ufcs_incrate_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b3_path_fromstr_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm1_b3_path_fromstr_q"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b3_path_default_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b3_meth_next_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b3_ufcs_next_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b3_qself_next_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b4_mixed_local_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b4_mixed_dep_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b4_mixed_std_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b5_localsup_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm1_b5_localsup_q"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b5_depsup_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b5_depsup_incrate_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b5_depsup_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm1_b5_localsub_depsup_e"
+  }
+ ]
+}

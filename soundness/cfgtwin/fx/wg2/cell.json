@@ -1,0 +1,74 @@
+{
+ "chain": null,
+ "deps": [],
+ "detail": true,
+ "id": "wg2",
+ "lib": false,
+ "note": "W-g2: a blanket impl of the bound B, of the declaring trait D, or of both (the bound set \"may cover\"), beside a pure twin trait with no blanket",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "wg2_path_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg2_path_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_meth_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg2_meth_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_qself_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg2_qself_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_ufcs_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_blanketB_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_blanketB_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_blanketD_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_blanketBoth_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_blanketD_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_blanketBoth_meth_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg2_blanketB_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg2_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg2_proj_q"
+  }
+ ]
+}

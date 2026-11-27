@@ -1,0 +1,7 @@
+bm4_localsup_meth_e
+bm4_localsup_qself_e
+bm4_localsub_depsup_meth_e
+bm4_localsub_depsup_qself_e
+bm4_depsup_qself_e
+bm4_meth_dt_let_e
+bm4_meth_dt_ctor_e

@@ -1,0 +1,11 @@
+bm3_prelude_name_not_impl_e
+bm3_nonprelude_name_e
+bm3_std_trait_in_scope_q
+bm3_sealed_via_prelude_glob_q
+bm3_sealed_name_dep_only_e
+bm3_dep_glob_prelude_name_e
+bm3_qself_named_e
+bm3_qself_dt_e
+bm3_path_dt_e
+bm3_meth_dt_e
+bm3_path_dt_q

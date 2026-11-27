@@ -1,0 +1,90 @@
+{
+ "chain": null,
+ "deps": [],
+ "detail": true,
+ "id": "wg1",
+ "lib": false,
+ "note": "W-g1: thirteen implementors of the local bound / declaring trait (the bounded-CHA cap is 12). Executed: `_e` runs the one effectful implementor, `_q` a pure one",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "wg1_path_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_path_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_meth_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_meth_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_qself_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_qself_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_ufcs_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_ufcs_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_suppath_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_suppath_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_supmeth_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_supmeth_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_proj_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_projm_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_projm_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_decl_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_decl_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg1_qa_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg1_qa_q"
+  }
+ ]
+}

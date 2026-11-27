@@ -1,0 +1,20 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_wc1",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_wc1"
+ ],
+ "detail": true,
+ "id": "wc1",
+ "lib": false,
+ "nocompile_ok": true,
+ "note": "W-c1, edition 2021: TryFrom is in the prelude beside the dependency trait: rustc E0034 (compile-fails cell; bd2 is the 2018 executed column)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "wc1_tryfrom_2021_e"
+  }
+ ]
+}

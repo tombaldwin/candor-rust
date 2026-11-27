@@ -1,0 +1,10 @@
+[package]
+name = "cf_wg5g"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_wg5gd = { path = "fxdep_wg5gd" }
+fxdep_wg5gp = { path = "fxdep_wg5gp" }
+
+[workspace]

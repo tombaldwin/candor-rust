@@ -1,0 +1,43 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bm4",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bm4"
+ ],
+ "detail": true,
+ "id": "bm4",
+ "lib": false,
+ "note": "design bm4: the qself / method spellings that key right, and a method on a std type through a dependency trait",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "bm4_localsup_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm4_localsup_qself_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm4_localsub_depsup_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm4_localsub_depsup_qself_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm4_depsup_qself_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm4_meth_dt_let_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm4_meth_dt_ctor_e"
+  }
+ ]
+}

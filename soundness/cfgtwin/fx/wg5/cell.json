@@ -1,0 +1,97 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_wg5d",
+  "kind": "twohop",
+  "mid_dir": "fxdep_wg5p"
+ },
+ "deps": [
+  "fxdep_wg5d",
+  "fxdep_wg5p"
+ ],
+ "detail": true,
+ "id": "wg5",
+ "lib": false,
+ "note": "W-g5: consumer -> producer -> dependency; the consumer implements the dependency traits effectfully (Mine) or purely (Quiet), the producer is generic over them",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "wg5_flat_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_flat_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_flatfn_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_flatfn_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_supmeth_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_supmeth_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_suppath_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_suppath_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_supqself_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_supqself_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_lsdmeth_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_lsdmeth_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_lsdpath_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_lsdpath_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_proj_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_lsup_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_lsup_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg5_lsupm_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg5_lsupm_q"
+  }
+ ]
+}

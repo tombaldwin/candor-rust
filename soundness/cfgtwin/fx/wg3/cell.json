@@ -1,0 +1,111 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_wg3",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_wg3"
+ ],
+ "detail": true,
+ "id": "wg3",
+ "lib": false,
+ "note": "W-g3: a dependency trait renamed at the import, and dependency traits named Error/Read/Pointee, on the head and projection routes; the pure twin uses the same-leaf trait of the `q` module",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "wg3_ren_path_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_ren_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_ren_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_ren_path_q"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_ren_meth_q"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_ren_proj_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_err_path_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_err_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_err_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_err_path_q"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_err_meth_q"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_err_proj_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_read_path_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_read_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_read_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_read_path_q"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_read_meth_q"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_read_proj_q"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_ptr_path_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_ptr_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "wg3_ptr_proj_e"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_ptr_path_q"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_ptr_meth_q"
+  },
+  {
+   "kind": "q",
+   "name": "wg3_ptr_proj_q"
+  }
+ ]
+}

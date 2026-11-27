@@ -1,0 +1,87 @@
+{
+ "chain": {
+  "dep_dir": "fxdep_bm2",
+  "kind": "dep"
+ },
+ "deps": [
+  "fxdep_bm2"
+ ],
+ "detail": true,
+ "id": "bm2",
+ "lib": false,
+ "note": "design bm2: projections: local declaration (R1037), std head + local or dependency bound on the projection (R1940/R1952/R1953), dependency head (R1939), written binding (N5)",
+ "probes": [
+  {
+   "kind": "e",
+   "name": "bm2_localdecl_path_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm2_localdecl_path_q"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_localdecl_qpa_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_localdecl_q0_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_localdecl_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_localdecl_qa_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_stdhead_localproj_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_stdhead_localproj_meth_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_stdhead_depproj_incrate_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_stdhead_depsupproj_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_stdhead_depconstraint_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_stdhead_localsupproj_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_dephead_localproj_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_dephead_depproj_e"
+  },
+  {
+   "kind": "q",
+   "name": "bm2_dephead_noproj_q"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_bind_stdty_named_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_bind_stdty_scope_e"
+  },
+  {
+   "kind": "e",
+   "name": "bm2_bind_depty_localtrait_e"
+  }
+ ]
+}

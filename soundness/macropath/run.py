@@ -23,12 +23,13 @@ base.EXPECT = os.path.join(HERE, 'expect.tsv')
 _reading0 = base.reading
 
 
-def reading(row):
+def reading(row, detail=False):
     """The cfgtwin reading, plus `I`: a row with NO effect and NO Unknown that carries an `invisible` disclosure (SPEC 3.3 prefix
-    scope does not gate it, and chaining deletes it, so it is not a pass; cfgtwin folds it into `-`)."""
-    r = _reading0(row)
-    if r == '-' and row is not None and row.get('invisible'):
-        return 'I'
+    scope does not gate it, and chaining deletes it, so it is not a pass). cfgtwin's reader now prints such a row (and one carrying only
+    a `dispatchesOn` key) as `[]`; here an `invisible` one keeps its recorded `I`, and a key-only row reads `[]`."""
+    r = _reading0(row, detail)
+    if r.startswith('[]') and row is not None and row.get('invisible'):
+        return 'I' + r[2:]
     return r
 
 

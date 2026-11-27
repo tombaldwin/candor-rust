@@ -1,0 +1,7 @@
+[package]
+name = "fxdep_wg5gp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fxdep_wg5gd = { path = "../fxdep_wg5gd" }

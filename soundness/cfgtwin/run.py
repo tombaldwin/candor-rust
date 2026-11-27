@@ -12,7 +12,7 @@ What is held constant across arms (MATRIX.md section 0): the fixture bytes (read
 Readings are the probe's row in functions[]: `-` ABSENT or no effect and no Unknown; `E` a concrete effect; `U` Unknown;
 `E+U` both. Gate column: `U<rc>F<rc>` = exit code of `deny Unknown <probe>` / `deny Fs <probe>` (SPEC 3.3 prefix scope).
 
-Chained cells add probe rows named `<probe>@chained` (and, for the cache cell, `@rescan` / `@rescan-incr`); the join is proven LIVE
+Chained cells add probe rows named `<probe>@chained` (kind `twohop`: consumer over the producer's report scanned over the dependency's, and the dependency's) (and, for the cache cell, `@rescan` / `@rescan-incr`); the join is proven LIVE
 by the chained row (or the consumer's coverage) differing from the unchained scan, never assumed.
 
 expect.tsv columns: cell probe exec pub main cand gate_pub gate_main gate_cand. An EMPTY cell means "not recorded". The runner exits
@@ -47,17 +47,32 @@ def cells(pattern):
     return out
 
 
-def reading(row):
+def reading(row, detail=False):
+    """The cell's reading of one probe row: `-` ABSENT, or a row carrying nothing at all; `E` a concrete effect; `U` Unknown; `E+U` both;
+    `[]` a row with EMPTY `inferred` that carries an `invisible` and/or `dispatchesOn` disclosure. That last one is NOT a `-`: the row
+    is the disclosure (a gate-visible `invisible`, a join key a consumer chains on), and folding it into `-` is the instrument error
+    behind R1933 (a `-` reads as 'no row, nothing to lose').
+
+    `detail=True` (a cell whose cell.json says `"detail": true`) appends the disclosure itself, in the recorded token, with no spaces
+    (the reading is the first whitespace-separated token): `{inv=a,b;key=x,y}`, in the row's own order. Cells recorded before the
+    reader fix keep the bare token, so their recorded verdicts do not move except where a `-` was really a `[]`."""
     if row is None:
         return '-'
     inf = [e for e in (row.get('inferred') or row.get('effects') or [])]
     unk = 'Unknown' in inf
     conc = [e for e in inf if e != 'Unknown']
+    inv, key = row.get('invisible') or [], row.get('dispatchesOn') or []
     if conc and unk:
-        return 'E+U'
-    if conc:
-        return 'E'
-    return 'U' if unk else '-'
+        r = 'E+U'
+    elif conc:
+        r = 'E'
+    elif unk:
+        r = 'U'
+    else:
+        r = '[]' if (inv or key) else '-'
+    if detail and (inv or key):
+        r += '{' + ';'.join(([('inv=' + ','.join(inv))] if inv else []) + ([('key=' + ','.join(key))] if key else [])) + '}'
+    return r
 
 
 def rows_of(prefix):
@@ -109,6 +124,7 @@ def measure_cell(binp, c, scratch, want_gates):
     d = os.path.join(FX, cid)
     ch = c.get('chain')
     out = []
+    detail = bool(c.get('detail'))
     edit_dir = os.path.join(d, 'edit')
     if ch and ch['kind'] == 'cache-edit':
         # `edit/` holds the state-B replacement the runner copies in by hand. Inside the scanned directory it is a file no `mod`
@@ -122,7 +138,7 @@ def measure_cell(binp, c, scratch, want_gates):
         return [(p['name'], 'NOREPORT(rc=%d)' % rc, '') for p in c['probes']]
     for p in c['probes']:
         g = gate_codes(binp, d, scratch, cid + '.' + p['name'], p['name']) if want_gates else ''
-        out.append((p['name'], reading(find(rows, p['name'])), g))
+        out.append((p['name'], reading(find(rows, p['name']), detail), g))
     if ch and ch['kind'] == 'dep':
         dep = os.path.join(d, ch['dep_dir'])
         rc2, drows = scan(binp, dep, scratch, cid + '.dep')
@@ -131,8 +147,24 @@ def measure_cell(binp, c, scratch, want_gates):
         rc3, crows = scan(binp, d, scratch, cid + '.chained', env)
         for p in c['probes']:
             g = gate_codes(binp, d, scratch, cid + '.' + p['name'] + '.ch', p['name'], env) if want_gates else ''
-            r = reading(find(crows, p['name'])) if crows is not None else 'NOREPORT'
+            r = reading(find(crows, p['name']), detail) if crows is not None else 'NOREPORT'
             # whether the join is live is shown by the e13c control (chained != unchained there), not by this cell
+            live = '' if crows is None else ('' if json.dumps(crows, sort_keys=True) != json.dumps(rows, sort_keys=True) else ' (chained rows == unchained rows)')
+            out.append((p['name'] + '@chained', r + live, g))
+    elif ch and ch['kind'] == 'twohop':
+        # consumer (the cell) -> producer `mid_dir` -> dependency `dep_dir` (W-g5). The producer is scanned CHAINED over the dependency's report, the consumer over BOTH:
+        # a key the producer minted has to join the consumer's implementor across two hops. The join is proven live per row, as for `dep`.
+        dep = os.path.join(d, ch['dep_dir'])
+        mid = os.path.join(d, ch['mid_dir'])
+        scan(binp, dep, scratch, cid + '.dep')
+        dreps = glob.glob(os.path.join(scratch, cid + '.dep', 'r.*.scan.json'))
+        scan(binp, mid, scratch, cid + '.mid', {'CANDOR_DEPS': os.pathsep.join(dreps)})
+        mreps = glob.glob(os.path.join(scratch, cid + '.mid', 'r.*.scan.json'))
+        env = {'CANDOR_DEPS': os.pathsep.join(dreps + mreps)}
+        rc3, crows = scan(binp, d, scratch, cid + '.chained', env)
+        for p in c['probes']:
+            g = gate_codes(binp, d, scratch, cid + '.' + p['name'] + '.ch', p['name'], env) if want_gates else ''
+            r = reading(find(crows, p['name']), detail) if crows is not None else 'NOREPORT'
             live = '' if crows is None else ('' if json.dumps(crows, sort_keys=True) != json.dumps(rows, sort_keys=True) else ' (chained rows == unchained rows)')
             out.append((p['name'] + '@chained', r + live, g))
     elif ch and ch['kind'] == 'consumer':
@@ -142,8 +174,8 @@ def measure_cell(binp, c, scratch, want_gates):
         rcu, urows = scan(binp, cons, scratch, cid + '.consU')           # consumer, UNCHAINED
         rcc, crows = scan(binp, cons, scratch, cid + '.consC', env)      # consumer, chained against this arm's producer report
         cp = ch['consumer_probe']
-        r = reading(find(crows, cp)) if crows is not None else 'NOREPORT'
-        ru = reading(find(urows, cp)) if urows is not None else 'NOREPORT'
+        r = reading(find(crows, cp), detail) if crows is not None else 'NOREPORT'
+        ru = reading(find(urows, cp), detail) if urows is not None else 'NOREPORT'
         g = gate_codes(binp, cons, scratch, cid + '.' + cp, cp, env) if want_gates else ''
         live = '' if (crows is not None and json.dumps(crows, sort_keys=True) != json.dumps(urows, sort_keys=True)) else ' (chained rows == unchained rows)'
         out.append((cp + '@chained', r + live + (' [unchained %s]' % ru), g))
@@ -163,9 +195,9 @@ def measure_cell(binp, c, scratch, want_gates):
             subprocess.run([binp, w2, '--out', os.path.join(o2, 'r')] + list(flags), capture_output=True, text=True, env=env)
             rows2 = rows_of(os.path.join(o2, 'r'))
             rowsA = rows_of(os.path.join(o1, 'r'))
-            out.append((c['probes'][0]['name'] + '@' + tag, reading(find(rows2, c['probes'][0]['name'])) if rows2 is not None else 'NOREPORT',
+            out.append((c['probes'][0]['name'] + '@' + tag, reading(find(rows2, c['probes'][0]['name']), detail) if rows2 is not None else 'NOREPORT',
                         '' if not want_gates else ''))
-            out.append((c['probes'][0]['name'] + '@' + tag + '.stateA', reading(find(rowsA, c['probes'][0]['name'])) if rowsA is not None else 'NOREPORT', ''))
+            out.append((c['probes'][0]['name'] + '@' + tag + '.stateA', reading(find(rowsA, c['probes'][0]['name']), detail) if rowsA is not None else 'NOREPORT', ''))
     return out
 
 
@@ -235,7 +267,7 @@ def exec_truth(cs, scratch):
                     res[(cid, pn)] = 'RUN-FAIL'
                 else:
                     res[(cid, pn)] = 'Fs' if os.path.exists(mark) else 'none'
-        if ch and ch['kind'] == 'dep':
+        if ch and ch['kind'] in ('dep', 'twohop'):
             for p_ in c['probes']:
                 res[(cid, p_['name'] + '@chained')] = res.get((cid, p_['name']), '?')
         if ch and ch['kind'] == 'cache-edit':

@@ -48,13 +48,19 @@ def sub(s, **kw):
     return s
 
 
-def cell(cid, files, probes, deps=None, lib=False, extra=None, chain=None, note='', rustflags=None, hdr=True):
+def cell(cid, files, probes, deps=None, lib=False, extra=None, chain=None, note='', rustflags=None, hdr=True, edition='2021', nocompile=False,
+         detail=False, dep_deps=None):
     """files: relpath-under-src -> text (main.rs/lib.rs text is the BODY; HDR and the dispatcher are added).
     probes: list of (name, kind, body) where body is the fn body; the fn is `pub fn <name>() { body }`
     (a probe whose body is None is declared in `files` itself). `hdr=False` omits HDR (its `macro_rules!` definitions), for a
-    cell whose subject is a crate that defines NO macro (section N)."""
+    cell whose subject is a crate that defines NO macro (section N).
+    `edition` is the cell crate's edition (a dependency crate stays 2021). `nocompile=True` records `NOCOMPILE(Exxxx)` as the exec answer for a
+    cell rustc rejects (the reading of the engine over a program that does not compile is still recorded). `detail=True` records the row's
+    `invisible` / `dispatchesOn` disclosure in each reading (run.py `reading(detail=)`), for a cell whose subject is a KEY. `dep_deps` maps a
+    dependency crate dir to ITS dependencies, `{dname: {name: spec}}` (a two-hop chain)."""
     assert cid not in CELLS, cid
-    CELLS[cid] = dict(id=cid, files=files, probes=probes, deps=deps or {}, lib=lib, extra=extra or {}, chain=chain, note=note, hdr=hdr)
+    CELLS[cid] = dict(id=cid, files=files, probes=probes, deps=deps or {}, lib=lib, extra=extra or {}, chain=chain, note=note, hdr=hdr,
+                      edition=edition, nocompile=nocompile, detail=detail, dep_deps=dep_deps or {})
 
 
 def pred(cid, probe, pub, main, cand):
@@ -1246,6 +1252,435 @@ pub struct S_{id};
 """, id='fl24b')}, [('fl24b_e', 'e', 'use api_fl24b::Tr; S_fl24b.m()')], note='R1924: the trait named through a re-export')
 pred('fl24b', 'fl24b_e', '-', '-', 'U')
 
+# ----------------------------------------------------------------------------------------------- S. bound / projection dispatch (design rust-bound-dispatch, lane L0)
+# The acceptance matrix for ~/candor-handoff/rust-bound-dispatch-design (DESIGN.md section 3, FABLE-REVIEW.md edits 1 and 2). It pins NO engine behaviour beyond what
+# pub v0.43.0 and main `026a95b7` READ today: every cell is an executed fixture (`_e` writes the marker, `_q` does not) and `expect.tsv` records both arms; the `cand`
+# column is left for the lane that changes the engine. Every cell sets detail=True, so a reading carries the join KEY (`E{key=cf_bm1#Lt::lf}`,
+# `[]{inv=fxdep_bm1;key=fxdep_bm1#Dt::f}`): in this vein the key IS the answer a chained consumer joins on, and a bare `[]`/`E` hides a wrong one (R1954).
+# The package prefix is `cf_` (this runner's), not the design scratch's `fa_`.
+#   bm1-bm4  the design's executed matrix (generic head, projections, concrete std type, qself/method spellings), 65 probes, ported verbatim
+#   bd1, bd2 Fable's cells: N1 through `where`, an impl-level bound and a generic METHOD, `Self::lsf()` in a subtrait default (W-g4's answer); W-c1's edition-2018 column
+#   wg1      W-g1: every local-bound spelling with THIRTEEN implementors (the bounded-CHA cap is 12)
+#   wg2      W-g2: a blanket impl of the bound B, of the declaring trait D, or of both, with a pure twin trait that has no blanket
+#   wg3      W-g3: a dependency trait RENAMED at the import, and dependency traits named like std's (`Error`, `Read`, `Pointee`), on the path and projection routes
+#   wc1      W-c1 edition 2021: the same call as bd2 compiles to an AMBIGUITY (TryFrom is in the 2021 prelude): a NOCOMPILE cell
+#   wc3      W-c3: std `FromStr as _` beside a dependency `Parse`; rustc rejects `String::from_str`, so the cell documents resolver rule 1b
+#   wg5, wg5g W-g5: the TWO-HOP chain (consumer -> producer -> dependency): the only column where a wrong key is a gate flip; wg5g = the same, the producer importing by glob
+_ALLOW = '#![allow(unused, non_camel_case_types, non_snake_case, dead_code)]\n'
+
+
+def bm_cell(cid, main, dep, note, deps_extra=None, edition='2021', nocompile=False):
+    """A cell whose probes are the `pub fn <cid>_*()` declared in `main` (kind = the name's last letter), with one dependency crate `fxdep_<cid>`.
+    `DEP` in `main` names it; `EFF` is the executed write."""
+    main = main.replace('DEP', 'fxdep_' + cid)
+    probes = [(l.split('pub fn ')[1].split('(')[0], l.split('pub fn ')[1].split('(')[0][-1], None)
+              for l in main.splitlines() if ('pub fn %s_' % cid) in l]
+    assert probes and all(k in 'eq' for _, k, _ in probes), cid
+    cell(cid, {'main.rs': _ALLOW + main}, probes, deps={'fxdep_' + cid: '{ path = "fxdep_%s" }' % cid},
+         extra={'@dep/fxdep_%s/src/lib.rs' % cid: dep}, chain=dict(kind='dep', dep_dir='fxdep_' + cid), hdr=False, detail=True, note=note,
+         edition=edition, nocompile=nocompile)
+    for p, _, _ in probes:
+        pred(cid, p, 'record', 'record', 'record')
+
+
+_BM_DEP = """pub trait Dt { fn f(); fn m(&self); }
+pub trait SupD { fn sf(); fn sm(&self); }
+pub trait SubD: SupD {}
+pub trait HasA { type A; }
+pub trait Parse { fn from_str(s: &str) -> Self; }
+pub trait Df { fn default() -> Self; }
+pub trait Marker {}
+pub trait FromV { fn from_vec(v: Vec<u8>) -> Self; }
+pub struct DImpE; impl Dt for DImpE { fn f() { EFF } fn m(&self) { EFF } }
+pub struct DImpQ; impl Dt for DImpQ { fn f() {} fn m(&self) {} }
+impl Dt for String { fn f() { EFF } fn m(&self) { EFF } }
+impl Dt for u16 { fn f() {} fn m(&self) {} }
+pub struct DSupE; impl SupD for DSupE { fn sf() { EFF } fn sm(&self) { EFF } } impl SubD for DSupE {}
+pub struct DHas; impl HasA for DHas { type A = DImpE; }
+impl Parse for String { fn from_str(_s: &str) -> Self { EFF String::new() } }
+impl Df for std::time::Instant { fn default() -> Self { EFF std::time::Instant::now() } }
+impl FromV for std::ffi::OsString { fn from_vec(_v: Vec<u8>) -> Self { EFF std::ffi::OsString::new() } }
+"""
+bm_cell('bm1', """use DEP::{Dt, SupD, SubD, HasA};
+pub trait Lt { fn lf(); fn lm(&self); }
+pub trait LSup { fn lsf(); } pub trait LSub: LSup {}
+pub trait LSubD: DEP::SupD {}
+pub struct LoudL; impl Lt for LoudL { fn lf() { EFF } fn lm(&self) { EFF } }
+pub struct QuietL; impl Lt for QuietL { fn lf() {} fn lm(&self) {} }
+impl Lt for String { fn lf() { EFF } fn lm(&self) { EFF } }
+pub struct LoudD; impl DEP::Dt for LoudD { fn f() { EFF } fn m(&self) { EFF } }
+pub struct QuietD; impl DEP::Dt for QuietD { fn f() {} fn m(&self) {} }
+pub struct LS; impl LSup for LS { fn lsf() { EFF } } impl LSub for LS {}
+pub struct OnlySup; impl LSup for OnlySup { fn lsf() { EFF } }
+pub struct LSQ; impl LSup for LSQ { fn lsf() {} } impl LSub for LSQ {}
+pub struct LDS; impl DEP::SupD for LDS { fn sf() { EFF } fn sm(&self) { EFF } } impl LSubD for LDS {} impl DEP::SubD for LDS {}
+pub struct LoudFs; impl std::str::FromStr for LoudFs { type Err = (); fn from_str(_s: &str) -> Result<Self, ()> { EFF Ok(LoudFs) } }
+pub struct LoudDef; impl Default for LoudDef { fn default() -> Self { EFF LoudDef } }
+pub struct LoudIt; impl Iterator for LoudIt { type Item = u8; fn next(&mut self) -> Option<u8> { EFF None } }
+// B1 local bound
+fn g_b1_path<T: Lt>() { T::lf() }      pub fn bm1_b1_path_e() { g_b1_path::<LoudL>() }
+fn g_b1_pathq<T: Lt>() { T::lf() }     pub fn bm1_b1_path_q() { g_b1_pathq::<QuietL>() }
+fn g_b1_meth<T: Lt>(t: &T) { t.lm() }  pub fn bm1_b1_meth_e() { g_b1_meth(&LoudL) }
+fn g_b1_qs<T: Lt>() { <T as Lt>::lf() } pub fn bm1_b1_qself_e() { g_b1_qs::<LoudL>() }
+fn g_b1_ufcs<T: Lt>(t: &T) { Lt::lm(t) } pub fn bm1_b1_ufcs_e() { g_b1_ufcs(&LoudL) }
+fn g_b1_std<T: Lt>() { T::lf() }        pub fn bm1_b1_stdimpl_e() { g_b1_std::<String>() }
+// B2 dependency bound
+fn g_b2_path_in<T: Dt>() { T::f() }     pub fn bm1_b2_path_incrate_e() { g_b2_path_in::<LoudD>() }
+fn g_b2_path_inq<T: Dt>() { T::f() }    pub fn bm1_b2_path_incrate_q() { g_b2_path_inq::<QuietD>() }
+fn g_b2_path_dep<T: Dt>() { T::f() }    pub fn bm1_b2_path_depty_e() { g_b2_path_dep::<DEP::DImpE>() }
+fn g_b2_path_std<T: Dt>() { T::f() }    pub fn bm1_b2_path_stdty_e() { g_b2_path_std::<String>() }
+fn g_b2_path_stdq<T: Dt>() { T::f() }   pub fn bm1_b2_path_stdty_q() { g_b2_path_stdq::<u16>() }
+fn g_b2_meth_in<T: Dt>(t: &T) { t.m() } pub fn bm1_b2_meth_incrate_e() { g_b2_meth_in(&LoudD) }
+fn g_b2_qs_in<T: Dt>() { <T as Dt>::f() } pub fn bm1_b2_qself_incrate_e() { g_b2_qs_in::<LoudD>() }
+fn g_b2_ufcs_in<T: Dt>(t: &T) { Dt::m(t) } pub fn bm1_b2_ufcs_incrate_e() { g_b2_ufcs_in(&LoudD) }
+// B3 std bound, in-crate implementor of the std trait (R1955 class; README documented miss)
+fn g_b3_fromstr<T: std::str::FromStr>() { let _ = T::from_str("x"); } pub fn bm1_b3_path_fromstr_e() { g_b3_fromstr::<LoudFs>() }
+fn g_b3_fromstrq<T: std::str::FromStr>() { let _ = T::from_str("1"); } pub fn bm1_b3_path_fromstr_q() { g_b3_fromstrq::<u8>() }
+fn g_b3_default<T: Default>() { let _ = T::default(); } pub fn bm1_b3_path_default_e() { g_b3_default::<LoudDef>() }
+fn g_b3_next<T: Iterator>(mut t: T) { t.next(); } pub fn bm1_b3_meth_next_e() { g_b3_next(LoudIt) }
+fn g_b3_nextu<T: Iterator>(mut t: T) { Iterator::next(&mut t); } pub fn bm1_b3_ufcs_next_e() { g_b3_nextu(LoudIt) }
+fn g_b3_nextq<T: Iterator>(mut t: T) { <T as Iterator>::next(&mut t); } pub fn bm1_b3_qself_next_e() { g_b3_nextq(LoudIt) }
+// B4 mixed: dependency + local bound
+fn g_b4_loc<T: Dt + Lt>() { T::lf() }   pub fn bm1_b4_mixed_local_e() { g_b4_loc::<String>() }
+fn g_b4_dep<T: Dt + Lt>() { T::f() }    pub fn bm1_b4_mixed_dep_e() { g_b4_dep::<String>() }
+fn g_b4_def<T: Lt + Default>() { T::lf() } pub fn bm1_b4_mixed_std_e() { g_b4_def::<String>() }
+// B5 supertrait: local, dependency, and a local subtrait over a dependency supertrait
+fn g_b5_loc<T: LSub>() { T::lsf() }     pub fn bm1_b5_localsup_e() { g_b5_loc::<LS>() }
+fn g_b5_locq<T: LSub>() { T::lsf() }    pub fn bm1_b5_localsup_q() { g_b5_locq::<LSQ>() }
+fn g_b5_dep<T: SubD>() { T::sf() }      pub fn bm1_b5_depsup_e() { g_b5_dep::<DEP::DSupE>() }
+fn g_b5_depin<T: SubD>() { T::sf() }    pub fn bm1_b5_depsup_incrate_e() { g_b5_depin::<LDS>() }
+fn g_b5_depm<T: SubD>(t: &T) { t.sm() } pub fn bm1_b5_depsup_meth_e() { g_b5_depm(&DEP::DSupE) }
+fn g_b5_mix<T: LSubD>() { T::sf() }     pub fn bm1_b5_localsub_depsup_e() { g_b5_mix::<LDS>() }
+""", _BM_DEP,
+        'design bm1: a generic head T, bound shapes (local / dependency / std / mixed / supertrait) x implementor location x spelling (path, method, qself, UFCS)')
+bm_cell('bm2', """use DEP::{Dt, SupD, SubD, HasA};
+pub trait Lt { fn lf(); fn lm(&self); }
+pub trait HasL { type A: Lt; }
+pub trait LSup { fn lsf(); } pub trait LSub: LSup {}
+pub struct LoudL; impl Lt for LoudL { fn lf() { EFF } fn lm(&self) { EFF } }
+pub struct QuietL; impl Lt for QuietL { fn lf() {} fn lm(&self) {} }
+impl Lt for DEP::DImpE { fn lf() { EFF } fn lm(&self) { EFF } }
+pub struct HL; impl HasL for HL { type A = LoudL; }
+pub struct HLq; impl HasL for HLq { type A = QuietL; }
+pub struct LoudD; impl DEP::Dt for LoudD { fn f() { EFF } fn m(&self) { EFF } }
+pub struct ItL(Option<LoudL>); impl Iterator for ItL { type Item = LoudL; fn next(&mut self) -> Option<LoudL> { None } }
+pub struct ItD; impl Iterator for ItD { type Item = LoudD; fn next(&mut self) -> Option<LoudD> { None } }
+pub struct ItDS; impl Iterator for ItDS { type Item = DEP::DSupE; fn next(&mut self) -> Option<DEP::DSupE> { None } }
+pub struct ItS; impl Iterator for ItS { type Item = String; fn next(&mut self) -> Option<String> { None } }
+pub struct LS; impl LSup for LS { fn lsf() { EFF } } impl LSub for LS {}
+pub struct ItLS; impl Iterator for ItLS { type Item = LS; fn next(&mut self) -> Option<LS> { None } }
+// P-local declaration (R1037)
+fn g_p_ldecl<T: HasL>() { T::A::lf() }         pub fn bm2_localdecl_path_e() { g_p_ldecl::<HL>() }
+fn g_p_ldeclq<T: HasL>() { T::A::lf() }        pub fn bm2_localdecl_path_q() { g_p_ldeclq::<HLq>() }
+fn g_p_ldecl_qs<T: HasL>() { <T::A as Lt>::lf() } pub fn bm2_localdecl_qpa_e() { g_p_ldecl_qs::<HL>() }
+fn g_p_ldecl_q0<T: HasL>() { <T::A>::lf() }    pub fn bm2_localdecl_q0_e() { g_p_ldecl_q0::<HL>() }
+fn g_p_ldecl_m<T: HasL>(a: T::A) { a.lm() }    pub fn bm2_localdecl_meth_e() { g_p_ldecl_m::<HL>(LoudL) }
+fn g_p_ldecl_qa<T: HasL>() { <T as HasL>::A::lf() } pub fn bm2_localdecl_qa_e() { g_p_ldecl_qa::<HL>() }
+// std head, local bound on the projection (R1940, closed)
+fn g_p_stdloc<T: Iterator>() where T::Item: Lt { T::Item::lf() } pub fn bm2_stdhead_localproj_e() { g_p_stdloc::<ItL>() }
+fn g_p_stdloc_m<T: Iterator>(mut t: T) where T::Item: Lt { if let Some(x) = t.next() { x.lm() } } pub fn bm2_stdhead_localproj_meth_e() { g_p_stdloc_m(std::iter::once(LoudL)) }
+// std head, DEPENDENCY bound on the projection
+fn g_p_stddep<T: Iterator>() where T::Item: Dt { T::Item::f() } pub fn bm2_stdhead_depproj_incrate_e() { g_p_stddep::<ItD>() }
+fn g_p_stddep_sup<T: Iterator>() where T::Item: SubD { T::Item::sf() } pub fn bm2_stdhead_depsupproj_e() { g_p_stddep_sup::<ItDS>() }
+fn g_p_stddep_c<T: Iterator<Item: Dt>>() { T::Item::f() } pub fn bm2_stdhead_depconstraint_e() { g_p_stddep_c::<ItD>() }
+// std head, local SUBTRAIT bound on the projection, member in the local supertrait (R1953 shape, implementor implements both)
+fn g_p_locsup<T: Iterator>() where T::Item: LSub { T::Item::lsf() } pub fn bm2_stdhead_localsupproj_e() { g_p_locsup::<ItLS>() }
+// dependency head, local bound on projection (R1939, fc34_loc_e) and dependency head, the dependency's own projection
+fn g_p_deploc<T: HasA>() where T::A: Lt { T::A::lf() } pub fn bm2_dephead_localproj_e() { g_p_deploc::<DEP::DHas>() }
+fn g_p_depown<T: HasA>() where T::A: Dt { T::A::f() } pub fn bm2_dephead_depproj_e() { g_p_depown::<DEP::DHas>() }
+fn g_p_depbare<T: HasA>() { let _ = 0; } pub fn bm2_dephead_noproj_q() { g_p_depbare::<DEP::DHas>() }
+// written binding
+fn g_p_bindstd<T: Iterator<Item = String>>() { let _ = <T::Item as DEP::Parse>::from_str("x"); } pub fn bm2_bind_stdty_named_e() { g_p_bindstd::<ItS>() }
+fn g_p_bindstd2<T: Iterator<Item = String>>() { use DEP::Parse; let _ = T::Item::from_str("x"); } pub fn bm2_bind_stdty_scope_e() { g_p_bindstd2::<ItS>() }
+fn g_p_binddep<T: Iterator<Item = DEP::DImpE>>() { T::Item::lf() } pub fn bm2_bind_depty_localtrait_e() { g_p_binddep::<std::iter::Empty<DEP::DImpE>>() }
+""", _BM_DEP, 'design bm2: projections: local declaration (R1037), std head + local or dependency bound on the projection (R1940/R1952/R1953), dependency head (R1939), written binding (N5)')
+bm_cell('bm3', """
+mod a { use DEP::Df; pub fn e() { let _ = std::time::Instant::default(); } }
+mod b { use DEP::Parse; pub fn e() { let _ = String::from_str("x"); } }
+mod c { use std::str::FromStr; use DEP::Dt; pub fn q() { let _ = String::from_str("x"); } }
+mod d { use std::os::unix::prelude::*; use DEP::Marker; pub fn q() { let _ = std::ffi::OsString::from_vec(vec![]); } }
+mod e { use DEP::FromV; pub fn e() { let _ = std::ffi::OsString::from_vec(vec![]); } }
+mod f { use DEP::*; pub fn e() { let _ = std::time::Instant::default(); } }
+mod g { pub fn e() { let _ = <std::time::Instant as DEP::Df>::default(); } }
+mod h { use DEP::Dt; pub fn e() { <String as Dt>::f(); } pub fn e2() { String::f(); } pub fn e3() { "x".to_string().m(); } }
+mod i { use DEP::Dt; pub fn q() { u16::f(); } }
+pub fn bm3_prelude_name_not_impl_e() { a::e() }
+pub fn bm3_nonprelude_name_e() { b::e() }
+pub fn bm3_std_trait_in_scope_q() { c::q() }
+pub fn bm3_sealed_via_prelude_glob_q() { d::q() }
+pub fn bm3_sealed_name_dep_only_e() { e::e() }
+pub fn bm3_dep_glob_prelude_name_e() { f::e() }
+pub fn bm3_qself_named_e() { g::e() }
+pub fn bm3_qself_dt_e() { h::e() }
+pub fn bm3_path_dt_e() { h::e2() }
+pub fn bm3_meth_dt_e() { h::e3() }
+pub fn bm3_path_dt_q() { i::q() }
+""", _BM_DEP, 'design bm3: a concrete std type and the scope of a trait name (R1757/R1913/R1951/R1956, N6/N7)')
+bm_cell('bm4', """use DEP::{Dt, SupD, SubD};
+pub trait LSup { fn lsf(); fn lsm(&self); } pub trait LSub: LSup {}
+pub trait LSubD: DEP::SupD {}
+pub struct LS; impl LSup for LS { fn lsf() { EFF } fn lsm(&self) { EFF } } impl LSub for LS {}
+pub struct LDS; impl DEP::SupD for LDS { fn sf() { EFF } fn sm(&self) { EFF } } impl LSubD for LDS {}
+fn g4_lsm<T: LSub>(t: &T) { t.lsm() }        pub fn bm4_localsup_meth_e() { g4_lsm(&LS) }
+fn g4_lsq<T: LSub>() { <T as LSup>::lsf() }  pub fn bm4_localsup_qself_e() { g4_lsq::<LS>() }
+fn g4_mixm<T: LSubD>(t: &T) { t.sm() }       pub fn bm4_localsub_depsup_meth_e() { g4_mixm(&LDS) }
+fn g4_mixq<T: LSubD>() { <T as SupD>::sf() } pub fn bm4_localsub_depsup_qself_e() { g4_mixq::<LDS>() }
+fn g4_depq<T: SubD>() { <T as SupD>::sf() }  pub fn bm4_depsup_qself_e() { g4_depq::<DEP::DSupE>() }
+mod h { use DEP::Dt; pub fn e1() { let s = String::new(); s.m(); } pub fn e2() { String::new().m(); } }
+pub fn bm4_meth_dt_let_e() { h::e1() }
+pub fn bm4_meth_dt_ctor_e() { h::e2() }
+""", _BM_DEP, 'design bm4: the qself / method spellings that key right, and a method on a std type through a dependency trait')
+
+# bd1 (Fable): N1 through a `where` clause, an impl-level bound and a generic METHOD; `Self::lsf()` in a subtrait default body called through `T::go()` (W-g4's executed answer:
+# main E with keys on both traits). The qself spelling that names the SUBtrait (`<T as LSub>::lsf()`) does not compile (E0576: `lsf` is not in `LSub`), so the
+# declaring-trait claim of design A1 holds by rule 1b and NO cell is written for it (FABLE-REVIEW edit 1).
+cell('bd1', {'main.rs': _ALLOW + sub("""pub trait LSup_bd1 { fn lsf(); }
+pub trait LSub_bd1: LSup_bd1 { fn go() { Self::lsf() } }
+pub struct LS_bd1; impl LSup_bd1 for LS_bd1 { fn lsf() { EFF } } impl LSub_bd1 for LS_bd1 {}
+pub struct LSQ_bd1; impl LSup_bd1 for LSQ_bd1 { fn lsf() {} } impl LSub_bd1 for LSQ_bd1 {}
+pub struct LD_bd1; impl fxdep_bd1::SupD for LD_bd1 { fn sf() { EFF } } impl fxdep_bd1::SubD for LD_bd1 {}
+pub struct W_bd1<T>(std::marker::PhantomData<T>);
+impl<T: LSub_bd1> W_bd1<T> { pub fn go() { T::lsf() } }
+pub struct H_bd1; impl H_bd1 { pub fn gm<T: LSub_bd1>(&self) { T::lsf() } }
+fn g_where<T>() where T: LSub_bd1 { T::lsf() }
+fn g_whereq<T>() where T: LSub_bd1 { T::lsf() }
+fn g_selfdef<T: LSub_bd1>() { T::go() }
+pub fn bd1_where_e() { g_where::<LS_bd1>() }
+pub fn bd1_where_q() { g_whereq::<LSQ_bd1>() }
+pub fn bd1_implgen_e() { W_bd1::<LS_bd1>::go() }
+pub fn bd1_method_gen_e() { H_bd1.gm::<LS_bd1>() }
+pub fn bd1_selfdef_e() { g_selfdef::<LS_bd1>() }
+""", id='bd1')},
+     [('bd1_where_e', 'e', None), ('bd1_where_q', 'q', None), ('bd1_implgen_e', 'e', None), ('bd1_method_gen_e', 'e', None), ('bd1_selfdef_e', 'e', None)],
+     deps={'fxdep_bd1': '{ path = "fxdep_bd1" }'}, extra={'@dep/fxdep_bd1/src/lib.rs': 'pub trait SupD { fn sf(); }\npub trait SubD: SupD {}\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_bd1'), hdr=False, detail=True,
+     note='N1 (an associated fn declared in a local SUPERtrait) through `where T: LSub`, `impl<T: LSub> W<T>` and a generic method; `Self::lsf()` in a subtrait default (W-g4)')
+for _p in ('bd1_where_e', 'bd1_where_q', 'bd1_implgen_e', 'bd1_method_gen_e', 'bd1_selfdef_e'):
+    pred('bd1', _p, 'record', 'record', 'record')
+# bd2 (Fable, W-c1 edition-2018 column): `String::try_from(1u8)` through a dependency `TryFromX`; TryFrom is NOT in the 2018 prelude, so the dependency's impl runs.
+cell('bd2', {'main.rs': _ALLOW + 'mod a_bd2 { use fxdep_bd2::TryFromX; pub fn e() { let _ = String::try_from(1u8); } }\npub fn bd2_tryfrom_2018_e() { a_bd2::e() }\n'},
+     [('bd2_tryfrom_2018_e', 'e', None)], deps={'fxdep_bd2': '{ path = "fxdep_bd2" }'}, edition='2018',
+     extra={'@dep/fxdep_bd2/src/lib.rs': 'pub trait TryFromX { fn try_from(x: u8) -> Self; }\nimpl TryFromX for String { fn try_from(_x: u8) -> Self { EFF String::new() } }\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_bd2'), hdr=False, detail=True,
+     note='W-c1, edition 2018: TryFrom is not in the prelude, so `String::try_from(1u8)` with only the dependency trait in scope runs the dependency (R1951 population)')
+pred('bd2', 'bd2_tryfrom_2018_e', 'record', 'record', 'record')
+
+# wg1 (W-g1): the CHA cap. A local trait with THIRTEEN implementors (one effectful, I0) is past the bounded-CHA band (12), so a bound-set answer must be a true
+# `dispatch:<D>.<m>` hedge (or the real effect), never silence. Every spelling of the local-bound population (path, method, qself, UFCS, a member reached through a
+# supertrait (N1), a projection bound on a std head (R1940), a local declaration (R1037), QA (N3)); every `_q` is its OWN helper over a pure implementor.
+_W1 = ['I%d_wg1' % i for i in range(13)]
+_w1_impls = ''.join('pub struct %s; impl Lt for %s { fn lf() %s fn lm(&self) %s }\n' % (n, n, '{ EFF }' if i == 0 else '{}', '{ EFF }' if i == 0 else '{}')
+                    for i, n in enumerate(_W1))
+_w1_sup = ''.join('pub struct S%d_wg1; impl LSup for S%d_wg1 { fn lsf() %s fn lsm(&self) %s } impl LSub for S%d_wg1 {}\n' % (i, i, '{ EFF }' if i == 0 else '{}', '{ EFF }' if i == 0 else '{}', i)
+                  for i in range(13))
+_w1_shapes = [
+    # (name, generic helper body template with {g} for the helper name, e instantiation, q instantiation)
+    ('path',   'fn {g}<T: Lt>() { T::lf() }',                                  '{g}::<I0_wg1>()',               '{g}::<I1_wg1>()'),
+    ('meth',   'fn {g}<T: Lt>(t: &T) { t.lm() }',                              '{g}(&I0_wg1)',                  '{g}(&I1_wg1)'),
+    ('qself',  'fn {g}<T: Lt>() { <T as Lt>::lf() }',                          '{g}::<I0_wg1>()',               '{g}::<I1_wg1>()'),
+    ('ufcs',   'fn {g}<T: Lt>(t: &T) { Lt::lm(t) }',                           '{g}(&I0_wg1)',                  '{g}(&I1_wg1)'),
+    ('suppath', 'fn {g}<T: LSub>() { T::lsf() }',                              '{g}::<S0_wg1>()',               '{g}::<S1_wg1>()'),
+    ('supmeth', 'fn {g}<T: LSub>(t: &T) { t.lsm() }',                          '{g}(&S0_wg1)',                  '{g}(&S1_wg1)'),
+    ('proj',   'fn {g}<T: Iterator>() where T::Item: Lt { T::Item::lf() }',    '{g}::<It0_wg1>()',              '{g}::<It1_wg1>()'),
+    ('projm',  'fn {g}<T: Iterator>(mut t: T) where T::Item: Lt { if let Some(x) = t.next() { x.lm() } }', '{g}(std::iter::once(I0_wg1))', '{g}(std::iter::once(I1_wg1))'),
+    ('decl',   'fn {g}<T: HasL>() { T::A::lf() }',                             '{g}::<H0_wg1>()',               '{g}::<H1_wg1>()'),
+    ('qa',     'fn {g}<T: HasL>() { <T as HasL>::A::lf() }',                   '{g}::<H0_wg1>()',               '{g}::<H1_wg1>()'),
+]
+_w1_main = ('pub trait Lt { fn lf(); fn lm(&self); }\npub trait LSup { fn lsf(); fn lsm(&self); } pub trait LSub: LSup {}\npub trait HasL { type A: Lt; }\n'
+            + _w1_impls + _w1_sup +
+            'pub struct It0_wg1; impl Iterator for It0_wg1 { type Item = I0_wg1; fn next(&mut self) -> Option<I0_wg1> { None } }\n'
+            'pub struct It1_wg1; impl Iterator for It1_wg1 { type Item = I1_wg1; fn next(&mut self) -> Option<I1_wg1> { None } }\n'
+            'pub struct H0_wg1; impl HasL for H0_wg1 { type A = I0_wg1; }\npub struct H1_wg1; impl HasL for H1_wg1 { type A = I1_wg1; }\n')
+_w1_probes = []
+for _n, _g, _e, _q in _w1_shapes:
+    for _k, _inst in (('e', _e), ('q', _q)):
+        _h = 'g_%s_%s' % (_n, _k)
+        _w1_main += _g.replace('{g}', _h) + '\npub fn wg1_%s_%s() { %s }\n' % (_n, _k, _inst.replace('{g}', _h) + ';')
+        _w1_probes.append(('wg1_%s_%s' % (_n, _k), _k, None))
+cell('wg1', {'main.rs': _ALLOW + _w1_main}, _w1_probes, hdr=False, detail=True,
+     note='W-g1: thirteen implementors of the local bound / declaring trait (the bounded-CHA cap is 12). Executed: `_e` runs the one effectful implementor, `_q` a pure one')
+for _p, _, _ in _w1_probes:
+    pred('wg1', _p, 'record', 'record', 'record')
+
+# wg2 (W-g2): a BLANKET impl of the bound B, of the declaring trait D, or of both. The blanket body is effectful, so every `_e` writes. `Ln` is the pure twin trait:
+# no blanket, two pure implementors, the same spellings; it must read `-` (an over-charge on it is a fabrication). NB the PATH spelling of a member reached through a
+# supertrait (`T: LSub`, `T::lsf()`) is N1 and reads `-` on every arm today whatever the impls, so the blanket-of-B/D/BOTH cells also carry a METHOD spelling, which does not.
+_w2_main = '''pub trait Mk {}
+pub trait Lt { fn lf(); fn lm(&self); }
+pub struct M_wg2; impl Mk for M_wg2 {}
+impl<X: Mk> Lt for X { fn lf() { EFF } fn lm(&self) { EFF } }
+pub struct P_wg2; impl Lt for P_wg2 { fn lf() {} fn lm(&self) {} }
+pub trait Ln { fn nf(); fn nm(&self); }
+pub struct N0_wg2; impl Ln for N0_wg2 { fn nf() {} fn nm(&self) {} }
+pub struct N1_wg2; impl Ln for N1_wg2 { fn nf() {} fn nm(&self) {} }
+// blanket of D (declaring) and of B (bound) in a supertrait pair
+pub trait LSup { fn lsf(); fn lsm(&self); } pub trait LSub: LSup {}
+pub struct LM_wg2; impl Mk for LM_wg2 {} impl LSup for LM_wg2 { fn lsf() { EFF } fn lsm(&self) { EFF } }
+impl<X: Mk + LSup> LSub for X {}                              // blanket of the BOUND B; D (LSup) is explicit
+pub trait LSup2 { fn lsf2(); fn lsm2(&self); }  pub trait LSub2: LSup2 {}
+impl<X: Mk> LSup2 for X { fn lsf2() { EFF } fn lsm2(&self) { EFF } }                  // blanket of the DECLARING trait D
+impl LSub2 for M_wg2 {}
+pub trait LSup3 { fn lsf3(); fn lsm3(&self); }  pub trait LSub3: LSup3 {}
+impl<X: Mk> LSup3 for X { fn lsf3() { EFF } fn lsm3(&self) { EFF } }                  // blanket of BOTH
+impl<X: Mk> LSub3 for X {}
+pub trait LSupn { fn nsf(); } pub trait LSubn: LSupn {}
+pub struct SN0_wg2; impl LSupn for SN0_wg2 { fn nsf() {} } impl LSubn for SN0_wg2 {}
+pub struct It_wg2; impl Iterator for It_wg2 { type Item = M_wg2; fn next(&mut self) -> Option<M_wg2> { None } }
+pub struct Itn_wg2; impl Iterator for Itn_wg2 { type Item = N0_wg2; fn next(&mut self) -> Option<N0_wg2> { None } }
+fn g_path<T: Lt>() { T::lf() }                   pub fn wg2_path_e() { g_path::<M_wg2>() }
+fn g_pathn<T: Ln>() { T::nf() }                  pub fn wg2_path_q() { g_pathn::<N0_wg2>() }
+fn g_meth<T: Lt>(t: &T) { t.lm() }               pub fn wg2_meth_e() { g_meth(&M_wg2) }
+fn g_methn<T: Ln>(t: &T) { t.nm() }              pub fn wg2_meth_q() { g_methn(&N1_wg2) }
+fn g_qself<T: Lt>() { <T as Lt>::lf() }          pub fn wg2_qself_e() { g_qself::<M_wg2>() }
+fn g_qselfn<T: Ln>() { <T as Ln>::nf() }         pub fn wg2_qself_q() { g_qselfn::<N0_wg2>() }
+fn g_ufcs<T: Lt>(t: &T) { Lt::lm(t) }            pub fn wg2_ufcs_e() { g_ufcs(&M_wg2) }
+fn g_bb<T: LSub>() { T::lsf() }                  pub fn wg2_blanketB_e() { g_bb::<LM_wg2>() }
+fn g_bbm<T: LSub>(t: &T) { t.lsm() }             pub fn wg2_blanketB_meth_e() { g_bbm(&LM_wg2) }
+fn g_bd<T: LSub2>() { T::lsf2() }                pub fn wg2_blanketD_e() { g_bd::<M_wg2>() }
+fn g_bboth<T: LSub3>() { T::lsf3() }             pub fn wg2_blanketBoth_e() { g_bboth::<M_wg2>() }
+fn g_bdm<T: LSub2>(t: &T) { t.lsm2() }           pub fn wg2_blanketD_meth_e() { g_bdm(&M_wg2) }
+fn g_bbothm<T: LSub3>(t: &T) { t.lsm3() }        pub fn wg2_blanketBoth_meth_e() { g_bbothm(&M_wg2) }
+fn g_supn<T: LSubn>() { T::nsf() }               pub fn wg2_blanketB_q() { g_supn::<SN0_wg2>() }
+fn g_proj<I: Iterator>() where I::Item: Lt { I::Item::lf() }   pub fn wg2_proj_e() { g_proj::<It_wg2>() }
+fn g_projn<I: Iterator>() where I::Item: Ln { I::Item::nf() }  pub fn wg2_proj_q() { g_projn::<Itn_wg2>() }
+'''
+cell('wg2', {'main.rs': _ALLOW + _w2_main},
+     [(l.split('pub fn ')[1].split('(')[0], l.split('pub fn ')[1].split('(')[0][-1], None) for l in _w2_main.splitlines() if 'pub fn wg2_' in l],
+     hdr=False, detail=True,
+     note='W-g2: a blanket impl of the bound B, of the declaring trait D, or of both (the bound set "may cover"), beside a pure twin trait with no blanket')
+for _l in _w2_main.splitlines():
+    if 'pub fn wg2_' in _l:
+        _p = _l.split('pub fn ')[1].split('(')[0]
+        pred('wg2', _p, 'record', 'record', 'record')
+
+# wg3 (W-g3): the ORIGIN of a bound trait is decided by its resolved root, never its leaf. A dependency trait renamed at the import (`use dep::Sub as DS`), and dependency
+# traits named like std's (`Error`, `Read`, `Pointee`: R1952's population), on the head (`T::m`) route and the projection (`where I::Item: ..`) route. The `_q` twin
+# uses the SAME-LEAF trait from the dependency's `q` module, implemented only by the pure `DQ` (a twin sharing the trait with the effectful `DE` would read charged
+# on every arm, because a key names a trait, not a type).
+_w3_dep = '''pub trait Sub { fn sf(); fn sm(&self); }
+pub trait Error { fn ef(); fn em(&self); }
+pub trait Read { fn rf(); fn rm(&self); }
+pub trait Pointee { fn pf(); fn pm(&self); }
+pub struct DE; pub struct DQ;
+impl Sub for DE { fn sf() { EFF } fn sm(&self) { EFF } }
+impl Error for DE { fn ef() { EFF } fn em(&self) { EFF } }
+impl Read for DE { fn rf() { EFF } fn rm(&self) { EFF } }
+impl Pointee for DE { fn pf() { EFF } fn pm(&self) { EFF } }
+pub mod q {
+    pub trait Sub { fn sf(); fn sm(&self); }
+    pub trait Error { fn ef(); fn em(&self); }
+    pub trait Read { fn rf(); fn rm(&self); }
+    pub trait Pointee { fn pf(); fn pm(&self); }
+    impl Sub for super::DQ { fn sf() {} fn sm(&self) {} }
+    impl Error for super::DQ { fn ef() {} fn em(&self) {} }
+    impl Read for super::DQ { fn rf() {} fn rm(&self) {} }
+    impl Pointee for super::DQ { fn pf() {} fn pm(&self) {} }
+}
+'''
+_w3_main = '''use fxdep_wg3::{DE, DQ};
+use fxdep_wg3::Sub as DS;
+use fxdep_wg3::q::Sub as DSQ;
+pub struct ItE_wg3; impl Iterator for ItE_wg3 { type Item = DE; fn next(&mut self) -> Option<DE> { None } }
+pub struct ItQ_wg3; impl Iterator for ItQ_wg3 { type Item = DQ; fn next(&mut self) -> Option<DQ> { None } }
+'''
+_w3_probes = []
+for _n, _f, _m in (('ren', 'sf', 'sm'), ('err', 'ef', 'em'), ('read', 'rf', 'rm'), ('ptr', 'pf', 'pm')):
+    for _k, _ty in (('e', 'DE'), ('q', 'DQ')):
+        _tr = {('ren', 'e'): 'DS', ('ren', 'q'): 'DSQ'}.get((_n, _k)) or 'fxdep_wg3::%s%s' % ('q::' if _k == 'q' else '', {'err': 'Error', 'read': 'Read', 'ptr': 'Pointee'}[_n])
+        # a projection's `I::Item::f()` needs the trait IN SCOPE (the head `T::f()` does not): import it under its leaf inside the helper's module
+        _w3_main += 'mod m_%s_%s { use super::*; %s\n' % (_n, _k, '' if _n == 'ren' else 'use %s as Tr_%s_%s; ' % (_tr, _n, _k))
+        _w3_main += '    pub fn path<T: %s>() { T::%s() }\n    pub fn meth<T: %s>(t: &T) { t.%s() }\n' % (_tr, _f, _tr, _m)
+        _w3_main += '    pub fn proj<I: Iterator>() where I::Item: %s { I::Item::%s() }\n}\n' % (_tr, _f)
+        _w3_main += ('pub fn wg3_%s_path_%s() { m_%s_%s::path::<%s>() }\npub fn wg3_%s_meth_%s() { m_%s_%s::meth(&%s) }\npub fn wg3_%s_proj_%s() { m_%s_%s::proj::<It%s_wg3>() }\n'
+                     % (_n, _k, _n, _k, _ty, _n, _k, _n, _k, _ty, _n, _k, _n, _k, _k.upper()))
+        _w3_probes += [('wg3_%s_%s_%s' % (_n, _s, _k), _k, None) for _s in ('path', 'meth', 'proj')]
+cell('wg3', {'main.rs': _ALLOW + _w3_main}, _w3_probes, deps={'fxdep_wg3': '{ path = "fxdep_wg3" }'}, extra={'@dep/fxdep_wg3/src/lib.rs': _w3_dep},
+     chain=dict(kind='dep', dep_dir='fxdep_wg3'), hdr=False, detail=True,
+     note='W-g3: a dependency trait renamed at the import, and dependency traits named Error/Read/Pointee, on the head and projection routes; the pure twin uses the same-leaf trait of the `q` module')
+for _p, _, _ in _w3_probes:
+    pred('wg3', _p, 'record', 'record', 'record')
+
+# wc1 (W-c1, edition 2021): the bd2 call under the 2021 prelude. TryFrom is in scope beside the dependency's TryFromX, so rustc reports the ambiguity (E0034) and the
+# program does not compile: the cell documents the compiles-as-evidence rule (resolver 1b), the 2018 column (bd2) is the executed answer. The engine's readings are
+# still recorded: a scan of a program that does not compile is what a user's editor sees mid-edit.
+cell('wc1', {'main.rs': _ALLOW + 'mod a_wc1 { use fxdep_wc1::TryFromX; pub fn e() { let _ = String::try_from(1u8); } }\npub fn wc1_tryfrom_2021_e() { a_wc1::e() }\n'},
+     [('wc1_tryfrom_2021_e', 'e', None)], deps={'fxdep_wc1': '{ path = "fxdep_wc1" }'}, nocompile=True,
+     extra={'@dep/fxdep_wc1/src/lib.rs': 'pub trait TryFromX { fn try_from(x: u8) -> Self; }\nimpl TryFromX for String { fn try_from(_x: u8) -> Self { EFF String::new() } }\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_wc1'), hdr=False, detail=True,
+     note='W-c1, edition 2021: TryFrom is in the prelude beside the dependency trait: rustc E0034 (compile-fails cell; bd2 is the 2018 executed column)')
+pred('wc1', 'wc1_tryfrom_2021_e', 'record', 'record', 'record')
+# wc3 (W-c3): the std trait imported `as _` beside a dependency trait with the same member name: the call is ambiguous, rustc rejects it (E0034).
+cell('wc3', {'main.rs': _ALLOW + 'mod a_wc3 { use std::str::FromStr as _; use fxdep_wc3::Parse; pub fn e() { let _ = String::from_str("x"); } }\npub fn wc3_fromstr_as_e() { a_wc3::e() }\n'},
+     [('wc3_fromstr_as_e', 'e', None)], deps={'fxdep_wc3': '{ path = "fxdep_wc3" }'}, nocompile=True,
+     extra={'@dep/fxdep_wc3/src/lib.rs': 'pub trait Parse { fn from_str(s: &str) -> Self; }\nimpl Parse for String { fn from_str(_s: &str) -> Self { EFF String::new() } }\n'},
+     chain=dict(kind='dep', dep_dir='fxdep_wc3'), hdr=False, detail=True,
+     note='W-c3: std FromStr `as _` beside a dependency trait declaring from_str: rustc E0034 (compile-fails cell; documents resolver rule 1b)')
+pred('wc3', 'wc3_fromstr_as_e', 'record', 'record', 'record')
+
+# wg5 (W-g5): the TWO-HOP chain, consumer C (this crate) -> producer P (`fxdep_wg5p`) -> dependency D (`fxdep_wg5d`), after R1794's `sup/` fixture. D declares a flat trait
+# `Flat`, a supertrait `BaseS` and a subtrait `SubS: BaseS`; P is generic over D's traits (every key cell of the design: head bound on the dependency SUBtrait with
+# the member in its supertrait, path and method; a LOCAL subtrait over the dependency supertrait (N2); the qself spelling that keys right; a std head with a
+# dependency-SUBtrait bound on the projection; a local supertrait (N1)); C supplies an effectful implementor (`Mine`) or a pure one (`Quiet`) and calls P. The
+# producer's key must name the trait that DECLARES the member, or C's implementor (published under the declaring trait) never joins and C reads only an
+# `Unknown`: `deny Fs` 0 over code that writes. run.py reads three arms for each probe: C alone, C chained against P, and the TWO-HOP arm
+# (`<probe>@chained`: D's report, P's report scanned over D's, C scanned over both).
+_w5_shapes = [
+    # (name, producer fn template over {g} and the trait-family suffix {S}, consumer call template)
+    ('flat',    'pub fn {g}<X: Flat{S}>(x: &X) { x.f_go() }',                                   '{p}::{g}(&{T})'),
+    ('flatfn',  'pub fn {g}<X: Flat{S}>() { X::f_fn() }',                                       '{p}::{g}::<{T}>()'),
+    ('supmeth', 'pub fn {g}<X: SubS{S}>(x: &X) { x.s_go() }',                                   '{p}::{g}(&{T})'),
+    ('suppath', 'pub fn {g}<X: SubS{S}>() { X::s_fn() }',                                       '{p}::{g}::<{T}>()'),
+    ('supqself', 'pub fn {g}<X: SubS{S}>() { <X as BaseS{S}>::s_fn() }',                        '{p}::{g}::<{T}>()'),
+    ('lsdmeth', 'pub fn {g}<X: LSubD{S}>(x: &X) { x.s_go() }',                                  '{p}::{g}(&{T})'),
+    ('lsdpath', 'pub fn {g}<X: LSubD{S}>() { X::s_fn() }',                                      '{p}::{g}::<{T}>()'),
+    ('proj',    'pub fn {g}<I: Iterator>() where I::Item: SubS{S} { I::Item::s_fn() }',         '{p}::{g}::<It{K}_wg5>()'),
+    ('lsup',    'pub fn {g}<X: LSub{S}>() { X::lsf() }',                                        '{p}::{g}::<{T}>()'),
+    ('lsupm',   'pub fn {g}<X: LSub{S}>(x: &X) { x.lsm() }',                                    '{p}::{g}(&{T})'),
+]
+# Two trait FAMILIES: the `_e` probes use the plain traits, implemented only by `Mine` (effectful); the `_q` twins use the `Q`-suffixed copies, implemented only by `Quiet`
+# (pure). A twin that shared a trait with `Mine` would read charged on every arm (the join charges every implementor of the keyed trait): a vacuous control.
+# `wg5g` is the ONE-VARIABLE variant: the producer P names the dependency's traits through `use dep::*` instead of an explicit import. Same bytes otherwise; measured, the
+# producer then publishes no key for its bound and the consumer's `deny Fs` reads 0 over executed writes on v0.43.0 and main (the flat control included).
+def w5_cell(cid, glob):
+    dn, pn = 'fxdep_%sd' % cid, 'fxdep_%sp' % cid
+    d = ''.join('''pub trait Flat%s { fn f_go(&self); fn f_fn(); }
+pub trait BaseS%s { fn s_go(&self); fn s_fn(); }
+pub trait SubS%s: BaseS%s {}
+''' % (S_, S_, S_, S_) for S_ in ('', 'Q'))
+    imp = 'use %s::{Flat, FlatQ, BaseS, BaseSQ, SubS, SubSQ};\n' % dn
+    p_ = ('use %s::*;\n' % dn if glob else imp) + ''.join('''pub trait LSubD%s: %s::BaseS%s {}
+pub trait LSup%s { fn lsf(); fn lsm(&self); } pub trait LSub%s: LSup%s {}
+''' % (S_, dn, S_, S_, S_, S_) for S_ in ('', 'Q'))
+    m = imp + '''pub struct Mine; pub struct Quiet;
+impl Flat for Mine { fn f_go(&self) { EFF } fn f_fn() { EFF } }   impl FlatQ for Quiet { fn f_go(&self) {} fn f_fn() {} }
+impl BaseS for Mine { fn s_go(&self) { EFF } fn s_fn() { EFF } }  impl BaseSQ for Quiet { fn s_go(&self) {} fn s_fn() {} }
+impl SubS for Mine {}  impl SubSQ for Quiet {}
+impl @P@::LSubD for Mine {}  impl @P@::LSubDQ for Quiet {}
+impl @P@::LSup for Mine { fn lsf() { EFF } fn lsm(&self) { EFF } }  impl @P@::LSupQ for Quiet { fn lsf() {} fn lsm(&self) {} }
+impl @P@::LSub for Mine {}  impl @P@::LSubQ for Quiet {}
+pub struct ItE_@C@; impl Iterator for ItE_@C@ { type Item = Mine; fn next(&mut self) -> Option<Mine> { None } }
+pub struct ItQ_@C@; impl Iterator for ItQ_@C@ { type Item = Quiet; fn next(&mut self) -> Option<Quiet> { None } }
+'''.replace('@P@', pn).replace('@C@', cid)
+    probes = []
+    for n_, g_, c_ in _w5_shapes:
+        for k_, T_, S_ in (('e', 'Mine', ''), ('q', 'Quiet', 'Q')):
+            h_ = 'p_%s_%s' % (n_, k_)
+            p_ += g_.replace('{g}', h_).replace('{S}', S_) + '\n'
+            m += 'pub fn %s_%s_%s() { %s; }\n' % (cid, n_, k_, c_.replace('{p}', pn).replace('{g}', h_).replace('{T}', T_).replace('{K}', k_.upper()).replace('_wg5>', '_%s>' % cid))
+            probes.append(('%s_%s_%s' % (cid, n_, k_), k_, None))
+    cell(cid, {'main.rs': _ALLOW + m}, probes, deps={dn: '{ path = "%s" }' % dn, pn: '{ path = "%s" }' % pn},
+         extra={'@dep/%s/src/lib.rs' % dn: d, '@dep/%s/src/lib.rs' % pn: p_}, dep_deps={pn: {dn: '{ path = "../%s" }' % dn}},
+         chain=dict(kind='twohop', dep_dir=dn, mid_dir=pn), hdr=False, detail=True,
+         note=('W-g5: consumer -> producer -> dependency; the consumer implements the dependency traits effectfully (Mine) or purely (Quiet), the producer is generic over them'
+               + ('; VARIANT: the producer imports the dependency traits by glob' if glob else '')))
+    for p2, _, _ in probes:
+        pred(cid, p2, 'record', 'record', 'record')
+
+
+w5_cell('wg5', False)
+w5_cell('wg5g', True)
+
+
 # ----------------------------------------------------------------------------------------------- rendering
 def dispatcher(c, crate_ref):
     arms = ''.join('        "%s" => %s%s(),\n' % (p, crate_ref, p) for p, _, _ in c['probes'])
@@ -1253,7 +1688,7 @@ def dispatcher(c, crate_ref):
 
 
 def cargo_toml(c, name, deps, lib_only=False, is_dep=False):
-    s = '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n\n' % name
+    s = '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "%s"\n\n' % (name, '2021' if is_dep else c.get('edition', '2021'))
     s += '[dependencies]\n' + ''.join('%s = %s\n' % (k, v) for k, v in deps.items())
     if not is_dep:
         s += '\n[workspace]\n'
@@ -1288,7 +1723,7 @@ def render(out):
                 dd = os.path.join(d, dname)
                 os.makedirs(os.path.dirname(os.path.join(dd, drel)), exist_ok=True)
                 open(os.path.join(dd, drel), 'w').write(txt)
-                open(os.path.join(dd, 'Cargo.toml'), 'w').write(cargo_toml(c, dname, {}, is_dep=True))
+                open(os.path.join(dd, 'Cargo.toml'), 'w').write(cargo_toml(c, dname, c.get('dep_deps', {}).get(dname, {}), is_dep=True))
             elif rel.startswith('@edit/'):
                 p = os.path.join(d, 'edit', rel[len('@edit/'):])
                 os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -1310,6 +1745,12 @@ def render(out):
                 % (ch['consumer_probe'], cid, ch['consumer_probe']))
         meta = dict(id=cid, lib=c['lib'], probes=[dict(name=p, kind=k) for p, k, _ in c['probes']], chain=ch, note=c['note'],
                     deps=sorted(deps))
+        if c.get('edition', '2021') != '2021':
+            meta['edition'] = c['edition']
+        if c.get('nocompile'):
+            meta['nocompile_ok'] = True
+        if c.get('detail'):
+            meta['detail'] = True
         open(os.path.join(d, 'cell.json'), 'w').write(json.dumps(meta, indent=1, sort_keys=True) + '\n')
         open(os.path.join(d, 'probes.txt'), 'w').write('\n'.join(p for p, _, _ in c['probes']) + '\n')
         cells_meta[cid] = meta
