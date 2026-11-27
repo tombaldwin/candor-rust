@@ -4,6 +4,7 @@
     python3 soundness/cfgtwin/run.py <candor-scan>                    # a fix lane's per-round check (column: cand)
     python3 soundness/cfgtwin/run.py <candor-scan> --col pub --record # record this binary as the `pub` column
     python3 soundness/cfgtwin/run.py --exec                           # rebuild every fixture, run every probe, compare/record exec
+    python3 soundness/cfgtwin/run.py --selftest                       # the reader's calibration: a `[]` row must not read `-`
     python3 soundness/cfgtwin/run.py <bin> --cells 'd3*' --gates      # a subset, with gate exit codes
 
 What is held constant across arms (MATRIX.md section 0): the fixture bytes (read-only here), a FRESH CANDOR_CACHE_DIR per
@@ -73,6 +74,34 @@ def reading(row, detail=False):
     if detail and (inv or key):
         r += '{' + ';'.join(([('inv=' + ','.join(inv))] if inv else []) + ([('key=' + ','.join(key))] if key else [])) + '}'
     return r
+
+
+_reading_core = reading     # macropath rebinds `reading` (it adds `I`); the selftest pins THIS function
+
+
+def selftest():
+    """The reader's calibration: it must be able to FAIL. Each row below is the shape that was once folded into `-` (R1933) or is the control that must stay `-`.
+    Reverting `reading()` to the old fold turns the `[]` rows red."""
+    cases = [
+        (None, False, '-'),                                                      # no row at all
+        ({'fn': 'f', 'inferred': []}, False, '-'),                               # a row with nothing: the control that must stay `-`
+        ({'fn': 'f', 'inferred': [], 'invisible': ['dep']}, False, '[]'),        # R1933: an `invisible` row is NOT `-`
+        ({'fn': 'f', 'inferred': [], 'dispatchesOn': ['d#T::m']}, False, '[]'),  # a join key alone is NOT `-`
+        ({'fn': 'f', 'inferred': [], 'invisible': ['dep'], 'dispatchesOn': ['d#T::m']}, True, '[]{inv=dep;key=d#T::m}'),
+        ({'fn': 'f', 'inferred': ['Fs'], 'dispatchesOn': ['d#T::m']}, False, 'E'),
+        ({'fn': 'f', 'inferred': ['Fs'], 'dispatchesOn': ['d#T::m']}, True, 'E{key=d#T::m}'),
+        ({'fn': 'f', 'inferred': ['Unknown']}, False, 'U'),
+        ({'fn': 'f', 'inferred': ['Fs', 'Unknown'], 'invisible': ['a', 'b']}, True, 'E+U{inv=a,b}'),
+        ({'fn': 'f', 'inferred': []}, True, '-'),                                # detail never invents a disclosure
+    ]
+    bad = 0
+    for row, detail, want in cases:
+        got = _reading_core(row, detail)
+        if got != want:
+            print('SELFTEST FAIL: %r detail=%s -> %r, want %r' % (row, detail, got, want))
+            bad += 1
+    print('cfgtwin selftest: %d case(s), %d failed' % (len(cases), bad))
+    return 1 if bad else 0
 
 
 def rows_of(prefix):
@@ -322,8 +351,11 @@ def main():
     ap.add_argument('--record', action='store_true')
     ap.add_argument('--exec', action='store_true', help='rebuild + run every fixture and compare/record the exec column')
     ap.add_argument('--keep', action='store_true')
+    ap.add_argument('--selftest', action='store_true', help="the reader's calibration (no binary needed)")
     ap.add_argument('--jobs', type=int, default=3)
     a = ap.parse_args()
+    if a.selftest:
+        return selftest()
     cs = cells(a.cells)
     scratch = os.environ.get('CFGTWIN_SCRATCH') or tempfile.mkdtemp(prefix='cfgtwin-run-')
     os.makedirs(scratch, exist_ok=True)
