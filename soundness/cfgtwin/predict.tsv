@@ -676,3 +676,5 @@ bl2	bl2_declares_e	record	record	record
 bl2b	bl2b_inherit_e	record	record	record
 bl2b	bl2b_declares_e	record	record	record
 bl2b	bl2b_declares_q	record	record	record
+la2	la2_localmod_proj_e	record	record	record
+la2	la2_localmod_path_e	record	record	record

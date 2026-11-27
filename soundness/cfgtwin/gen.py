@@ -1824,7 +1824,21 @@ pub fn bl2b_declares_q() { g_declq::<DeclQ_bl2b>() }
      deps={'fxdep_bl2b': '{ path = "fxdep_bl2b" }'}, extra={'@dep/fxdep_bl2b/src/lib.rs': 'pub trait SupD { fn sf() { EFF } }\n'},
      chain=dict(kind='dep', dep_dir='fxdep_bl2b'), hdr=False, detail=True,
      note='Fable L1a review: a dependency supertrait imported by use')
-for _c in ('bl1', 'bl1b', 'bl2', 'bl2b'):
+# la2 (round 2's own control, the object-0.37.3 corpus shape): a supertrait written through a path rooted at a module THIS module declares
+# (`use id_private::IdPrivate; trait Id: IdPrivate {}`) is the crate's own trait, never a dependency's, though no `crate::` spells it
+cell('la2', {'main.rs': _ALLOW + """mod id_private { pub trait IdPrivate { fn new_la2() -> Self; } }
+use id_private::IdPrivate;
+pub trait Id_la2: IdPrivate {}
+pub trait Item_la2 { type Id: Id_la2; }
+pub struct IdE_la2; impl IdPrivate for IdE_la2 { fn new_la2() -> Self { EFF IdE_la2 } } impl Id_la2 for IdE_la2 {}
+pub struct ItE_la2; impl Item_la2 for ItE_la2 { type Id = IdE_la2; }
+fn g_la2<T: Item_la2>() { let _ = T::Id::new_la2(); }
+fn g2_la2<T: Id_la2>() { let _ = T::new_la2(); }
+pub fn la2_localmod_proj_e() { g_la2::<ItE_la2>() }
+pub fn la2_localmod_path_e() { g2_la2::<IdE_la2>() }
+"""}, [('la2_localmod_proj_e', 'e', None), ('la2_localmod_path_e', 'e', None)], hdr=False, detail=True,
+     note='lane L1a round 2: a supertrait rooted at a module this module declares is local')
+for _c in ('bl1', 'bl1b', 'bl2', 'bl2b', 'la2'):
     for _p, _, _ in CELLS[_c]['probes']:
         pred(_c, _p, 'record', 'record', 'record')
 

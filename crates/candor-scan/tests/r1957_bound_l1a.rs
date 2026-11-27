@@ -234,6 +234,11 @@ fn round2_a_supertrait_is_classified_by_its_written_root_not_its_leaf() {
     for p in ["bl2_inherit_e", "bl2_declares_e"] {
         assert!(key(&r, p, "fxdep_bl2#SupD::sf"), "{p}: {:?}", row(&r, p));
     }
+    // la2: a supertrait rooted at a module this module declares (`use id_private::IdPrivate; trait Id: IdPrivate {}`) stays LOCAL
+    let r = cell("la2");
+    for p in ["la2_localmod_proj_e", "la2_localmod_path_e"] {
+        assert!(fs(&r, p) && key(&r, p, "cf_la2#id_private::IdPrivate::new_la2"), "{p}: {:?}", row(&r, p));
+    }
     let c = chained("bl2", "fxdep_bl2");
     for p in ["bl2_inherit_e", "bl2_declares_e"] {
         assert!(fs(&c, p), "{p} chained: {:?}", row(&c, p));

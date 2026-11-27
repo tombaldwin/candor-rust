@@ -7630,6 +7630,18 @@ pub(crate) fn collect_decls(
                     let Some(l) = tb.path.segments.last().map(|x| x.ident.to_string()) else { continue };
                     let w = tb.path.segments.iter().map(|x| x.ident.to_string()).collect::<Vec<_>>().join("::");
                     let full = if tb.path.leading_colon.is_some() { w } else { crate::lang::expand(&w, uses) };
+                    // a path rooted at an item THIS module declares (`id_private::IdPrivate` through `use id_private::IdPrivate`, the
+                    // 2018 uniform-path rule) is the crate's own: marked `self::` so it never reads as a dependency root
+                    let root = full.split("::").next().unwrap_or("");
+                    let own_item = full.contains("::")
+                        && items.iter().any(|it| match it {
+                            syn::Item::Mod(m) => m.ident == root,
+                            syn::Item::Enum(x) => x.ident == root,
+                            syn::Item::Struct(x) => x.ident == root,
+                            syn::Item::Trait(x) => x.ident == root,
+                            _ => false,
+                        });
+                    let full = if own_item { format!("self::{full}") } else { full };
                     let pair = (l, full);
                     if !e.super_paths.contains(&pair) {
                         e.super_paths.push(pair);

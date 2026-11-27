@@ -682,6 +682,8 @@ la1	la1_r1952_bare_e	Fs	-	-	[]{inv=fxdep_la1;key=fxdep_la1#Error::ef}	U0F0	U0F0	
 la1	la1_r1952_bare_e@chained	Fs	-	-	U{key=fxdep_la1#Error::ef}	U0F0	U0F0	U1F0
 la1	la1_ufcs_read_e	Fs	E+U	E+U	E+U	U1F1	U1F1	U1F1
 la1	la1_ufcs_read_e@chained	Fs	E+U	E+U	E+U	U1F1	U1F1	U1F1
+la2	la2_localmod_path_e	Fs	-	-	E{key=cf_la2#id_private::IdPrivate::new_la2}	U0F0	U0F0	U0F1
+la2	la2_localmod_proj_e	Fs	-	-	E{key=cf_la2#id_private::IdPrivate::new_la2}	U0F0	U0F0	U0F1
 n1	n1_e	Fs	-	U	U	U0F0	U1F0	U1F0
 n1	n1_q	none	-	U	U	U0F0	U1F0	U1F0
 n1c	n1c_e	Fs	-	U	U	U0F0	U1F0	U1F0
