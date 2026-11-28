@@ -147,7 +147,7 @@ This repository holds two producers of the **same report JSON**:
 - **the rustc dylint lint** (`src/lib.rs`, "rust-deep") — the family's **oracle instrument**. It is what the
   soundness fuzzers, the censuses, the `strace` oracle and candor's own Self-guard run, and what the scanner is
   measured against. It is **not a user route**: its report is not spec-current (SOUNDNESS R456 — it stamps
-  `spec: 0.43` while writing a pre-⟨0.21⟩ envelope with no `analyzed` manifest, so `candor-query gate` answers
+  `spec: 0.44` while writing a pre-⟨0.21⟩ envelope with no `analyzed` manifest, so `candor-query gate` answers
   its output with *"re-scan with a current engine"*), and it is calibrated and shipped as an instrument, not a
   product. An operator who runs it on purpose sets `CANDOR_BACKEND=lint`; nothing else reaches it through the wrapper.
 
@@ -315,7 +315,7 @@ JSON, from the *same* check that sets the exit code, for CI annotations / the PR
 ```sh
 candor-scan . --policy .candor/policy --gate-json verdict.json   # the user route
 CANDOR_BACKEND=lint cargo candor policy .candor/policy --gate-json verdict.json   # the oracle lint — same shape (also: guard)
-# → { "spec": "0.43", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
+# → { "spec": "0.44", "ok": false, "violations": [ { "rule": "AS-EFF-006", "fn": "…", "effects": ["Db"], "detail": "…" } ] }
 ```
 
 `-` streams it to stdout. Exit semantics are pinned: violation → 1; a gate that could not run to
@@ -640,7 +640,7 @@ effects the kernel actually observed — ground truth that trusts nothing about 
 
 ## Status
 
-Beta — the candor family's Rust engine is `candor-scan`, declaring **spec 0.43** (the same contract the
+Beta — the candor family's Rust engine is `candor-scan`, declaring **spec 0.44** (the same contract the
 reference engine, [candor-java](https://github.com/tombaldwin/candor-java), declares; the
 cross-engine conformance suite pins the agreement). The scanner is
 [calibrated on 35 real crates](eval/calibration/CALIBRATION.md) (no false positives in library

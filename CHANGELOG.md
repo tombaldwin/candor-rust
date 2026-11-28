@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+- **Declares spec ⟨0.44⟩** (SPEC §4's `dispatchesOn` value names the DECLARING abstraction, a clarification candor-scan meets since lane rust-bound-l2). Docs and the two literal floor pins name 0.44.
+
 - **⚠ Lane rust-bound-l2 (a wire key REWRITE, plus two additive routes): a dependency `dispatchesOn` key names the trait that DECLARES the member
   (SOUNDNESS R1954, R1966, R1976), a local bound's dependency supertraits are asked beside a dependency bound (R1989), and a bound a dependency's
   root glob brings is keyed (R1968).** A key minted through a subtrait (`X: dep::SubS`, `X::s_fn()` / `x.s_go()` / `where I::Item: SubS`, with
