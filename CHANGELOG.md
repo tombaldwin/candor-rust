@@ -11,6 +11,8 @@ and routinely does change gate verdicts — read every ⚠ entry before bumping 
 
 ## Unreleased
 
+## [0.44.0] — 2026-11-28
+
 - **Declares spec ⟨0.44⟩** (SPEC §4's `dispatchesOn` value names the DECLARING abstraction, a clarification candor-scan meets since lane rust-bound-l2). Docs and the two literal floor pins name 0.44.
 
 - **⚠ Lane rust-bound-l2 (a wire key REWRITE, plus two additive routes): a dependency `dispatchesOn` key names the trait that DECLARES the member
