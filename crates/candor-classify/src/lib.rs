@@ -466,6 +466,26 @@ pub const REVIEWED_PURE_ENTRIES: &[(&str, &str)] = &[
     // `mysql::Stream::connect_socket` above. The reachable HTTP/3 dispatch is `Client::{execute,send}`, already `Net`. (The comment
     // above `reqwest::multipart::Part::file` already said this row was "removed from open.tsv rather than guessed"; it never was.)
     ("reqwest", "reqwest::async_impl::h3_client::pool::PoolClient::send_request"),
+    // SOUNDNESS R1528, the 2026-11-28 refresh — isahc 2.0.2. `impl WithRequestConfig for http::request::Builder { fn with_config }`
+    // (request.rs:97-111) takes `self` and a caller closure `f: impl FnOnce(&mut RequestConfig)`, reaches the request's
+    // `Extensions` (`extensions_mut`, `get_mut`, `insert(RequestConfig::default())`), calls `f` on the stored config and returns
+    // `self`: no socket, file, clock, environment or log call, and `RequestConfig::default()` is a struct of `None`s. What the
+    // closure does is the CALLER's own effect, charged at the caller. Self-scan's `Log,Unknown` is the `Unknown` of that
+    // `FnOnce` call plus a `Log` it takes from `agent::Handle::drop` (the scan's drop-glue edge for the moved `self` / the
+    // dropped closure: `Handle` is a `pub(crate)` agent handle that no field of `http::request::Builder`, `Extensions` or
+    // `RequestConfig` holds, and nothing in this body names it). The edge first appeared with 97c23112 (I1 step 2, R1541), which
+    // splices macro-made trait impls; before it the row read `Unknown` alone.
+    ("isahc", "isahc::Builder::with_config"),
+    // SOUNDNESS R1528, the 2026-11-28 refresh — rusqlite 0.43.0 `Connection::wal_hook`. It only REGISTERS a hook: `set_clientdata(
+    // .., |db, bh| ffi::sqlite3_wal_hook(db, x, bh))` (hooks/mod.rs:389-429), no database I/O — its `commit_hook` / `update_hook`
+    // neighbours read `Unknown` alone, and the `DB` table in this file's R166 comment lists the `sqlite3_*_hook` family as
+    // deliberately uncharged. The scan's `Db,Unknown` is the NESTED `extern "C" fn wal_hook_callback` folded into the enclosing
+    // unit: it wraps SQLite's handle in `InnerConnection::new(db, false)` and drops it, and `InnerConnection::drop` is `close()`,
+    // which for `owned == false` nulls the pointer and returns BEFORE `sqlite3_close` (inner_connection.rs:111-123). So the
+    // `sqlite3_close` the scan charges is unreachable from that non-owning handle, at registration and when the hook fires; what
+    // the hook closure itself does is the caller's own effect. (A rusqlite row in `open.tsv` is refused outright by
+    // `coverage_gate.rs`, which is why this is a read and not an `overcharge` verdict.)
+    ("rusqlite", "rusqlite::Connection::wal_hook"),
 ];
 
 /// SOUNDNESS R1528 step 3 — THE VERDICT REGISTER for `eval/coverage-gate/open.tsv`, keyed on the row's
@@ -948,6 +968,18 @@ pub const OPEN_ENTRY_VERDICTS: &[(&str, &str, &str)] = &[
     // `Self::builder(..)` receiver until R1717's builder typing (`CANDOR_R1717_OFF` makes the row vanish), so the wrapper now inherits the
     // `Fs` the `pem` vocabulary puts on `ClusterParams::from` -> `retrieve_tls_certificates`. The edge is real; the effect is not.
     ("redis", "redis::cluster_handling::client::ClusterClient::new", "R1734:overcharge"),
+    // The 2026-11-28 refresh (issue #18; thirty other rows of it got a classify() rule and two a read: the `isahc` and `rusqlite`
+    // entries in `REVIEWED_PURE_ENTRIES`).
+    // R1559 (conditional x1): jiff 1.0.3 `BrokenDownTime::to_zoned_datetime_with(db)` is the renamed `to_zoned_with`: the database
+    // is the CALLER's argument, so the effect is that database's (a `bundled()` one makes the call pure, EXECUTED at R1559), and
+    // its three `_with` siblings already sit above.
+    ("jiff", "jiff::fmt::strtime::BrokenDownTime::to_zoned_datetime_with", "R1559:conditional"),
+    // R1582 (silent x1): rdkafka 0.40.0 `Client::sasl_set_credentials` hands two C strings to `rd_kafka_sasl_set_credentials`, which
+    // under a mutex replaces `rk_conf.sasl.{username,password}` with `rd_strdup` copies; the header says the new credentials are used
+    // "the next time this client needs to authenticate" and that it "will not disconnect existing connections" (librdkafka
+    // rdkafka.h:3722-3734, rdkafka_sasl.c:563-580), so the call itself moves no bytes. The `Log` is R1582's: the `trace!` pair that
+    // `NativePtr::drop` emits (util.rs:336-340) when the returned `RDKafkaError` is a real error handle and is dropped.
+    ("rdkafka", "rdkafka::client::Client::sasl_set_credentials", "R1582:silent"),
 ];
 
 /// Representative path tails (each appended to a crate name) that the `calibrated_crates_are_live`
@@ -2245,6 +2277,12 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path == "ignore::walk::DirEntry::metadata"
             || path == "ignore::WalkParallel::visit"
             || path == "ignore::walk::WalkParallel::visit"
+            // SOUNDNESS R1528, the 2026-11-28 refresh (ignore 0.4.35): `skip_stdout(true)` runs `stdout_handle()` (walk.rs:2162),
+            // `same_file::Handle::stdout()` (which `fstat`s descriptor 1, same-file unix.rs:64-85) and `is_regular_file`, whose
+            // `file.metadata()` is a second fstat. `skip_stdout(false)` only clears the field, so the call is charged for the
+            // branch that touches the descriptor.
+            || path == "ignore::WalkBuilder::skip_stdout"
+            || path == "ignore::walk::WalkBuilder::skip_stdout"
         {
             return Some("Fs");
         }
@@ -2261,6 +2299,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::recommended_watcher")
             || path.ends_with("::watch")
             || path.ends_with("::unwatch")
+            // SOUNDNESS R1528, the 2026-11-28 refresh (notify 9.0.0): `Watcher::watch_with(path, WatchPathConfig)` is what `watch`
+            // calls (`self.watch_with(path, WatchPathConfig::new(mode))`, inotify.rs:1781, kqueue.rs:925, poll.rs:800,
+            // fsevent.rs:1178, windows.rs:1113), and `Watcher::update_paths(ops)` applies a batch of watch/unwatch ops
+            // (inotify.rs:1795 hands them to the event loop that adds the watches; fsevent.rs:1192 `update_paths_inner`): the
+            // same path registration the two verbs above are charged for, one call over a list. Seven backend rows grew.
+            || path.ends_with("::watch_with")
+            || path.ends_with("::update_paths")
             // `ReadDirectoryChangesWatcher::create` (windows.rs:475, `pub use windows::
             // ReadDirectoryChangesWatcher` at the crate root) is a SECOND, directly-callable
             // constructor distinct from the `Watcher::new` trait method above — it takes a raw
@@ -2573,12 +2618,18 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             // NOT claimed (accessors/pure neighbours that stay None): `is_autocommit`, `changes`,
             // `last_insert_rowid`, `is_readonly`, `Wal::name`, `init_auto_extension` (its own rule above).
             if let Some((ty, m)) = type_method(path, "rusqlite", &["", "serialize", "hooks", "statement",
-                "load_extension_guard"])
+                "load_extension_guard", "wal"])
             {
                 let hit = match ty {
                     "Connection" => matches!(m, "close" | "cache_flush" | "serialize" | "deserialize"
                         | "deserialize_bytes" | "deserialize_read_exact" | "load_extension"
-                        | "load_extension_enable" | "load_extension_disable"),
+                        | "load_extension_enable" | "load_extension_disable"
+                        // SOUNDNESS R1528, the 2026-11-28 refresh (rusqlite 0.43.0): `file_control` (lib.rs:1163) is
+                        // `sqlite3_file_control` (inner_connection.rs:332-342), a direct VFS file operation on the open
+                        // database (size hint, chunk size, persist-WAL, data-version ...), and `wal_checkpoint_v2` (wal.rs:31)
+                        // is `sqlite3_wal_checkpoint_v2`, the manual WAL checkpoint `Wal::checkpoint_v2` is already charged
+                        // for. Both `ffi` names are on the `DB` list above; their `Connection` wrappers were not.
+                        | "file_control" | "wal_checkpoint_v2"),
                     "Statement" => m == "exists",
                     "LoadExtensionGuard" => m == "new",
                     "Wal" => matches!(m, "checkpoint" | "checkpoint_v2"),
@@ -3975,6 +4026,11 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         // the three `_with(db)` variants (the effect is the caller-supplied database's, charged at the constructor
         // above; a `bundled()` database makes the same call pure — EXECUTED) and `TimeZoneDatabase::bundled` (a
         // `warn!` only with jiff's non-default `logging` feature AND an empty bundle) — filed as R1559.
+        // 2026-11-28 refresh (jiff 1.0.3, a MAJOR over the 0.2 ceiling): 1.0 renamed `Zoned` to `ZonedDateTime`, `to_zoned` to
+        // `to_zoned_datetime` and `parse_zoned` to `parse_zoned_datetime`. The bodies are the 0.2 ones read above
+        // (`ZonedDateTime::in_tz` is `crate::tz::db().get(name)?` then `with_time_zone`, zoned.rs:677;
+        // `BrokenDownTime::to_zoned_datetime` is `self.to_zoned_datetime_with(crate::tz::db())`, fmt/strtime/mod.rs:1415), so the
+        // renamed spellings carry the same `Fs`; `to_zoned_datetime_with(db)` is the `_with` variant left to R1559 above.
         if let Some((ty, m)) = type_method(
             path,
             "jiff",
@@ -3983,10 +4039,10 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         ) {
             if matches!(
                 (ty, m),
-                ("Date" | "DateTime" | "Timestamp" | "Zoned", "in_tz")
+                ("Date" | "DateTime" | "Timestamp" | "Zoned" | "ZonedDateTime", "in_tz")
                     | ("TimeZoneDatabase", "from_env" | "from_dir" | "from_concatenated_path")
-                    | ("DateTimeParser", "parse_zoned" | "parse_time_zone")
-                    | ("BrokenDownTime", "to_zoned")
+                    | ("DateTimeParser", "parse_zoned" | "parse_zoned_datetime" | "parse_time_zone")
+                    | ("BrokenDownTime", "to_zoned" | "to_zoned_datetime")
                     | ("Pieces" | "TimeZoneAnnotation", "to_time_zone")
             ) {
                 return Some("Fs");
@@ -4005,6 +4061,27 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
             || path.ends_with("::init_from_env") || path.ends_with("::try_init_from_env")
         {
             return Some("Log");
+        }
+        // SOUNDNESS R1528, the 2026-11-28 refresh (env_logger 0.11.12): the constructors and appliers that READ `RUST_LOG` /
+        // `RUST_LOG_STYLE` without installing anything. `Builder::{parse_env, parse_default_env}` call `Env::get_filter` /
+        // `get_write_style`, whose `Var::get` is `env::var(&*self.name)` (logger.rs:781, 820, 871-872); `Builder::{from_env,
+        // from_default_env}` are `Self::new()` plus that `parse_env`, `Logger::{from_env, from_default_env}` are
+        // `Builder::from_env(env).build()`, and the free fns `builder()` / `from_env(env)` are `Builder::from_default_env()` /
+        // `Builder::from_env(env)` (logger.rs:978-993). Charged `Env` (the `init*` family keeps its `Log`: one effect is all
+        // `classify` carries). The scan reached these only after R1793's return substitution (53771b2c) typed the generic
+        // `E: Into<Env>` receiver; before it they read `Unknown` and never nominated. `Builder::{new, build, filter_*,
+        // parse_filters, parse_write_style}` and `Env::{new, filter, ..}` read nothing and stay pure.
+        if let Some((head, m)) = path.rsplit_once("::") {
+            let ty = head.rsplit("::").next().unwrap_or("");
+            let free = matches!(path, "env_logger::builder" | "env_logger::from_env" | "env_logger::logger::builder"
+                | "env_logger::logger::from_env");
+            if free
+                || (matches!(ty, "Builder" | "Logger")
+                    && matches!(m, "from_env" | "from_default_env" | "parse_env" | "parse_default_env")
+                    && !(ty == "Logger" && m.starts_with("parse_")))
+            {
+                return Some("Env");
+            }
         }
         return None;
     }
@@ -4250,10 +4327,17 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         return None;
     }
     // `lscolors` — LS_COLORS parsing. ONLY `from_env` reads the environment (Env). `from_string`/
-    // `style_for_path`/`style_for*` and the `Style` type take explicit input and are PURE.
+    // `style_for_str`/`style_for_path_with_metadata`/`style_for` and the `Style` type take explicit input and are PURE.
+    // SOUNDNESS R1528, the 2026-11-28 refresh: `style_for_path` was listed PURE here, which is wrong. lscolors 0.21.0
+    // lib.rs:326-329 is `let metadata = path.as_ref().symlink_metadata().ok(); self.style_for_path_with_metadata(path,
+    // metadata.as_ref())` and its own doc says "this function calls `Path::symlink_metadata` internally": an lstat of the
+    // caller's path, `Fs`. The row stayed out of the ratchet until the scan's return substitution (53771b2c) read it.
     if crate_name == "lscolors" {
         if path.ends_with("::from_env") {
             return Some("Env");
+        }
+        if path.ends_with("::LsColors::style_for_path") {
+            return Some("Fs");
         }
         return None;
     }
@@ -4320,6 +4404,13 @@ pub fn classify(crate_name: &str, path: &str) -> Option<&'static str> {
         }
         if path == "grep_cli::patterns_from_path" {
             return Some("Fs");
+        }
+        // SOUNDNESS R1528, the 2026-11-28 refresh (grep-cli 0.1.13): `DecompressionReaderBuilder::build_by_magic`
+        // (decompress.rs:281) is `build`'s sibling that `File::open`s the path, reads an 8-byte header and, on a magic match,
+        // runs `self.command_builder.build(&mut cmd)` (the `CommandReaderBuilder::build` spawn above); with no rule it kept
+        // appearing as `Exec,Fs,Log`. Charged `Exec` exactly like `DecompressionReaderBuilder::build`.
+        if path.ends_with("::DecompressionReaderBuilder::build_by_magic") {
+            return Some("Exec");
         }
         return None;
     }
@@ -5102,6 +5193,23 @@ fn diesel_r1528(path: &str) -> Option<&'static str> {
         }
         ("" | "pg" | "pg::transaction", "TransactionBuilder", "run") => Some("Db"),
         ("" | "pg" | "pg::connection", "PgConnection", "run") => Some("Db"),
+        // SOUNDNESS R1528, the 2026-11-28 refresh (diesel 2.4.0, still above the ceiling). READ in source, five rows:
+        //   * `sqlite::{register,cancel,reset}_auto_extension` (sqlite/auto_extension.rs, re-exported at `diesel::sqlite`) are
+        //     `ffi::sqlite3_auto_extension` / `_cancel_` / `_reset_`: the PROCESS-GLOBAL registry of routines every LATER
+        //     connection runs, the same surface `rusqlite::register_auto_extension` is charged `Db` for (R166). The first two
+        //     spellings are the alias and the module path the generator guesses.
+        //   * `BorrowedSqliteConnection::batch_execute` (borrowed_connection.rs, new in 2.4) is `SqliteConnection::batch_execute`
+        //     on the connection the auto-extension callback was handed: the `Db` the arm above charges for the owning type.
+        //   * `SqliteConnection::get_read_only_blob` (sqlite/connection/sqlite_blob.rs:213) is `raw_connection.blob_open(..)`,
+        //     `sqlite3_blob_open`: a handle onto database content.
+        // NOT charged, and unnumbered: `SqliteReadOnlyBlob::{read, seek, close}` and `BorrowedSqliteConnection`'s other forwarders
+        // (`execute_returning_count`, `load`) are trait impls the generator does not nominate.
+        ("sqlite", "auto_extension", "register_auto_extension" | "cancel_auto_extension" | "reset_auto_extension")
+        | ("" | "sqlite", "sqlite", "register_auto_extension" | "cancel_auto_extension" | "reset_auto_extension") => Some("Db"),
+        ("" | "sqlite" | "sqlite::connection" | "sqlite::connection::borrowed_connection", "BorrowedSqliteConnection", "batch_execute") => {
+            Some("Db")
+        }
+        ("" | "sqlite" | "sqlite::connection" | "sqlite::connection::sqlite_blob", "SqliteConnection", "get_read_only_blob") => Some("Db"),
         _ => None,
     }
 }
@@ -5296,6 +5404,13 @@ fn sqlx_r1528(krate: &str, path: &str) -> Option<&'static str> {
             "migrate::source::resolve_blocking" | "migrate::source::resolve_blocking_with_config" => {
                 return Some("Fs")
             }
+            // SOUNDNESS R1528, the 2026-11-28 refresh (sqlx-core 0.9.1): `net::tls::connector(config)` builds the TLS connector,
+            // which reads the root, client-certificate and client-key FILES the `TlsConfig` names (`CertificateInput::data` ->
+            // `fs::read(path)`, tls_native_tls.rs:55-63, tls_rustls.rs:133-163) and, in the native-tls build, the OS trust store
+            // ("The openssl TlsConnector synchronously loads certificates from files", tls_native_tls.rs:67). Charged like
+            // `native_tls_crate::TlsConnectorBuilder::build`. The feature-split `tls_native_tls::connector` /
+            // `tls_rustls::connector` are not nameable (`tls_*` are private modules) and live in `unreachable.tsv`.
+            "net::tls::connector" => return Some("Fs"),
             _ => {}
         }
     }
@@ -5434,8 +5549,14 @@ fn redis_r1528(path: &str) -> Option<&'static str> {
             (cluster_mod || module == "cluster_handling::sync_connection::pipeline") && method == "exec"
         }
         "ClusterClient" => {
-            matches!(module, "cluster" | "cluster_handling::client")
-                && method == "get_pending_async_connection_with_config"
+            (matches!(module, "cluster" | "cluster_handling::client")
+                && method == "get_pending_async_connection_with_config")
+                // SOUNDNESS R1528, the 2026-11-28 refresh (redis 1.8.3): `get_async_generic_connection::<C>` (a `#[doc(hidden)]`
+                // pub fn, client.rs:1027) is `ClusterConnection::new(&self.initial_nodes, self.cluster_params.clone()).await`,
+                // the body of `get_async_connection_with_config` above it, which the `::get_async_connection` rule already
+                // charges `Db`: it dials the cluster's nodes. The scan reads it `Log,Unknown` (the generic `C` connector is a
+                // dispatch it cannot resolve), so the connection was reported as a log line.
+                || (matches!(module, "" | "cluster" | "cluster_handling::client") && method == "get_async_generic_connection")
         }
         _ => false,
     };
@@ -7966,10 +8087,11 @@ mod tests {
         assert_eq!(classify("backoff", "backoff::retry_notify"), Some("Clock"));
         assert_eq!(classify("backoff", "backoff::ExponentialBackoff::default"), Some("Clock"));
 
-        // lscolors — ONLY from_env reads the environment; from_string/style_for_path pure.
+        // lscolors — ONLY from_env reads the environment; from_string pure; style_for_path is an lstat (Fs).
         assert_eq!(classify("lscolors", "lscolors::LsColors::from_env"), Some("Env"));
         assert_eq!(classify("lscolors", "lscolors::LsColors::from_string"), None);
-        assert_eq!(classify("lscolors", "lscolors::LsColors::style_for_path"), None);
+        assert_eq!(classify("lscolors", "lscolors::LsColors::style_for_path"), Some("Fs")); // an lstat (R1528, 2026-11-28)
+        assert_eq!(classify("lscolors", "lscolors::LsColors::style_for_path_with_metadata"), None);
 
         // wild — argv readers (Env).
         assert_eq!(classify("wild", "wild::args"), Some("Env"));

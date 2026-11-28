@@ -58,6 +58,7 @@ isahc	isahc::CookieJar::get_by_name	Clock	src/cookies/jar.rs	isahc::cookies::jar
 isahc	isahc::CookieJar::get_for_uri	Clock	src/cookies/jar.rs	isahc::cookies::jar::CookieJar::get_for_uri
 isahc	isahc::CookieJar::set	Clock,Log,Unknown	src/cookies/jar.rs	isahc::cookies::jar::CookieJar::set
 isahc	isahc::Response::text	Log,Unknown	src/response.rs	isahc::response::Response::text
+jiff	jiff::BrokenDownTime::to_zoned_datetime_with	Log,Unknown	src/fmt/strtime/mod.rs	jiff::fmt::strtime::BrokenDownTime::to_zoned_datetime_with
 jiff	jiff::BrokenDownTime::to_zoned_with	Log,Unknown	src/fmt/strtime/mod.rs	jiff::fmt::strtime::BrokenDownTime::to_zoned_with
 jiff	jiff::Pieces::to_time_zone_with	Log,Unknown	src/fmt/temporal/pieces.rs	jiff::fmt::temporal::pieces::Pieces::to_time_zone_with
 jiff	jiff::TimeZoneAnnotation::to_time_zone_with	Log,Unknown	src/fmt/temporal/pieces.rs	jiff::fmt::temporal::pieces::TimeZoneAnnotation::to_time_zone_with
@@ -87,6 +88,7 @@ rdkafka	rdkafka::BaseConsumer::subscription	Log	src/consumer/base_consumer.rs	rd
 rdkafka	rdkafka::BaseProducer::begin_transaction	Log	src/producer/base_producer.rs	rdkafka::producer::base_producer::BaseProducer::begin_transaction
 rdkafka	rdkafka::BorrowedHeaders::detach	Log	src/message.rs	rdkafka::message::BorrowedHeaders::detach
 rdkafka	rdkafka::BorrowedMessage::detach	Log	src/message.rs	rdkafka::message::BorrowedMessage::detach
+rdkafka	rdkafka::Client::sasl_set_credentials	Log	src/client.rs	rdkafka::client::Client::sasl_set_credentials
 rdkafka	rdkafka::ClientConfig::create_native_config	Log,Unknown	src/config.rs	rdkafka::config::ClientConfig::create_native_config
 rdkafka	rdkafka::FutureProducer::begin_transaction	Log	src/producer/future_producer.rs	rdkafka::producer::future_producer::FutureProducer::begin_transaction
 rdkafka	rdkafka::FutureProducerContext::error	Log	src/producer/future_producer.rs	rdkafka::producer::future_producer::FutureProducerContext::error

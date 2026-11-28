@@ -311,13 +311,18 @@ dialoguer	dialoguer::Sort::interact_on	Ipc,Unknown	Ipc	dialoguer::prompts::sort:
 dialoguer	dialoguer::Sort::interact_on_opt	Ipc,Unknown	Ipc	dialoguer::prompts::sort::Sort::interact_on_opt
 dialoguer	dialoguer::Sort::interact_opt	Ipc,Unknown	Ipc	dialoguer::prompts::sort::Sort::interact_opt
 diesel	diesel::AnsiTransactionManager::begin_transaction_sql	Db,Unknown	Db	diesel::connection::transaction_manager::AnsiTransactionManager::begin_transaction_sql
+diesel	diesel::BorrowedSqliteConnection::batch_execute	Db,Unknown	Db	diesel::sqlite::connection::borrowed_connection::BorrowedSqliteConnection::batch_execute
 diesel	diesel::SqliteConnection::batch_execute	Db,Unknown	Db	diesel::sqlite::connection::SqliteConnection::batch_execute
 diesel	diesel::SqliteConnection::deserialize_readonly_database_from_buffer	Db,Unknown	Db	diesel::sqlite::connection::SqliteConnection::deserialize_readonly_database_from_buffer
 diesel	diesel::SqliteConnection::establish	Db,Unknown	Db	diesel::sqlite::connection::SqliteConnection::establish
 diesel	diesel::SqliteConnection::exclusive_transaction	Db,Unknown	Db	diesel::sqlite::connection::SqliteConnection::exclusive_transaction
+diesel	diesel::SqliteConnection::get_read_only_blob	Db,Unknown	Db	diesel::sqlite::connection::sqlite_blob::SqliteConnection::get_read_only_blob
 diesel	diesel::SqliteConnection::immediate_transaction	Db,Unknown	Db	diesel::sqlite::connection::SqliteConnection::immediate_transaction
 diesel	diesel::SqliteConnection::serialize_database_to_buffer	Db	Db	diesel::sqlite::connection::SqliteConnection::serialize_database_to_buffer
 diesel	diesel::TransactionBuilder::run	Db,Unknown	Db	diesel::pg::transaction::TransactionBuilder::run
+diesel	diesel::sqlite::auto_extension::cancel_auto_extension	Db	Db	diesel::sqlite::auto_extension::cancel_auto_extension
+diesel	diesel::sqlite::auto_extension::register_auto_extension	Db	Db	diesel::sqlite::auto_extension::register_auto_extension
+diesel	diesel::sqlite::auto_extension::reset_auto_extension	Db	Db	diesel::sqlite::auto_extension::reset_auto_extension
 dotenv	dotenv::Iter::load	Env	Env	dotenv::iter::Iter::load
 dotenv	dotenv::dotenv	Env,Fs,Unknown	Env	dotenv::dotenv
 dotenv	dotenv::dotenv_iter	Env,Fs,Unknown	Env	dotenv::dotenv_iter
@@ -917,6 +922,10 @@ elasticsearch	elasticsearch::WatcherStop::send	Clock,Net	Net	elasticsearch::watc
 elasticsearch	elasticsearch::WatcherUpdateSettings::send	Clock,Net	Net	elasticsearch::watcher::WatcherUpdateSettings::send
 elasticsearch	elasticsearch::XpackInfo::send	Clock,Net	Net	elasticsearch::xpack::XpackInfo::send
 elasticsearch	elasticsearch::XpackUsage::send	Clock,Net	Net	elasticsearch::xpack::XpackUsage::send
+env_logger	env_logger::Builder::from_default_env	Env	Env	env_logger::logger::Builder::from_default_env
+env_logger	env_logger::Builder::from_env	Env	Env	env_logger::logger::Builder::from_env
+env_logger	env_logger::Builder::parse_default_env	Env	Env	env_logger::logger::Builder::parse_default_env
+env_logger	env_logger::Builder::parse_env	Env	Env	env_logger::logger::Builder::parse_env
 env_logger	env_logger::ConfigurableFormat::format	Clock,Unknown	Clock	env_logger::fmt::ConfigurableFormat::format
 env_logger	env_logger::Formatter::timestamp	Clock	Clock	env_logger::fmt::humantime::Formatter::timestamp
 etcetera	etcetera::Unix::new	Env	Env	etcetera::app_strategy::unix::Unix::new
@@ -927,6 +936,10 @@ env_logger	env_logger::Formatter::timestamp_micros	Clock	Clock	env_logger::fmt::
 env_logger	env_logger::Formatter::timestamp_millis	Clock	Clock	env_logger::fmt::humantime::Formatter::timestamp_millis
 env_logger	env_logger::Formatter::timestamp_nanos	Clock	Clock	env_logger::fmt::humantime::Formatter::timestamp_nanos
 env_logger	env_logger::Formatter::timestamp_seconds	Clock	Clock	env_logger::fmt::humantime::Formatter::timestamp_seconds
+env_logger	env_logger::Logger::from_default_env	Env,Unknown	Env	env_logger::logger::Logger::from_default_env
+env_logger	env_logger::Logger::from_env	Env,Unknown	Env	env_logger::logger::Logger::from_env
+env_logger	env_logger::builder	Env	Env	env_logger::logger::builder
+env_logger	env_logger::from_env	Env	Env	env_logger::logger::from_env
 etcetera	etcetera::Windows::cache_dir	Env,Unknown	Env	etcetera::base_strategy::windows::Windows::cache_dir
 etcetera	etcetera::Windows::data_dir	Env,Unknown	Env	etcetera::base_strategy::windows::Windows::data_dir
 etcetera	etcetera::Xdg::cache_dir	Env	Env	etcetera::base_strategy::xdg::Xdg::cache_dir
@@ -1118,6 +1131,7 @@ grep_cli	grep_cli::DecompressionMatcher::command	Exec	Exec	grep_cli::decompress:
 grep_cli	grep_cli::DecompressionReader::close	Exec,Log	Exec	grep_cli::decompress::DecompressionReader::close
 grep_cli	grep_cli::DecompressionReader::new	Exec,Fs,Log	Exec	grep_cli::decompress::DecompressionReader::new
 grep_cli	grep_cli::DecompressionReaderBuilder::build	Exec,Fs,Log	Exec	grep_cli::decompress::DecompressionReaderBuilder::build
+grep_cli	grep_cli::DecompressionReaderBuilder::build_by_magic	Exec,Fs,Log	Exec	grep_cli::decompress::DecompressionReaderBuilder::build_by_magic
 grep_cli	grep_cli::patterns_from_path	Fs	Fs	grep_cli::pattern::patterns_from_path
 ignore	ignore::DirEntry::metadata	Fs	Fs	ignore::walk::DirEntry::metadata
 ignore	ignore::IncrementalIgnore::matched	Fs,Log,Unknown	Fs	ignore::incremental::IncrementalIgnore::matched
@@ -1127,6 +1141,7 @@ ignore	ignore::WalkBuilder::add_ignore	Env,Fs,Log	Fs	ignore::walk::WalkBuilder::
 ignore	ignore::WalkBuilder::build	Env,Fs,Log,Unknown	Fs	ignore::walk::WalkBuilder::build
 ignore	ignore::WalkBuilder::build_matchers	Env,Fs,Log	Fs	ignore::walk::WalkBuilder::build_matchers
 ignore	ignore::WalkBuilder::build_parallel	Env,Fs,Log	Fs	ignore::walk::WalkBuilder::build_parallel
+ignore	ignore::WalkBuilder::skip_stdout	Fs	Fs	ignore::walk::WalkBuilder::skip_stdout
 ignore	ignore::WalkParallel::run	Fs,Unknown	Fs	ignore::walk::WalkParallel::run
 ignore	ignore::WalkParallel::visit	Fs,Unknown	Fs	ignore::walk::WalkParallel::visit
 ignore	ignore::gitignore::Gitignore::global	Env,Fs,Log	Fs	ignore::gitignore::Gitignore::global
@@ -1165,10 +1180,12 @@ isahc	isahc::put_async	Clock,Log,Net,Unknown	Net	isahc::put_async
 isahc	isahc::send	Clock,Log,Net,Unknown	Net	isahc::send
 isahc	isahc::send_async	Clock,Log,Net,Unknown	Net	isahc::send_async
 jiff	jiff::BrokenDownTime::to_zoned	Log,Unknown	Fs	jiff::fmt::strtime::BrokenDownTime::to_zoned
+jiff	jiff::BrokenDownTime::to_zoned_datetime	Log,Unknown	Fs	jiff::fmt::strtime::BrokenDownTime::to_zoned_datetime
 jiff	jiff::Date::in_tz	Log,Unknown	Fs	jiff::civil::date::Date::in_tz
 jiff	jiff::DateTime::in_tz	Log,Unknown	Fs	jiff::civil::datetime::DateTime::in_tz
 jiff	jiff::DateTimeParser::parse_time_zone	Log,Unknown	Fs	jiff::fmt::temporal::DateTimeParser::parse_time_zone
 jiff	jiff::DateTimeParser::parse_zoned	Log,Unknown	Fs	jiff::fmt::temporal::DateTimeParser::parse_zoned
+jiff	jiff::DateTimeParser::parse_zoned_datetime	Log,Unknown	Fs	jiff::fmt::temporal::DateTimeParser::parse_zoned_datetime
 jiff	jiff::Pieces::to_time_zone	Log,Unknown	Fs	jiff::fmt::temporal::pieces::Pieces::to_time_zone
 jiff	jiff::TimeZone::get	Log,Unknown	Fs	jiff::tz::timezone::TimeZone::get
 jiff	jiff::TimeZone::system	Clock,Env,Fs,Log,Unknown	Fs	jiff::tz::timezone::TimeZone::system
@@ -1182,6 +1199,7 @@ jiff	jiff::Timestamp::in_tz	Log,Unknown	Fs	jiff::timestamp::Timestamp::in_tz
 jiff	jiff::Timestamp::now	Clock,Unknown	Clock	jiff::timestamp::Timestamp::now
 jiff	jiff::Zoned::in_tz	Log,Unknown	Fs	jiff::zoned::Zoned::in_tz
 jiff	jiff::Zoned::now	Clock,Env,Fs,Log,Unknown	Clock	jiff::zoned::Zoned::now
+jiff	jiff::ZonedDateTime::in_tz	Log,Unknown	Fs	jiff::zoned::ZonedDateTime::in_tz
 jiff	jiff::db	Log,Unknown	Fs	jiff::tz::db::db
 lettre	lettre::AsyncFileTransport::read	Fs	Fs	lettre::transport::file::AsyncFileTransport::read
 lettre	lettre::AsyncFileTransport::send_raw	Fs,Log	Fs	lettre::transport::file::AsyncFileTransport::send_raw
@@ -1283,6 +1301,7 @@ lapin	lapin::Connection::create_channel	Log	Net	lapin::connection::Connection::c
 lapin	lapin::Connection::update_secret	Log	Net	lapin::connection::Connection::update_secret
 lapin	lapin::ConnectionBuilder::connect	Clock,Log,Unknown	Net	lapin::connection_builder::ConnectionBuilder::connect
 lscolors	lscolors::LsColors::from_env	Env	Env	lscolors::LsColors::from_env
+lscolors	lscolors::LsColors::style_for_path	Fs,Unknown	Fs	lscolors::LsColors::style_for_path
 mongodb	mongodb::AbortTransaction::execute	Clock,Env,Rand,Unknown	Db	mongodb::client::session::action::AbortTransaction::execute
 mongodb	mongodb::BulkWrite::execute	Clock,Env,Rand,Unknown	Db	mongodb::action::bulk_write::BulkWrite::execute
 mongodb	mongodb::Callback::human	Clock	Clock	mongodb::client::auth::oidc::Callback::human
@@ -1388,6 +1407,12 @@ native_tls_crate	native_tls_crate::Identity::from_pkcs12	Fs,Unknown	Fs	native_tl
 native_tls_crate	native_tls_crate::Identity::from_pkcs8	Fs,Unknown	Fs	native_tls_crate::imp::security_framework::Identity::from_pkcs8
 native_tls_crate	native_tls_crate::TlsConnector::new	Fs,Log,Unknown	Fs	native_tls_crate::imp::openssl::TlsConnector::new
 notify	notify::FsEventWatcher::unwatch	Fs,Unknown	Fs	notify::fsevent::FsEventWatcher::unwatch
+notify	notify::FsEventWatcher::update_paths	Env,Fs,Log,Unknown	Fs	notify::fsevent::FsEventWatcher::update_paths
+notify	notify::FsEventWatcher::watch_with	Fs,Log,Unknown	Fs	notify::fsevent::FsEventWatcher::watch_with
+notify	notify::INotifyWatcher::update_paths	Env	Fs	notify::inotify::INotifyWatcher::update_paths
+notify	notify::INotifyWatcher::watch_with	Env	Fs	notify::inotify::INotifyWatcher::watch_with
+notify	notify::KqueueWatcher::watch_with	Env	Fs	notify::kqueue::KqueueWatcher::watch_with
+notify	notify::PollWatcher::watch_with	Env,Unknown	Fs	notify::poll::PollWatcher::watch_with
 notify	notify::PollWatcher::with_initial_scan	Clock,Unknown	Clock	notify::poll::PollWatcher::with_initial_scan
 notify	notify::FsEventWatcher::watch	Fs,Unknown	Fs	notify::fsevent::FsEventWatcher::watch
 notify	notify::INotifyWatcher::unwatch	Env	Fs	notify::inotify::INotifyWatcher::unwatch
@@ -1400,6 +1425,7 @@ notify	notify::ReadDirectoryChangesWatcher::create	Fs	Fs	notify::windows::ReadDi
 notify	notify::ReadDirectoryChangesWatcher::new	Fs	Fs	notify::windows::ReadDirectoryChangesWatcher::new
 notify	notify::ReadDirectoryChangesWatcher::unwatch	Env	Fs	notify::windows::ReadDirectoryChangesWatcher::unwatch
 notify	notify::ReadDirectoryChangesWatcher::watch	Env	Fs	notify::windows::ReadDirectoryChangesWatcher::watch
+notify	notify::ReadDirectoryChangesWatcher::watch_with	Env	Fs	notify::windows::ReadDirectoryChangesWatcher::watch_with
 notify	notify::recommended_watcher	Clock,Fs,Unknown	Fs	notify::recommended_watcher
 portable_pty	portable_pty::CommandBuilder::new	Env,Fs,Log	Env+Fs	portable_pty::cmdbuilder::CommandBuilder::new
 password_hash	password_hash::generate_salt	Rand	Rand	password_hash::generate_salt
@@ -1548,6 +1574,7 @@ redis	redis::Client::get_multiplexed_async_connection_with_config	Clock,Log,Net,
 redis	redis::Client::is_open	Clock,Fs,Ipc,Net,Unknown	Db	redis::client::Client::is_open
 redis	redis::Client::req_packed_command	Clock,Fs,Ipc,Net,Unknown	Db	redis::client::Client::req_packed_command
 redis	redis::Client::req_packed_commands	Clock,Fs,Ipc,Net,Unknown	Db	redis::client::Client::req_packed_commands
+redis	redis::ClusterClient::get_async_generic_connection	Log,Unknown	Db	redis::cluster_handling::client::ClusterClient::get_async_generic_connection
 redis	redis::ClusterConnection::req_command	Clock,Fs,Ipc,Log,Net,Rand,Unknown	Db	redis::cluster_handling::sync_connection::ClusterConnection::req_command
 redis	redis::ClusterConnection::req_packed_command	Clock,Fs,Ipc,Log,Net,Rand,Unknown	Db	redis::cluster_handling::sync_connection::ClusterConnection::req_packed_command
 redis	redis::ClusterConnection::req_packed_commands	Clock,Fs,Ipc,Log,Net,Rand,Unknown	Db	redis::cluster_handling::sync_connection::ClusterConnection::req_packed_commands
@@ -1647,6 +1674,7 @@ rusqlite	rusqlite::Connection::deserialize_bytes	Db,Unknown	Db	rusqlite::seriali
 rusqlite	rusqlite::Connection::deserialize_read_exact	Db,Unknown	Db	rusqlite::serialize::Connection::deserialize_read_exact
 rusqlite	rusqlite::Connection::execute	Db,Unknown	Db	rusqlite::Connection::execute
 rusqlite	rusqlite::Connection::execute_batch	Db,Unknown	Db	rusqlite::Connection::execute_batch
+rusqlite	rusqlite::Connection::file_control	Db,Unknown	Db	rusqlite::Connection::file_control
 rusqlite	rusqlite::Connection::load_extension	Db	Db	rusqlite::Connection::load_extension
 rusqlite	rusqlite::Connection::load_extension_disable	Db	Db	rusqlite::Connection::load_extension_disable
 rusqlite	rusqlite::Connection::load_extension_enable	Db	Db	rusqlite::Connection::load_extension_enable
@@ -1673,6 +1701,7 @@ rusqlite	rusqlite::Connection::serialize	Db,Unknown	Db	rusqlite::serialize::Conn
 rusqlite	rusqlite::Connection::transaction	Db,Unknown	Db	rusqlite::transaction::Connection::transaction
 rusqlite	rusqlite::Connection::transaction_with_behavior	Db,Unknown	Db	rusqlite::transaction::Connection::transaction_with_behavior
 rusqlite	rusqlite::Connection::unchecked_transaction	Db,Unknown	Db	rusqlite::transaction::Connection::unchecked_transaction
+rusqlite	rusqlite::Connection::wal_checkpoint_v2	Db,Unknown	Db	rusqlite::wal::Connection::wal_checkpoint_v2
 rusqlite	rusqlite::InnerConnection::prepare	Db,Unknown	Db	rusqlite::inner_connection::InnerConnection::prepare
 rusqlite	rusqlite::LoadExtensionGuard::new	Db	Db	rusqlite::load_extension_guard::LoadExtensionGuard::new
 rusqlite	rusqlite::Rows::next	Db	Db	rusqlite::row::Rows::next
@@ -1916,6 +1945,7 @@ sqlx_core	sqlx_core::logger::QueryLogger::new	Clock	Clock	sqlx_core::logger::Que
 sqlx_core	sqlx_core::migrate::source::resolve_blocking	Fs	Fs	sqlx_core::migrate::source::resolve_blocking
 sqlx_core	sqlx_core::migrate::source::resolve_blocking_with_config	Fs	Fs	sqlx_core::migrate::source::resolve_blocking_with_config
 sqlx_core	sqlx_core::net::socket::connect_tcp	Net,Unknown	Net	sqlx_core::net::socket::connect_tcp
+sqlx_core	sqlx_core::net::tls::connector	Fs,Log,Unknown	Fs	sqlx_core::net::tls::connector
 sqlx_core	sqlx_core::net::tls::handshake	Fs,Log,Net,Unknown	Net	sqlx_core::net::tls::handshake
 sqlx_core	sqlx_core::Migrator::run	Clock,Log,Unknown	Db	sqlx_core::migrate::migrator::Migrator::run
 sqlx_core	sqlx_core::Migrator::run_to	Clock,Log,Unknown	Db	sqlx_core::migrate::migrator::Migrator::run_to
